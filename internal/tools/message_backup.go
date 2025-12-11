@@ -136,7 +136,7 @@ func NewMessageBackupHandler(client *tg.Client, allowedPaths []string) *MessageB
 // Tool returns the MCP tool definition
 func (h *MessageBackupHandler) Tool() mcp.Tool {
 	return mcp.NewTool("BackupMessages",
-		mcp.WithDescription("Backup messages from a chat to a text file. Messages are saved with ID, timestamp, sender name, and reply info. If filepath is not specified, generates automatic filename like 'ChatName-2024-01-15.txt' in default backup directory."),
+		mcp.WithDescription("Backup messages from a chat to a text file. Messages are saved with timestamp, sender name, ID, and reply info. If filepath is not specified, generates automatic filename like 'ChatName-2024-01-15.txt' in default backup directory. All filter parameters are optional - if none specified, backs up last 1000 messages."),
 		mcp.WithNumber("chat_id",
 			mcp.Description("The ID of the chat to backup messages from"),
 			mcp.Required(),
@@ -144,13 +144,34 @@ func (h *MessageBackupHandler) Tool() mcp.Tool {
 		mcp.WithString("filepath",
 			mcp.Description("Path to the file where messages will be saved (optional, auto-generated if not provided)"),
 		),
-		mcp.WithNumber("limit",
-			mcp.Description("Maximum number of messages to backup (default: 100)"),
+		mcp.WithNumber("count",
+			mcp.Description("Maximum number of messages to backup (optional, default: 1000 if no filters specified)"),
 		),
-		mcp.WithNumber("offset_id",
-			mcp.Description("Message ID from which to start fetching (exclusive, for pagination)"),
+		mcp.WithString("from",
+			mcp.Description("Start date - backup messages from this date (optional, format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)"),
+		),
+		mcp.WithString("to",
+			mcp.Description("End date - backup messages until this date (optional, format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)"),
 		),
 	)
+}
+
+// parseDate parses a date string in format YYYY-MM-DD or YYYY-MM-DD HH:MM:SS
+func parseDate(s string) (time.Time, error) {
+	if s == "" {
+		return time.Time{}, nil
+	}
+	// Try full datetime format first
+	t, err := time.ParseInLocation("2006-01-02 15:04:05", s, time.Local)
+	if err == nil {
+		return t, nil
+	}
+	// Try date only format
+	t, err = time.ParseInLocation("2006-01-02", s, time.Local)
+	if err == nil {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("invalid date format %q, expected YYYY-MM-DD or YYYY-MM-DD HH:MM:SS", s)
 }
 
 // Handle processes the BackupMessages tool request
@@ -161,8 +182,24 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 	}
 
 	targetPath := mcp.ParseString(request, "filepath", "")
-	limit := mcp.ParseInt(request, "limit", 100)
-	offsetID := mcp.ParseInt(request, "offset_id", 0)
+	count := mcp.ParseInt(request, "count", 0)
+	fromStr := mcp.ParseString(request, "from", "")
+	toStr := mcp.ParseString(request, "to", "")
+
+	// Parse dates
+	fromDate, err := parseDate(fromStr)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	toDate, err := parseDate(toStr)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	// Default to 1000 messages if no filters specified
+	if count == 0 && fromStr == "" && toStr == "" {
+		count = 1000
+	}
 
 	// Resolve the peer
 	peer, err := tgclient.ResolvePeer(ctx, h.client, chatID)
@@ -182,67 +219,119 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	// Get message history
-	historyRequest := &tg.MessagesGetHistoryRequest{
-		Peer:     peer,
-		Limit:    limit,
-		OffsetID: offsetID,
-	}
-
-	history, err := h.client.MessagesGetHistory(ctx, historyRequest)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to get messages: %v", err)), nil
-	}
-
-	// Extract messages and users
-	var messages []tg.MessageClass
-	var users []tg.UserClass
-	var chats []tg.ChatClass
-
-	switch h := history.(type) {
-	case *tg.MessagesMessages:
-		messages = h.Messages
-		users = h.Users
-		chats = h.Chats
-	case *tg.MessagesMessagesSlice:
-		messages = h.Messages
-		users = h.Users
-		chats = h.Chats
-	case *tg.MessagesChannelMessages:
-		messages = h.Messages
-		users = h.Users
-		chats = h.Chats
-	default:
-		return mcp.NewToolResultError("Unexpected response type"), nil
-	}
-
-	// Build user/chat maps for name lookup
+	// Fetch messages with pagination
+	const batchSize = 100
+	var allMessages []*tg.Message
 	userMap := make(map[int64]string)
-	for _, u := range users {
-		if user, ok := u.(*tg.User); ok {
-			name := tgclient.UserName(user)
-			userMap[user.ID] = name
-		}
+	chatMap := make(map[int64]string)
+
+	offsetID := 0
+	offsetDate := 0
+	if !toDate.IsZero() {
+		// Add 1 day to toDate to include messages from that day
+		offsetDate = int(toDate.Add(24 * time.Hour).Unix())
 	}
 
-	chatMap := make(map[int64]string)
-	for _, c := range chats {
-		switch chat := c.(type) {
-		case *tg.Chat:
-			chatMap[chat.ID] = chat.Title
-		case *tg.Channel:
-			chatMap[chat.ID] = chat.Title
+	for {
+		historyRequest := &tg.MessagesGetHistoryRequest{
+			Peer:       peer,
+			Limit:      batchSize,
+			OffsetID:   offsetID,
+			OffsetDate: offsetDate,
+		}
+
+		history, err := h.client.MessagesGetHistory(ctx, historyRequest)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to get messages: %v", err)), nil
+		}
+
+		var messages []tg.MessageClass
+		var users []tg.UserClass
+		var chats []tg.ChatClass
+
+		switch hist := history.(type) {
+		case *tg.MessagesMessages:
+			messages = hist.Messages
+			users = hist.Users
+			chats = hist.Chats
+		case *tg.MessagesMessagesSlice:
+			messages = hist.Messages
+			users = hist.Users
+			chats = hist.Chats
+		case *tg.MessagesChannelMessages:
+			messages = hist.Messages
+			users = hist.Users
+			chats = hist.Chats
+		default:
+			return mcp.NewToolResultError("Unexpected response type"), nil
+		}
+
+		if len(messages) == 0 {
+			break
+		}
+
+		// Build user/chat maps
+		for _, u := range users {
+			if user, ok := u.(*tg.User); ok {
+				userMap[user.ID] = tgclient.UserName(user)
+			}
+		}
+		for _, c := range chats {
+			switch chat := c.(type) {
+			case *tg.Chat:
+				chatMap[chat.ID] = chat.Title
+			case *tg.Channel:
+				chatMap[chat.ID] = chat.Title
+			}
+		}
+
+		// Process messages
+		reachedFromDate := false
+		for _, msgClass := range messages {
+			msg, ok := msgClass.(*tg.Message)
+			if !ok {
+				continue
+			}
+
+			msgTime := time.Unix(int64(msg.Date), 0)
+
+			// Check if we've gone before fromDate
+			if !fromDate.IsZero() && msgTime.Before(fromDate) {
+				reachedFromDate = true
+				break
+			}
+
+			allMessages = append(allMessages, msg)
+
+			// Check count limit
+			if count > 0 && len(allMessages) >= count {
+				break
+			}
+		}
+
+		// Stop conditions
+		if reachedFromDate {
+			break
+		}
+		if count > 0 && len(allMessages) >= count {
+			break
+		}
+		if len(messages) < batchSize {
+			break
+		}
+
+		// Get the last message ID for next iteration
+		if lastMsg, ok := messages[len(messages)-1].(*tg.Message); ok {
+			offsetID = lastMsg.ID
+			offsetDate = 0 // Reset after first batch
+		} else {
+			break
 		}
 	}
 
 	// Format messages for backup
 	var lines []string
-	for _, msgClass := range messages {
-		msg, ok := msgClass.(*tg.Message)
-		if !ok {
-			continue
-		}
-
+	for _, msg := range allMessages {
 		// Skip empty messages (could be service messages)
 		if msg.Message == "" {
 			continue
@@ -299,16 +388,14 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 
 	// Write to file
 	content := strings.Join(lines, "\n")
-	err = os.WriteFile(targetPath, []byte(content), 0o600)
-	if err != nil {
+	if err := os.WriteFile(targetPath, []byte(content), 0o600); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to write file: %v", err)), nil
 	}
 
 	// Get absolute path for clear output
 	absPath, _ := filepath.Abs(targetPath)
 
-	msgCount := len(messages)
-	result := fmt.Sprintf("Backup completed!\nMessages saved: %d\nFile: %s", msgCount, absPath)
+	result := fmt.Sprintf("Backup completed!\nMessages saved: %d\nFile: %s", len(allMessages), absPath)
 
 	return mcp.NewToolResultText(result), nil
 }
