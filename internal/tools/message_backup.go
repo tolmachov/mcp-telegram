@@ -270,8 +270,8 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 			}
 		}
 
-		// Build header
-		header := fmt.Sprintf("[id=%d]", msg.ID)
+		// Build header: timestamp, sender, then metadata
+		header := fmt.Sprintf("[%s] [%s] [id=%d]", timestamp, senderName, msg.ID)
 
 		if msg.ReplyTo != nil {
 			if reply, ok := msg.ReplyTo.(*tg.MessageReplyHeader); ok {
@@ -280,8 +280,6 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 				}
 			}
 		}
-
-		header += fmt.Sprintf(" [%s] [%s]", timestamp, senderName)
 
 		// Add message
 		lines = append(lines, "-----")
