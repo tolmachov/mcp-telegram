@@ -1,6 +1,17 @@
+<div align="center">
+
 # mcp-telegram
 
-MCP (Model Context Protocol) server for Telegram integration. Allows AI assistants like Claude to interact with your Telegram account.
+**MCP server for Telegram — let AI assistants interact with your Telegram account**
+
+[![MCP Server](https://badge.mcpx.dev?type=server 'MCP Server')](https://github.com/punkpeye/awesome-mcp-servers)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/tolmachov/mcp-telegram)](https://go.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Go Report Card](https://goreportcard.com/badge/github.com/tolmachov/mcp-telegram)](https://goreportcard.com/report/github.com/tolmachov/mcp-telegram)
+
+</div>
+
+---
 
 ## Features
 
@@ -116,20 +127,44 @@ Add to `~/.claude/settings.json`:
 | `telegram://chat/{id}/info` | Chat details |
 | `telegram://chat/{id}/messages` | Chat messages |
 
+## Prompt Examples
+
+Here are some example prompts you can use with AI assistants:
+
+### Message Management
+- "Check for any unread important messages in my Telegram"
+- "Summarize all my unread Telegram messages"
+- "Read and analyze my unread messages, prepare draft responses where needed"
+- "Check non-critical unread messages and give me a brief overview"
+
+### Organization
+- "Analyze my Telegram dialogs and suggest a folder structure"
+- "Help me categorize my Telegram chats by importance"
+- "Find all work-related conversations and suggest how to organize them"
+
+### Communication
+- "Monitor specific chat for updates about [topic]"
+- "Draft a polite response to the last message in [chat]"
+- "Check if there are any unanswered questions in my chats"
+
+### Backup & Export
+- "Backup my conversation with [contact] to a file"
+- "Export the last week of messages from [group]"
+
 ## Chat Summarization
 
 The `SummarizeChat` tool supports multiple LLM providers:
 
-- **sampling** (default): Uses the MCP client's LLM - no additional setup required
-- **ollama**: Local LLM via [Ollama](https://ollama.ai)
+- **sampling** (experimental): Uses the MCP client's LLM via [MCP Sampling](https://modelcontextprotocol.io/docs/concepts/sampling). Only works with clients that support sampling: [VS Code](https://code.visualstudio.com/docs/copilot/chat/mcp-servers), [fast-agent](https://github.com/evalstate/fast-agent), [Continue](https://www.continue.dev). Does NOT work with Claude Desktop or Claude Code.
+- **ollama**: Local LLM via [Ollama](https://ollama.ai) - no API key required
 - **gemini**: Google Gemini API
 - **anthropic**: Anthropic Claude API
 
 Configure via environment variables:
 
 ```bash
-SUMMARIZE_PROVIDER=sampling  # or: ollama, gemini, anthropic
-SUMMARIZE_MODEL=             # provider-specific model name
+SUMMARIZE_PROVIDER=ollama  # or: sampling, gemini, anthropic
+SUMMARIZE_MODEL=           # provider-specific model name
 ```
 
 ## Commands
@@ -152,7 +187,7 @@ mcp-telegram logout
 | `TELEGRAM_API_ID` | Telegram API ID | Required |
 | `TELEGRAM_API_HASH` | Telegram API Hash | Required |
 | `TELEGRAM_ALLOWED_PATHS` | Allowed directories for backups | OS app data dir |
-| `SUMMARIZE_PROVIDER` | LLM provider for summarization | `sampling` |
+| `SUMMARIZE_PROVIDER` | LLM provider for summarization | `sampling` (experimental) |
 | `SUMMARIZE_MODEL` | Model name | Provider default |
 | `SUMMARIZE_BATCH_TOKENS` | Tokens per summarization batch | `8000` |
 | `OLLAMA_URL` | Ollama API URL | `http://localhost:11434` |
