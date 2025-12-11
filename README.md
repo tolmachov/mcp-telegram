@@ -7,7 +7,7 @@ MCP (Model Context Protocol) server for Telegram integration. Allows AI assistan
 - **Chat Management**: List, search, mute/unmute chats
 - **Messages**: Read, send, draft, schedule, and backup messages
 - **AI Summarization**: Summarize chat conversations using multiple LLM providers
-- **Secure**: Session stored in macOS Keychain (or encrypted file on Linux/Windows)
+- **Secure**: Session stored in macOS Keychain (file-based storage on Linux/Windows)
 
 ## Installation
 
