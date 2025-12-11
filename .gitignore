@@ -1,0 +1,22 @@
+# Environment files
+.env
+
+# Binary
+mcp-telegram
+mcp-telegram.exe
+
+# IDE
+.idea/
+.claude/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+*.test
+*.out
+coverage.html
