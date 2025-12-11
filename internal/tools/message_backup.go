@@ -11,6 +11,8 @@ import (
 
 	"github.com/gotd/td/tg"
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
+	"go.uber.org/ratelimit"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
@@ -71,13 +73,13 @@ func isPathAllowed(targetPath string, allowedPaths []string) error {
 		}
 		absAllowed = filepath.Clean(absAllowed)
 
-		// Check if target is within the allowed directory
+		// Check if the target is within the allowed directory
 		rel, err := filepath.Rel(absAllowed, absTarget)
 		if err != nil {
 			continue
 		}
 
-		// If rel doesn't start with "..", it's within the allowed directory
+		// If rel doesn't start with, "..", it's within the allowed directory
 		if !strings.HasPrefix(rel, "..") {
 			return nil
 		}
@@ -86,7 +88,7 @@ func isPathAllowed(targetPath string, allowedPaths []string) error {
 	return fmt.Errorf("path %q is not within allowed directories. Configure --allowed-paths or TELEGRAM_ALLOWED_PATHS", targetPath)
 }
 
-// getChatName returns the name of the chat based on peer type.
+// getChatName returns the name of the chat based on a peer type.
 func getChatName(ctx context.Context, raw *tg.Client, peer tg.InputPeerClass, chatID int64) string {
 	switch p := peer.(type) {
 	case *tg.InputPeerUser:
@@ -161,17 +163,160 @@ func parseDate(s string) (time.Time, error) {
 	if s == "" {
 		return time.Time{}, nil
 	}
-	// Try full datetime format first
+	// Try the full datetime format first
 	t, err := time.ParseInLocation("2006-01-02 15:04:05", s, time.Local)
 	if err == nil {
 		return t, nil
 	}
-	// Try date only format
+	// Try a date-only format
 	t, err = time.ParseInLocation("2006-01-02", s, time.Local)
 	if err == nil {
 		return t, nil
 	}
 	return time.Time{}, fmt.Errorf("invalid date format %q, expected YYYY-MM-DD or YYYY-MM-DD HH:MM:SS", s)
+}
+
+// backupProgress handles progress tracking and notifications for message backup
+type backupProgress struct {
+	ctx           context.Context
+	srv           *server.MCPServer
+	progressToken mcp.ProgressToken
+
+	// Progress mode
+	useDateProgress bool
+
+	// Date-based progress
+	totalSeconds    int64
+	endTime         time.Time
+	earliestMsgTime time.Time
+
+	// Count-based progress
+	messageCount int
+	countLimit   int
+
+	// Ticker for periodic notifications
+	ticker  *time.Ticker
+	done    chan struct{}
+	lastMsg string
+}
+
+func newBackupProgress(
+	ctx context.Context,
+	srv *server.MCPServer,
+	token mcp.ProgressToken,
+	fromDate, toDate time.Time,
+	countLimit int,
+) *backupProgress {
+	hasDateFilter := !fromDate.IsZero() || !toDate.IsZero()
+
+	bp := &backupProgress{
+		ctx:             ctx,
+		srv:             srv,
+		progressToken:   token,
+		countLimit:      countLimit,
+		useDateProgress: hasDateFilter && countLimit == 0,
+		done:            make(chan struct{}),
+	}
+
+	if bp.useDateProgress {
+		var startTime time.Time
+		if !fromDate.IsZero() {
+			startTime = fromDate
+		} else {
+			// If only "to" is specified, use Telegram launch date as start
+			startTime = time.Date(2013, 8, 14, 0, 0, 0, 0, time.Local)
+		}
+		if !toDate.IsZero() {
+			bp.endTime = toDate
+		} else {
+			bp.endTime = time.Now()
+		}
+		bp.totalSeconds = int64(bp.endTime.Sub(startTime).Seconds())
+		if bp.totalSeconds < 1 {
+			bp.totalSeconds = 1
+		}
+	}
+
+	return bp
+}
+
+func (bp *backupProgress) Start() {
+	bp.ticker = time.NewTicker(5 * time.Second)
+	go func() {
+		for {
+			select {
+			case <-bp.done:
+				return
+			case <-bp.ticker.C:
+				if bp.lastMsg != "" {
+					bp.Send(bp.lastMsg)
+				}
+			}
+		}
+	}()
+}
+
+func (bp *backupProgress) Stop() {
+	if bp.ticker != nil {
+		bp.ticker.Stop()
+	}
+	close(bp.done)
+}
+
+func (bp *backupProgress) SetMessage(msg string) {
+	bp.lastMsg = msg
+}
+
+func (bp *backupProgress) SetMessageCount(count int) {
+	bp.messageCount = count
+}
+
+func (bp *backupProgress) UpdateEarliestTime(t time.Time) {
+	if bp.earliestMsgTime.IsZero() || t.Before(bp.earliestMsgTime) {
+		bp.earliestMsgTime = t
+	}
+}
+
+func (bp *backupProgress) getProgress() (progress float64, total int) {
+	total = 100
+	if bp.useDateProgress {
+		if bp.earliestMsgTime.IsZero() {
+			progress = 0
+		} else {
+			coveredSeconds := int64(bp.endTime.Sub(bp.earliestMsgTime).Seconds())
+			if coveredSeconds < 0 {
+				coveredSeconds = 0
+			}
+			progress = float64(coveredSeconds) / float64(bp.totalSeconds) * 100
+			if progress > 100 {
+				progress = 100
+			}
+		}
+	} else {
+		if bp.countLimit > 0 {
+			progress = float64(bp.messageCount) / float64(bp.countLimit) * 100
+			if progress > 100 {
+				progress = 100
+			}
+		}
+	}
+	return
+}
+
+func (bp *backupProgress) Send(message string) {
+	if bp.srv == nil {
+		return
+	}
+	progress, total := bp.getProgress()
+	payload := map[string]any{
+		"progress": progress,
+		"total":    total,
+		"message":  message,
+	}
+	if bp.progressToken != nil {
+		payload["progressToken"] = bp.progressToken
+	}
+	_ = bp.srv.SendNotificationToClient(bp.ctx, "notifications/progress", payload)
 }
 
 // Handle processes the BackupMessages tool request
@@ -214,7 +359,7 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 		targetPath = filepath.Join(h.allowedPaths[0], filename)
 	}
 
-	// Validate path against allowed directories
+	// Validate a path against allowed directories
 	if err := isPathAllowed(targetPath, h.allowedPaths); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -232,7 +377,29 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 		offsetDate = int(toDate.Add(24 * time.Hour).Unix())
 	}
 
+	// Initialize progress tracker
+	var progressToken mcp.ProgressToken
+	if request.Params.Meta != nil {
+		progressToken = request.Params.Meta.ProgressToken
+	}
+	progress := newBackupProgress(
+		ctx,
+		server.ServerFromContext(ctx),
+		progressToken,
+		fromDate, toDate,
+		count,
+	)
+	progress.Start()
+	defer progress.Stop()
+
+	batchNum := 0
+
+	limiter := ratelimit.New(1)
+
 	for {
+		batchNum++
+		progress.SetMessage(fmt.Sprintf("Fetching messages (batch %d, %d messages so far)...", batchNum, len(allMessages)))
+
 		historyRequest := &tg.MessagesGetHistoryRequest{
 			Peer:       peer,
 			Limit:      batchSize,
@@ -240,6 +407,7 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 			OffsetDate: offsetDate,
 		}
 
+		limiter.Take()
 		history, err := h.client.MessagesGetHistory(ctx, historyRequest)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to get messages: %v", err)), nil
@@ -267,6 +435,7 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 		}
 
 		if len(messages) == 0 {
+			progress.Send(fmt.Sprintf("No more messages in chat, collected %d messages", len(allMessages)))
 			break
 		}
 
@@ -295,6 +464,9 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 
 			msgTime := time.Unix(int64(msg.Date), 0)
 
+			// Update the earliest message time for progress calculation
+			progress.UpdateEarliestTime(msgTime)
+
 			// Check if we've gone before fromDate
 			if !fromDate.IsZero() && msgTime.Before(fromDate) {
 				reachedFromDate = true
@@ -309,22 +481,29 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 			}
 		}
 
+		// Update message count for progress
+		progress.SetMessageCount(len(allMessages))
+
 		// Stop conditions
 		if reachedFromDate {
+			progress.Send(fmt.Sprintf("Reached start date filter, collected %d messages", len(allMessages)))
 			break
 		}
 		if count > 0 && len(allMessages) >= count {
+			progress.Send(fmt.Sprintf("Reached count limit (%d messages)", count))
 			break
 		}
 		if len(messages) < batchSize {
+			progress.Send(fmt.Sprintf("Reached end of chat history, collected %d messages", len(allMessages)))
 			break
 		}
 
-		// Get the last message ID for next iteration
+		// Get the last message ID for the next iteration
 		if lastMsg, ok := messages[len(messages)-1].(*tg.Message); ok {
 			offsetID = lastMsg.ID
-			offsetDate = 0 // Reset after first batch
+			offsetDate = 0 // Reset after the first batch
 		} else {
+			progress.Send(fmt.Sprintf("Iteration stopped: no valid last message, collected %d messages", len(allMessages)))
 			break
 		}
 	}
@@ -370,7 +549,7 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 			}
 		}
 
-		// Add message
+		// Add a message
 		lines = append(lines, "-----")
 		lines = append(lines, header)
 		lines = append(lines, msg.Message)
@@ -386,13 +565,13 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to create directory: %v", err)), nil
 	}
 
-	// Write to file
+	// Write to a file
 	content := strings.Join(lines, "\n")
 	if err := os.WriteFile(targetPath, []byte(content), 0o600); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to write file: %v", err)), nil
 	}
 
-	// Get absolute path for clear output
+	// Get an absolute path for clear output
 	absPath, _ := filepath.Abs(targetPath)
 
 	result := fmt.Sprintf("Backup completed!\nMessages saved: %d\nFile: %s", len(allMessages), absPath)
