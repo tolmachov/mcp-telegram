@@ -59,6 +59,10 @@ type anthropicError struct {
 	Message string `json:"message"`
 }
 
+func (e *anthropicError) Error() string {
+	return fmt.Sprintf("%s (%s)", e.Message, e.Type)
+}
+
 // Summarize sends a prompt to Anthropic and returns the response.
 func (p *AnthropicProvider) Summarize(ctx context.Context, prompt string) (string, error) {
 	reqBody := anthropicRequest{
@@ -103,7 +107,7 @@ func (p *AnthropicProvider) Summarize(ctx context.Context, prompt string) (strin
 	}
 
 	if anthropicResp.Error != nil {
-		return "", fmt.Errorf("anthropic error: %s (%s)", anthropicResp.Error.Message, anthropicResp.Error.Type)
+		return "", fmt.Errorf("anthropic: %w", anthropicResp.Error)
 	}
 
 	if len(anthropicResp.Content) == 0 {
