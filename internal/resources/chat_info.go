@@ -4,12 +4,30 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/gotd/td/tg"
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
+
+// parseChatIDFromURI extracts the chat ID from a telegram://chat/{chat_id} URI.
+func parseChatIDFromURI(uri string) (int64, error) {
+	uri = strings.TrimPrefix(uri, "telegram://chat/")
+	if idx := strings.Index(uri, "/"); idx != -1 {
+		uri = uri[:idx]
+	}
+	if idx := strings.Index(uri, "?"); idx != -1 {
+		uri = uri[:idx]
+	}
+	chatID, err := strconv.ParseInt(uri, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parsing chat_id: %w", err)
+	}
+	return chatID, nil
+}
 
 // ChatInfoHandler handles the telegram://chat/{chat_id} resource template
 type ChatInfoHandler struct {

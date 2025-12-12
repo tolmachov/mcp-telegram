@@ -47,7 +47,7 @@ func GetChats(ctx context.Context, client *tg.Client, onProgress ProgressFunc) (
 			id = p.UserID
 			chatType = "user"
 			if user, ok := users[p.UserID]; ok {
-				name = tgclient.UserDisplayName(user)
+				name = tgclient.UserName(user)
 				username = user.Username
 				if user.Bot {
 					chatType = "bot"

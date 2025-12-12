@@ -31,29 +31,29 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 				Name:  "run",
 				Usage: "Run the MCP server",
 				Flags: []cli.Flag{
-					apiIDFlag,
-					apiHashFlag,
-					allowedPathsFlag,
-					summarizeProviderFlag,
-					summarizeModelFlag,
-					ollamaURLFlag,
-					geminiAPIKeyFlag,
-					anthropicAPIKeyFlag,
-					summarizeBatchTokensFlag,
+					apiIDFlag(),
+					apiHashFlag(),
+					allowedPathsFlag(),
+					summarizeProviderFlag(),
+					summarizeModelFlag(),
+					ollamaURLFlag(),
+					geminiAPIKeyFlag(),
+					anthropicAPIKeyFlag(),
+					summarizeBatchTokensFlag(),
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					cfg := &tgclient.Config{
-						APIID:   cmd.Int(apiIDFlag.Name),
-						APIHash: cmd.String(apiHashFlag.Name),
+						APIID:   cmd.Int(flagAPIID),
+						APIHash: cmd.String(flagAPIHash),
 					}
-					allowedPaths := cmd.StringSlice(allowedPathsFlag.Name)
+					allowedPaths := cmd.StringSlice(flagAllowedPaths)
 					summarizeCfg := summarize.Config{
-						Provider:        summarize.ProviderName(cmd.String(summarizeProviderFlag.Name)),
-						Model:           cmd.String(summarizeModelFlag.Name),
-						OllamaURL:       cmd.String(ollamaURLFlag.Name),
-						GeminiAPIKey:    cmd.String(geminiAPIKeyFlag.Name),
-						AnthropicAPIKey: cmd.String(anthropicAPIKeyFlag.Name),
-						BatchTokens:     cmd.Int(summarizeBatchTokensFlag.Name),
+						Provider:        summarize.ProviderName(cmd.String(flagSummarizeProvider)),
+						Model:           cmd.String(flagSummarizeModel),
+						OllamaURL:       cmd.String(flagOllamaURL),
+						GeminiAPIKey:    cmd.String(flagGeminiAPIKey),
+						AnthropicAPIKey: cmd.String(flagAnthropicAPIKey),
+						BatchTokens:     cmd.Int(flagSummarizeBatchTokens),
 					}
 					srv, err := server.New(cfg, Version, allowedPaths, summarizeCfg, cmd.Root().Reader, cmd.Root().Writer, cmd.Root().ErrWriter)
 					if err != nil {
@@ -66,18 +66,18 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 				Name:  "login",
 				Usage: "Login to Telegram",
 				Flags: []cli.Flag{
-					apiIDFlag,
-					apiHashFlag,
-					phoneFlag,
+					apiIDFlag(),
+					apiHashFlag(),
+					phoneFlag(),
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
-					phone := cmd.String(phoneFlag.Name)
+					phone := cmd.String(flagPhone)
 					if phone == "" {
 						return fmt.Errorf("phone number is required")
 					}
 					cfg := &tgclient.Config{
-						APIID:   cmd.Int(apiIDFlag.Name),
-						APIHash: cmd.String(apiHashFlag.Name),
+						APIID:   cmd.Int(flagAPIID),
+						APIHash: cmd.String(flagAPIHash),
 					}
 					return tgclient.Login(ctx, cfg, phone)
 				},
@@ -86,13 +86,13 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 				Name:  "logout",
 				Usage: "Logout from Telegram",
 				Flags: []cli.Flag{
-					apiIDFlag,
-					apiHashFlag,
+					apiIDFlag(),
+					apiHashFlag(),
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					cfg := &tgclient.Config{
-						APIID:   cmd.Int(apiIDFlag.Name),
-						APIHash: cmd.String(apiHashFlag.Name),
+						APIID:   cmd.Int(flagAPIID),
+						APIHash: cmd.String(flagAPIHash),
 					}
 					return tgclient.Logout(ctx, cfg)
 				},

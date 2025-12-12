@@ -5,26 +5,26 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/gotd/td/tg"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/tolmachov/mcp-telegram/internal/messages"
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
 )
 
 // ChatSummarizeHandler handles the SummarizeChat tool
 type ChatSummarizeHandler struct {
-	client    *tg.Client
-	mcpServer *server.MCPServer
-	config    summarize.Config
+	msgProvider *messages.Provider
+	mcpServer   *server.MCPServer
+	config      summarize.Config
 }
 
 // NewChatSummarizeHandler creates a new ChatSummarizeHandler
-func NewChatSummarizeHandler(client *tg.Client, mcpServer *server.MCPServer, config summarize.Config) *ChatSummarizeHandler {
+func NewChatSummarizeHandler(msgProvider *messages.Provider, mcpServer *server.MCPServer, config summarize.Config) *ChatSummarizeHandler {
 	return &ChatSummarizeHandler{
-		client:    client,
-		mcpServer: mcpServer,
-		config:    config,
+		msgProvider: msgProvider,
+		mcpServer:   mcpServer,
+		config:      config,
 	}
 }
 
@@ -69,7 +69,7 @@ func (h *ChatSummarizeHandler) Handle(ctx context.Context, request mcp.CallToolR
 	// Create a provider based on configuration
 	provider := h.createProvider(ctx)
 
-	summarizer := summarize.NewSummarizer(provider, h.client, h.config.BatchTokens)
+	summarizer := summarize.NewSummarizer(provider, h.msgProvider, h.config.BatchTokens)
 
 	// Progress callback using MCP notifications
 	onProgress := func(current, total int, message string) {

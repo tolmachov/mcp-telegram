@@ -31,7 +31,7 @@ func GetChatInfo(ctx context.Context, client *tg.Client, chatID int64) (*ChatFul
 		if err == nil {
 			for _, u := range fullUser.Users {
 				if user, ok := u.(*tg.User); ok && user.ID == p.UserID {
-					info.Name = tgclient.UserDisplayName(user)
+					info.Name = tgclient.UserName(user)
 					info.Username = user.Username
 					if user.Bot {
 						info.Type = "bot"

@@ -134,7 +134,7 @@ func (h *ChatsSearchHandler) searchGlobal(ctx context.Context, query string) ([]
 		results = append(results, tgdata.ChatInfo{
 			ID:       u.ID,
 			Type:     chatType,
-			Name:     tgclient.UserDisplayName(u),
+			Name:     tgclient.UserName(u),
 			Username: u.Username,
 		})
 	}

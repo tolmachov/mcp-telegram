@@ -8,20 +8,21 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gotd/td/tg"
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/tolmachov/mcp-telegram/internal/tgdata"
+	"github.com/tolmachov/mcp-telegram/internal/messages"
 )
 
 // ChatMessagesHandler handles the telegram://chat/{chat_id}/messages resource template
 type ChatMessagesHandler struct {
-	client *tg.Client
+	provider *messages.Provider
 }
 
 // NewChatMessagesHandler creates a new ChatMessagesHandler
-func NewChatMessagesHandler(client *tg.Client) *ChatMessagesHandler {
-	return &ChatMessagesHandler{client: client}
+func NewChatMessagesHandler(provider *messages.Provider) *ChatMessagesHandler {
+	return &ChatMessagesHandler{
+		provider: provider,
+	}
 }
 
 // Template returns the MCP resource template definition
@@ -41,7 +42,7 @@ func (h *ChatMessagesHandler) Handle(ctx context.Context, request mcp.ReadResour
 		return nil, fmt.Errorf("parsing URI: %w", err)
 	}
 
-	result, err := tgdata.GetMessages(ctx, h.client, chatID, opts)
+	result, err := h.provider.Fetch(ctx, chatID, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -60,24 +61,8 @@ func (h *ChatMessagesHandler) Handle(ctx context.Context, request mcp.ReadResour
 	}, nil
 }
 
-func parseChatIDFromURI(uri string) (int64, error) {
-	uri = strings.TrimPrefix(uri, "telegram://chat/")
-	if idx := strings.Index(uri, "?"); idx != -1 {
-		uri = uri[:idx]
-	}
-	parts := strings.Split(uri, "/")
-	if len(parts) == 0 {
-		return 0, fmt.Errorf("missing chat_id")
-	}
-	chatID, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("parsing chat_id: %w", err)
-	}
-	return chatID, nil
-}
-
-func parseMessagesURI(uri string) (chatID int64, opts tgdata.MessagesOptions, err error) {
-	opts = tgdata.DefaultMessagesOptions()
+func parseMessagesURI(uri string) (chatID int64, opts messages.FetchOptions, err error) {
+	opts = messages.DefaultFetchOptions()
 
 	parsed, err := url.Parse(uri)
 	if err != nil {

@@ -7,9 +7,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/gotd/td/tg"
-
-	"github.com/tolmachov/mcp-telegram/internal/tgdata"
+	"github.com/tolmachov/mcp-telegram/internal/messages"
 )
 
 const batchSize = 50
@@ -42,18 +40,18 @@ type ProgressCallback func(current, total int, message string)
 // Summarizer handles chat summarization using a Provider.
 type Summarizer struct {
 	provider    Provider
-	client      *tg.Client
+	msgProvider *messages.Provider
 	batchTokens int
 }
 
 // NewSummarizer creates a new Summarizer.
-func NewSummarizer(provider Provider, client *tg.Client, batchTokens int) *Summarizer {
+func NewSummarizer(provider Provider, msgProvider *messages.Provider, batchTokens int) *Summarizer {
 	if batchTokens <= 0 {
 		batchTokens = DefaultBatchTokens
 	}
 	return &Summarizer{
 		provider:    provider,
-		client:      client,
+		msgProvider: msgProvider,
 		batchTokens: batchTokens,
 	}
 }
@@ -61,17 +59,24 @@ func NewSummarizer(provider Provider, client *tg.Client, batchTokens int) *Summa
 // Summarize performs rolling summarization of a chat.
 func (s *Summarizer) Summarize(ctx context.Context, chatID int64, goal string, since time.Time, onProgress ProgressCallback) (string, error) {
 	// Fetch all messages since the given time
-	messages, err := s.fetchMessagesSince(ctx, chatID, since)
+	opts := messages.FetchOptions{
+		Limit:   batchSize,
+		MinDate: since,
+	}
+	result, err := s.msgProvider.FetchAll(ctx, chatID, opts, nil)
 	if err != nil {
 		return "", fmt.Errorf("fetching messages: %w", err)
 	}
 
-	if len(messages) == 0 {
+	if len(result.Messages) == 0 {
 		return "No messages found in the specified period.", nil
 	}
 
+	// Reverse to chronological order (FetchAll returns reverse chronological)
+	messages.Reverse(result.Messages)
+
 	// Filter text-only messages (ignore media-only)
-	textMessages := filterTextMessages(messages)
+	textMessages := messages.FilterTextOnly(result.Messages)
 	if len(textMessages) == 0 {
 		return "No text messages found in the specified period.", nil
 	}
@@ -87,7 +92,7 @@ func (s *Summarizer) Summarize(ctx context.Context, chatID int64, goal string, s
 			onProgress(i+1, totalBatches, fmt.Sprintf("Processing batch %d/%d", i+1, totalBatches))
 		}
 
-		formattedMessages := formatMessages(batch)
+		formattedMessages := messages.FormatBatchForSummary(batch)
 		prompt := fmt.Sprintf(promptTemplate, goal, runningSummary, formattedMessages)
 
 		summary, err := s.summarizeWithProgress(ctx, prompt, i+1, totalBatches, onProgress)
@@ -99,60 +104,6 @@ func (s *Summarizer) Summarize(ctx context.Context, chatID int64, goal string, s
 	}
 
 	return runningSummary, nil
-}
-
-func (s *Summarizer) fetchMessagesSince(ctx context.Context, chatID int64, since time.Time) ([]tgdata.MessageInfo, error) {
-	var allMessages []tgdata.MessageInfo
-	offsetID := 0
-
-	for {
-		opts := tgdata.MessagesOptions{
-			Limit:    batchSize,
-			OffsetID: offsetID,
-		}
-
-		result, err := tgdata.GetMessages(ctx, s.client, chatID, opts)
-		if err != nil {
-			return nil, err
-		}
-
-		if len(result.Messages) == 0 {
-			break
-		}
-
-		// Filter messages by date and collect
-		for _, msg := range result.Messages {
-			if msg.Date.Before(since) {
-				// Messages are in reverse chronological order, so we can stop here
-				goto done
-			}
-			allMessages = append(allMessages, msg)
-		}
-
-		if !result.HasMore {
-			break
-		}
-
-		offsetID = result.NextID
-	}
-
-done:
-	// Reverse to get chronological order
-	for i, j := 0, len(allMessages)-1; i < j; i, j = i+1, j-1 {
-		allMessages[i], allMessages[j] = allMessages[j], allMessages[i]
-	}
-
-	return allMessages, nil
-}
-
-func filterTextMessages(messages []tgdata.MessageInfo) []tgdata.MessageInfo {
-	var result []tgdata.MessageInfo
-	for _, msg := range messages {
-		if msg.Text != "" {
-			result = append(result, msg)
-		}
-	}
-	return result
 }
 
 // estimateTokens provides a rough token estimate for text.
@@ -173,20 +124,18 @@ func estimateTokens(text string) int {
 
 // splitIntoBatchesByTokens splits messages into batches where each batch
 // contains approximately maxTokens tokens.
-func splitIntoBatchesByTokens(messages []tgdata.MessageInfo, maxTokens int) [][]tgdata.MessageInfo {
-	if len(messages) == 0 {
+func splitIntoBatchesByTokens(msgs []messages.Message, maxTokens int) [][]messages.Message {
+	if len(msgs) == 0 {
 		return nil
 	}
 
-	var batches [][]tgdata.MessageInfo
-	var currentBatch []tgdata.MessageInfo
+	var batches [][]messages.Message
+	var currentBatch []messages.Message
 	currentTokens := 0
 
-	for _, msg := range messages {
+	for _, msg := range msgs {
 		// Estimate tokens for this message including formatting overhead
-		// Format: "[2006-01-02 15:04] <sender_id>: <text>\n"
-		msgText := fmt.Sprintf("[%s] %d: %s\n", msg.Date.Format("2006-01-02 15:04"), msg.SenderID, msg.Text)
-		msgTokens := estimateTokens(msgText)
+		msgTokens := estimateTokens(messages.FormatForSummary(msg))
 
 		// If adding this message exceeds the limit, start a new batch
 		// But always include at least one message per batch
@@ -206,15 +155,6 @@ func splitIntoBatchesByTokens(messages []tgdata.MessageInfo, maxTokens int) [][]
 	}
 
 	return batches
-}
-
-func formatMessages(messages []tgdata.MessageInfo) string {
-	var sb strings.Builder
-	for _, msg := range messages {
-		timestamp := msg.Date.Format("2006-01-02 15:04")
-		sb.WriteString(fmt.Sprintf("[%s] %d: %s\n", timestamp, msg.SenderID, msg.Text))
-	}
-	return sb.String()
 }
 
 const progressInterval = 5 * time.Second

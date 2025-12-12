@@ -8,6 +8,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/tolmachov/mcp-telegram/internal/messages"
 	"github.com/tolmachov/mcp-telegram/internal/resources"
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
@@ -66,22 +67,25 @@ func (s *Server) Run(ctx context.Context) error {
 				return fmt.Errorf("not authorized, please run 'login' command first")
 			}
 
+			// Create shared message provider with rate limiting
+			msgProvider := messages.NewProvider(client.API())
+
 			tools.RegisterTools(s.mcpServer, []tools.Handler{
 				tools.NewMeGetHandler(client.API()),
 				tools.NewChatsGetHandler(client.API()),
 				tools.NewChatsSearchHandler(client.API()),
 				tools.NewChatInfoGetHandler(client.API()),
-				tools.NewMessagesGetHandler(client.API()),
+				tools.NewMessagesGetHandler(msgProvider),
 				tools.NewMessageDraftHandler(client.API()),
 				tools.NewMessageSendHandler(client.API()),
 				tools.NewMessageScheduleHandler(client.API()),
 				tools.NewScheduledGetHandler(client.API()),
 				tools.NewScheduledDeleteHandler(client.API()),
 				tools.NewUsernameResolveHandler(client.API()),
-				tools.NewMessageBackupHandler(client.API(), s.allowedPaths),
+				tools.NewMessageBackupHandler(client.API(), msgProvider, s.allowedPaths),
 				tools.NewChatMuteHandler(client.API()),
 				tools.NewChatUnmuteHandler(client.API()),
-				tools.NewChatSummarizeHandler(client.API(), s.mcpServer, s.summarizeCfg),
+				tools.NewChatSummarizeHandler(msgProvider, s.mcpServer, s.summarizeCfg),
 			})
 
 			resources.RegisterResources(s.mcpServer,
@@ -90,7 +94,7 @@ func (s *Server) Run(ctx context.Context) error {
 					resources.NewChatsHandler(client.API()),
 				},
 				[]resources.ResourceTemplateHandler{
-					resources.NewChatMessagesHandler(client.API()),
+					resources.NewChatMessagesHandler(msgProvider),
 					resources.NewChatInfoHandler(client.API()),
 				},
 			)

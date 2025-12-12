@@ -7,15 +7,31 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gotd/td/tg"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"go.uber.org/ratelimit"
 
+	"github.com/tolmachov/mcp-telegram/internal/messages"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
+
+// backupProgress state constants
+const (
+	progressStateCreated uint32 = iota
+	progressStateRunning
+	progressStateStopped
+)
+
+// maxFilenameLength limits the base filename length to ensure compatibility
+// across filesystems (most support 255 bytes, but we keep it conservative).
+const maxFilenameLength = 100
+
+// telegramLaunchDate is the date when Telegram was launched (used as fallback for date range calculations).
+var telegramLaunchDate = time.Date(2013, 8, 14, 0, 0, 0, 0, time.UTC)
 
 // DefaultBackupDir returns the default backup directory based on the OS.
 func DefaultBackupDir() string {
@@ -48,8 +64,8 @@ func sanitizeFilename(name string) string {
 	// Trim spaces and dots from edges
 	result = strings.Trim(result, " .")
 	// Limit length
-	if len(result) > 100 {
-		result = result[:100]
+	if len(result) > maxFilenameLength {
+		result = result[:maxFilenameLength]
 	}
 	if result == "" {
 		result = "backup"
@@ -127,12 +143,17 @@ func getChatName(ctx context.Context, raw *tg.Client, peer tg.InputPeerClass, ch
 // MessageBackupHandler handles the BackupMessages tool
 type MessageBackupHandler struct {
 	client       *tg.Client
+	provider     *messages.Provider
 	allowedPaths []string
 }
 
 // NewMessageBackupHandler creates a new MessageBackupHandler
-func NewMessageBackupHandler(client *tg.Client, allowedPaths []string) *MessageBackupHandler {
-	return &MessageBackupHandler{client: client, allowedPaths: allowedPaths}
+func NewMessageBackupHandler(client *tg.Client, provider *messages.Provider, allowedPaths []string) *MessageBackupHandler {
+	return &MessageBackupHandler{
+		client:       client,
+		provider:     provider,
+		allowedPaths: allowedPaths,
+	}
 }
 
 // Tool returns the MCP tool definition
@@ -182,22 +203,22 @@ type backupProgress struct {
 	srv           *server.MCPServer
 	progressToken mcp.ProgressToken
 
-	// Progress mode
+	// Progress mode (immutable after creation)
 	useDateProgress bool
-
-	// Date-based progress
 	totalSeconds    int64
 	endTime         time.Time
-	earliestMsgTime time.Time
+	countLimit      int
 
-	// Count-based progress
-	messageCount int
-	countLimit   int
+	// Mutable state protected by mutex
+	mu              sync.Mutex
+	earliestMsgTime time.Time
+	messageCount    int
+	lastMsg         string
 
 	// Ticker for periodic notifications
-	ticker  *time.Ticker
-	done    chan struct{}
-	lastMsg string
+	ticker *time.Ticker
+	done   chan struct{}
+	state  atomic.Uint32 // progressStateCreated -> progressStateRunning -> progressStateStopped
 }
 
 func newBackupProgress(
@@ -224,7 +245,7 @@ func newBackupProgress(
 			startTime = fromDate
 		} else {
 			// If only "to" is specified, use Telegram launch date as start
-			startTime = time.Date(2013, 8, 14, 0, 0, 0, 0, time.Local)
+			startTime = telegramLaunchDate
 		}
 		if !toDate.IsZero() {
 			bp.endTime = toDate
@@ -241,6 +262,9 @@ func newBackupProgress(
 }
 
 func (bp *backupProgress) Start() {
+	if !bp.state.CompareAndSwap(progressStateCreated, progressStateRunning) {
+		panic("backupProgress already started")
+	}
 	bp.ticker = time.NewTicker(5 * time.Second)
 	go func() {
 		for {
@@ -248,8 +272,11 @@ func (bp *backupProgress) Start() {
 			case <-bp.done:
 				return
 			case <-bp.ticker.C:
-				if bp.lastMsg != "" {
-					bp.Send(bp.lastMsg)
+				bp.mu.Lock()
+				msg := bp.lastMsg
+				bp.mu.Unlock()
+				if msg != "" {
+					bp.Send(msg)
 				}
 			}
 		}
@@ -257,6 +284,9 @@ func (bp *backupProgress) Start() {
 }
 
 func (bp *backupProgress) Stop() {
+	if !bp.state.CompareAndSwap(progressStateRunning, progressStateStopped) {
+		panic("backupProgress is not running")
+	}
 	if bp.ticker != nil {
 		bp.ticker.Stop()
 	}
@@ -264,20 +294,29 @@ func (bp *backupProgress) Stop() {
 }
 
 func (bp *backupProgress) SetMessage(msg string) {
+	bp.mu.Lock()
 	bp.lastMsg = msg
+	bp.mu.Unlock()
 }
 
 func (bp *backupProgress) SetMessageCount(count int) {
+	bp.mu.Lock()
 	bp.messageCount = count
+	bp.mu.Unlock()
 }
 
 func (bp *backupProgress) UpdateEarliestTime(t time.Time) {
+	bp.mu.Lock()
 	if bp.earliestMsgTime.IsZero() || t.Before(bp.earliestMsgTime) {
 		bp.earliestMsgTime = t
 	}
+	bp.mu.Unlock()
 }
 
 func (bp *backupProgress) getProgress() (progress float64, total int) {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+
 	total = 100
 	if bp.useDateProgress {
 		if bp.earliestMsgTime.IsZero() {
@@ -346,7 +385,7 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 		count = 1000
 	}
 
-	// Resolve the peer
+	// Resolve the peer for chat name lookup
 	peer, err := tgclient.ResolvePeer(ctx, h.client, chatID)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to resolve peer: %v", err)), nil
@@ -354,6 +393,9 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 
 	// Generate filename if not provided
 	if targetPath == "" {
+		if len(h.allowedPaths) == 0 {
+			return mcp.NewToolResultError("no allowed paths configured for backup"), nil
+		}
 		chatName := getChatName(ctx, h.client, peer, chatID)
 		filename := fmt.Sprintf("%s-%s.txt", sanitizeFilename(chatName), time.Now().Format("2006-01-02_15-04-05"))
 		targetPath = filepath.Join(h.allowedPaths[0], filename)
@@ -362,19 +404,6 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 	// Validate a path against allowed directories
 	if err := isPathAllowed(targetPath, h.allowedPaths); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
-	}
-
-	// Fetch messages with pagination
-	const batchSize = 100
-	var allMessages []*tg.Message
-	userMap := make(map[int64]string)
-	chatMap := make(map[int64]string)
-
-	offsetID := 0
-	offsetDate := 0
-	if !toDate.IsZero() {
-		// Add 1 day to toDate to include messages from that day
-		offsetDate = int(toDate.Add(24 * time.Hour).Unix())
 	}
 
 	// Initialize progress tracker
@@ -392,172 +421,30 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 	progress.Start()
 	defer progress.Stop()
 
-	batchNum := 0
-
-	limiter := ratelimit.New(1)
-
-	for {
-		batchNum++
-		progress.SetMessage(fmt.Sprintf("Fetching messages (batch %d, %d messages so far)...", batchNum, len(allMessages)))
-
-		historyRequest := &tg.MessagesGetHistoryRequest{
-			Peer:       peer,
-			Limit:      batchSize,
-			OffsetID:   offsetID,
-			OffsetDate: offsetDate,
-		}
-
-		limiter.Take()
-		history, err := h.client.MessagesGetHistory(ctx, historyRequest)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to get messages: %v", err)), nil
-		}
-
-		var messages []tg.MessageClass
-		var users []tg.UserClass
-		var chats []tg.ChatClass
-
-		switch hist := history.(type) {
-		case *tg.MessagesMessages:
-			messages = hist.Messages
-			users = hist.Users
-			chats = hist.Chats
-		case *tg.MessagesMessagesSlice:
-			messages = hist.Messages
-			users = hist.Users
-			chats = hist.Chats
-		case *tg.MessagesChannelMessages:
-			messages = hist.Messages
-			users = hist.Users
-			chats = hist.Chats
-		default:
-			return mcp.NewToolResultError("Unexpected response type"), nil
-		}
-
-		if len(messages) == 0 {
-			progress.Send(fmt.Sprintf("No more messages in chat, collected %d messages", len(allMessages)))
-			break
-		}
-
-		// Build user/chat maps
-		for _, u := range users {
-			if user, ok := u.(*tg.User); ok {
-				userMap[user.ID] = tgclient.UserName(user)
-			}
-		}
-		for _, c := range chats {
-			switch chat := c.(type) {
-			case *tg.Chat:
-				chatMap[chat.ID] = chat.Title
-			case *tg.Channel:
-				chatMap[chat.ID] = chat.Title
-			}
-		}
-
-		// Process messages
-		reachedFromDate := false
-		for _, msgClass := range messages {
-			msg, ok := msgClass.(*tg.Message)
-			if !ok {
-				continue
-			}
-
-			msgTime := time.Unix(int64(msg.Date), 0)
-
-			// Update the earliest message time for progress calculation
-			progress.UpdateEarliestTime(msgTime)
-
-			// Check if we've gone before fromDate
-			if !fromDate.IsZero() && msgTime.Before(fromDate) {
-				reachedFromDate = true
-				break
-			}
-
-			allMessages = append(allMessages, msg)
-
-			// Check count limit
-			if count > 0 && len(allMessages) >= count {
-				break
-			}
-		}
-
-		// Update message count for progress
-		progress.SetMessageCount(len(allMessages))
-
-		// Stop conditions
-		if reachedFromDate {
-			progress.Send(fmt.Sprintf("Reached start date filter, collected %d messages", len(allMessages)))
-			break
-		}
-		if count > 0 && len(allMessages) >= count {
-			progress.Send(fmt.Sprintf("Reached count limit (%d messages)", count))
-			break
-		}
-		if len(messages) < batchSize {
-			progress.Send(fmt.Sprintf("Reached end of chat history, collected %d messages", len(allMessages)))
-			break
-		}
-
-		// Get the last message ID for the next iteration
-		if lastMsg, ok := messages[len(messages)-1].(*tg.Message); ok {
-			offsetID = lastMsg.ID
-			offsetDate = 0 // Reset after the first batch
-		} else {
-			progress.Send(fmt.Sprintf("Iteration stopped: no valid last message, collected %d messages", len(allMessages)))
-			break
-		}
+	// Configure fetch options
+	opts := messages.FetchOptions{
+		Limit:    100,
+		MinDate:  fromDate,
+		MaxDate:  toDate,
+		MaxCount: count,
 	}
 
-	// Format messages for backup
-	var lines []string
-	for _, msg := range allMessages {
-		// Skip empty messages (could be service messages)
-		if msg.Message == "" {
-			continue
+	// Fetch messages using the provider with a progress callback
+	result, err := h.provider.FetchAll(ctx, chatID, opts, func(batch int, collected int, earliestTime time.Time) {
+		progress.SetMessage(fmt.Sprintf("Fetching messages (batch %d, %d messages so far)...", batch, collected))
+		progress.SetMessageCount(collected)
+		if !earliestTime.IsZero() {
+			progress.UpdateEarliestTime(earliestTime)
 		}
-
-		// Format timestamp
-		timestamp := time.Unix(int64(msg.Date), 0).Format("2006-01-02 15:04:05")
-
-		// Get sender name
-		senderName := "Unknown"
-		if msg.FromID != nil {
-			switch from := msg.FromID.(type) {
-			case *tg.PeerUser:
-				if name, ok := userMap[from.UserID]; ok {
-					senderName = name
-				}
-			case *tg.PeerChannel:
-				if name, ok := chatMap[from.ChannelID]; ok {
-					senderName = name
-				}
-			case *tg.PeerChat:
-				if name, ok := chatMap[from.ChatID]; ok {
-					senderName = name
-				}
-			}
-		}
-
-		// Build header: timestamp, sender, then metadata
-		header := fmt.Sprintf("[%s] [%s] [id=%d]", timestamp, senderName, msg.ID)
-
-		if msg.ReplyTo != nil {
-			if reply, ok := msg.ReplyTo.(*tg.MessageReplyHeader); ok {
-				if reply.ReplyToMsgID != 0 {
-					header += fmt.Sprintf(" [reply_to=%d]", reply.ReplyToMsgID)
-				}
-			}
-		}
-
-		// Add a message
-		lines = append(lines, "-----")
-		lines = append(lines, header)
-		lines = append(lines, msg.Message)
+	})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to get messages: %v", err)), nil
 	}
 
-	if len(lines) > 0 {
-		lines = append(lines, "-----")
-	}
+	progress.Send(fmt.Sprintf("Collected %d messages", len(result.Messages)))
+
+	// Format messages for backup using the messages package
+	content := messages.FormatBatchForBackup(result.Messages)
 
 	// Ensure parent directory exists
 	parentDir := filepath.Dir(targetPath)
@@ -566,7 +453,6 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 	}
 
 	// Write to a file
-	content := strings.Join(lines, "\n")
 	if err := os.WriteFile(targetPath, []byte(content), 0o600); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to write file: %v", err)), nil
 	}
@@ -574,7 +460,7 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 	// Get an absolute path for clear output
 	absPath, _ := filepath.Abs(targetPath)
 
-	result := fmt.Sprintf("Backup completed!\nMessages saved: %d\nFile: %s", len(allMessages), absPath)
+	resultMsg := fmt.Sprintf("Backup completed!\nMessages saved: %d\nFile: %s", len(result.Messages), absPath)
 
-	return mcp.NewToolResultText(result), nil
+	return mcp.NewToolResultText(resultMsg), nil
 }

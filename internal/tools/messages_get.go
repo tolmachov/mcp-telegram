@@ -5,20 +5,21 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/gotd/td/tg"
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/tolmachov/mcp-telegram/internal/tgdata"
+	"github.com/tolmachov/mcp-telegram/internal/messages"
 )
 
 // MessagesGetHandler handles the GetMessages tool
 type MessagesGetHandler struct {
-	client *tg.Client
+	provider *messages.Provider
 }
 
 // NewMessagesGetHandler creates a new MessagesGetHandler
-func NewMessagesGetHandler(client *tg.Client) *MessagesGetHandler {
-	return &MessagesGetHandler{client: client}
+func NewMessagesGetHandler(provider *messages.Provider) *MessagesGetHandler {
+	return &MessagesGetHandler{
+		provider: provider,
+	}
 }
 
 // Tool returns the MCP tool definition
@@ -48,7 +49,7 @@ func (h *MessagesGetHandler) Handle(ctx context.Context, request mcp.CallToolReq
 		return mcp.NewToolResultError("chat_id is required"), nil
 	}
 
-	opts := tgdata.DefaultMessagesOptions()
+	opts := messages.DefaultFetchOptions()
 
 	if limit := int(mcp.ParseInt64(request, "limit", 0)); limit > 0 {
 		opts.Limit = limit
@@ -63,7 +64,7 @@ func (h *MessagesGetHandler) Handle(ctx context.Context, request mcp.CallToolReq
 
 	opts.UnreadOnly = mcp.ParseBoolean(request, "unread_only", false)
 
-	result, err := tgdata.GetMessages(ctx, h.client, chatID, opts)
+	result, err := h.provider.Fetch(ctx, chatID, opts)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to get messages: %v", err)), nil
 	}
