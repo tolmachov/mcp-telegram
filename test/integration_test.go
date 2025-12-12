@@ -154,7 +154,7 @@ func TestListResourceTemplates(t *testing.T) {
 	}
 
 	if len(templatesResult.ResourceTemplates) == 0 {
-		t.Error("expected at least one resource template")
+		t.Log("no resource templates available")
 	}
 }
 
@@ -258,6 +258,47 @@ func TestGetMe(t *testing.T) {
 	}
 }
 
+func TestPinnedChatResource(t *testing.T) {
+	c, ctx, cleanup := setupClient(t)
+	defer cleanup()
+
+	// List resources to find pinned chats
+	resourcesResult, err := c.ListResources(ctx, mcp.ListResourcesRequest{})
+	if err != nil {
+		t.Fatalf("failed to list resources: %v", err)
+	}
+
+	// Find the first pinned chat resource (telegram://chats/{id})
+	var pinnedURI string
+	for _, resource := range resourcesResult.Resources {
+		if strings.HasPrefix(resource.URI, "telegram://chats/") {
+			pinnedURI = resource.URI
+			t.Logf("Found pinned chat resource: %s (%s)", resource.URI, resource.Name)
+			break
+		}
+	}
+
+	if pinnedURI == "" {
+		t.Log("No pinned chats found, skipping read test")
+		return
+	}
+
+	// Read the pinned chat resource
+	readRequest := mcp.ReadResourceRequest{}
+	readRequest.Params.URI = pinnedURI
+
+	result, err := c.ReadResource(ctx, readRequest)
+	if err != nil {
+		t.Fatalf("failed to read pinned chat resource: %v", err)
+	}
+
+	if len(result.Contents) == 0 {
+		t.Error("expected at least one content item")
+	}
+
+	logResourceResult(t, result)
+}
+
 func TestGetMessages(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -277,26 +318,21 @@ func TestGetMessages(t *testing.T) {
 			c, ctx, cleanup := setupClient(t)
 			defer cleanup()
 
-			uri := fmt.Sprintf("telegram://chat/%s/messages?limit=10&offset_id=0", chatID)
-			t.Logf("Reading resource: %s", uri)
+			callRequest := mcp.CallToolRequest{}
+			callRequest.Params.Name = "GetMessages"
+			callRequest.Params.Arguments = map[string]any{
+				"chat_id": chatID,
+				"limit":   10,
+			}
 
-			readRequest := mcp.ReadResourceRequest{}
-			readRequest.Params.URI = uri
+			t.Logf("Calling GetMessages with chat_id=%s", chatID)
 
-			result, err := c.ReadResource(ctx, readRequest)
+			result, err := c.CallTool(ctx, callRequest)
 			if err != nil {
-				t.Fatalf("failed to read messages: %v", err)
+				t.Fatalf("failed to call GetMessages: %v", err)
 			}
 
-			for _, content := range result.Contents {
-				if textContent, ok := content.(mcp.TextResourceContents); ok {
-					var data any
-					if err := json.Unmarshal([]byte(textContent.Text), &data); err == nil {
-						pretty, _ := json.MarshalIndent(data, "", "  ")
-						t.Logf("Messages:\n%s", string(pretty))
-					}
-				}
-			}
+			logToolResult(t, result)
 		})
 	}
 }
@@ -456,6 +492,25 @@ func logToolResult(t *testing.T, result *mcp.CallToolResult) {
 			}
 		default:
 			t.Logf("Result: %+v", c)
+		}
+	}
+}
+
+func logResourceResult(t *testing.T, result *mcp.ReadResourceResult) {
+	t.Helper()
+	for _, content := range result.Contents {
+		if textContent, ok := content.(mcp.TextResourceContents); ok {
+			var data any
+			if err := json.Unmarshal([]byte(textContent.Text), &data); err == nil {
+				pretty, _ := json.MarshalIndent(data, "", "  ")
+				output := string(pretty)
+				if len(output) > 2000 {
+					output = output[:2000] + "\n... (truncated)"
+				}
+				t.Logf("Result:\n%s", output)
+			} else {
+				t.Logf("Result:\n%s", textContent.Text)
+			}
 		}
 	}
 }

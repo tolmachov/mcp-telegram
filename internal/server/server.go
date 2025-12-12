@@ -94,16 +94,10 @@ func (s *Server) Run(ctx context.Context) error {
 				tools.NewChatSummarizeHandler(msgProvider, s.mcpServer, s.summarizeCfg),
 			})
 
-			resources.RegisterResources(s.mcpServer,
-				[]resources.ResourceHandler{
-					resources.NewMeHandler(client.API()),
-					resources.NewChatsHandler(client.API()),
-				},
-				[]resources.ResourceTemplateHandler{
-					resources.NewChatMessagesHandler(msgProvider),
-					resources.NewChatInfoHandler(client.API()),
-				},
-			)
+			resources.RegisterResources(s.mcpServer, []resources.ResourceHandler{
+				resources.NewMeHandler(client.API()),
+				resources.NewChatsHandler(client.API()),
+			})
 
 			// Set up dynamic pinned chat resources
 			pinnedProvider := resources.NewPinnedChatsProvider(client.API(), msgProvider, s.mcpServer)

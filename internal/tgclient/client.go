@@ -26,11 +26,11 @@ type userAuthenticator struct {
 	phone string
 }
 
-func (a userAuthenticator) Phone(ctx context.Context) (string, error) {
+func (a userAuthenticator) Phone(_ context.Context) (string, error) {
 	return a.phone, nil
 }
 
-func (a userAuthenticator) Code(ctx context.Context, sentCode *tg.AuthSentCode) (string, error) {
+func (a userAuthenticator) Code(_ context.Context, _ *tg.AuthSentCode) (string, error) {
 	fmt.Print("Enter login code: ")
 	reader := bufio.NewReader(os.Stdin)
 	code, err := reader.ReadString('\n')
@@ -40,7 +40,7 @@ func (a userAuthenticator) Code(ctx context.Context, sentCode *tg.AuthSentCode) 
 	return strings.TrimSpace(code), nil
 }
 
-func (a userAuthenticator) Password(ctx context.Context) (string, error) {
+func (a userAuthenticator) Password(_ context.Context) (string, error) {
 	fmt.Print("Enter 2FA password: ")
 
 	// Use hidden input if running in a real terminal, otherwise fall back to plain input
@@ -62,11 +62,11 @@ func (a userAuthenticator) Password(ctx context.Context) (string, error) {
 	return strings.TrimSpace(password), nil
 }
 
-func (a userAuthenticator) AcceptTermsOfService(ctx context.Context, tos tg.HelpTermsOfService) error {
+func (a userAuthenticator) AcceptTermsOfService(_ context.Context, _ tg.HelpTermsOfService) error {
 	return nil
 }
 
-func (a userAuthenticator) SignUp(ctx context.Context) (auth.UserInfo, error) {
+func (a userAuthenticator) SignUp(_ context.Context) (auth.UserInfo, error) {
 	return auth.UserInfo{}, fmt.Errorf("sign up is not supported")
 }
 

@@ -33,7 +33,7 @@ func (h *ChatsHandler) Resource() mcp.Resource {
 }
 
 // Handle processes the telegram://chats resource request
-func (h *ChatsHandler) Handle(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+func (h *ChatsHandler) Handle(ctx context.Context, _ mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
 	onProgress := func(current int, message string) {
 		if srv := server.ServerFromContext(ctx); srv != nil {
 			_ = srv.SendNotificationToClient(ctx, "notifications/progress", map[string]any{

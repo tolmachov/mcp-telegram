@@ -32,7 +32,7 @@ func (h *MeHandler) Resource() mcp.Resource {
 }
 
 // Handle processes the telegram://me resource request
-func (h *MeHandler) Handle(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+func (h *MeHandler) Handle(ctx context.Context, _ mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
 	info, err := tgdata.GetCurrentUser(ctx, h.client)
 	if err != nil {
 		return nil, err

@@ -66,7 +66,7 @@ func (p *PinnedChatsProvider) doRefresh(ctx context.Context) error {
 	var newURIs []string
 
 	for _, chat := range chats {
-		uri := fmt.Sprintf("telegram://pinned/%d", chat.ID)
+		uri := fmt.Sprintf("telegram://chats/%d", chat.ID)
 		chatCopy := chat // capture for closure
 		newURIs = append(newURIs, uri)
 
@@ -74,7 +74,7 @@ func (p *PinnedChatsProvider) doRefresh(ctx context.Context) error {
 			Resource: mcp.NewResource(
 				uri,
 				fmt.Sprintf("Messages from %s", chat.Name),
-				mcp.WithResourceDescription(fmt.Sprintf("Last 100 messages from pinned chat: %s (%s)", chat.Name, chat.Type)),
+				mcp.WithResourceDescription(fmt.Sprintf("Last 100 messages from chat: %s (%s)", chat.Name, chat.Type)),
 				mcp.WithMIMEType("application/json"),
 			),
 			Handler: func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {

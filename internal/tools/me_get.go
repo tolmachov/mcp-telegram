@@ -29,7 +29,7 @@ func (h *MeGetHandler) Tool() mcp.Tool {
 }
 
 // Handle processes the GetMe tool request
-func (h *MeGetHandler) Handle(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (h *MeGetHandler) Handle(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	info, err := tgdata.GetCurrentUser(ctx, h.client)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to get current user: %v", err)), nil

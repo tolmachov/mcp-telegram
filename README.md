@@ -124,8 +124,9 @@ Add to `~/.claude/settings.json`:
 |-----|-------------|
 | `telegram://me` | Current user info |
 | `telegram://chats` | All chats list |
-| `telegram://chat/{id}/info` | Chat details |
-| `telegram://chat/{id}/messages` | Chat messages |
+| `telegram://chats/{id}` | Last 100 messages from a pinned chat (dynamic) |
+
+Pinned chat resources are created dynamically for each pinned chat and updated on every `resources/list` request.
 
 ## Prompt Examples
 
