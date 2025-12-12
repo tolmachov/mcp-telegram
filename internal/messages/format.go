@@ -2,6 +2,7 @@ package messages
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -14,17 +15,26 @@ const ShortDateFormat = "2006-01-02 15:04"
 // FormatForBackup formats a message for backup file output.
 // Format: [timestamp] [sender_name] [id=N] [reply_to=N]\n<text>
 func FormatForBackup(msg Message) string {
-	header := fmt.Sprintf("[%s] [%s] [id=%d]",
-		msg.Date.Format(DateFormat),
-		msg.SenderName,
-		msg.ID,
-	)
+	var sb strings.Builder
+
+	sb.WriteByte('[')
+	sb.WriteString(msg.Date.Format(DateFormat))
+	sb.WriteString("] [")
+	sb.WriteString(msg.SenderName)
+	sb.WriteString("] [id=")
+	sb.WriteString(strconv.Itoa(msg.ID))
+	sb.WriteByte(']')
 
 	if msg.ReplyToID != 0 {
-		header += fmt.Sprintf(" [reply_to=%d]", msg.ReplyToID)
+		sb.WriteString(" [reply_to=")
+		sb.WriteString(strconv.Itoa(msg.ReplyToID))
+		sb.WriteByte(']')
 	}
 
-	return header + "\n" + msg.Text
+	sb.WriteByte('\n')
+	sb.WriteString(msg.Text)
+
+	return sb.String()
 }
 
 // FormatForSummary formats a message for LLM summarization.
