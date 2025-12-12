@@ -367,17 +367,55 @@ func extractSender(peer any, users map[int64]string, chats map[int64]string) (in
 }
 
 func extractMediaType(media tg.MessageMediaClass) *MediaInfo {
-	switch media.(type) {
+	switch m := media.(type) {
 	case *tg.MessageMediaPhoto:
-		return &MediaInfo{Type: "photo"}
+		info := &MediaInfo{Type: "photo"}
+		if photo, ok := m.GetPhoto(); ok {
+			if p, ok := photo.(*tg.Photo); ok {
+				// Get the largest photo size for dimensions
+				for _, size := range p.Sizes {
+					var w, h int
+					switch s := size.(type) {
+					case *tg.PhotoSize:
+						w, h = s.W, s.H
+					case *tg.PhotoSizeProgressive:
+						w, h = s.W, s.H
+					case *tg.PhotoCachedSize:
+						w, h = s.W, s.H
+					default:
+						continue
+					}
+					if w > info.Width {
+						info.Width = w
+						info.Height = h
+					}
+				}
+			}
+		}
+		return info
 	case *tg.MessageMediaDocument:
-		return &MediaInfo{Type: "document"}
+		info := &MediaInfo{Type: "document"}
+		if doc, ok := m.GetDocument(); ok {
+			if d, ok := doc.(*tg.Document); ok {
+				for _, attr := range d.Attributes {
+					if fileName, ok := attr.(*tg.DocumentAttributeFilename); ok {
+						info.FileName = fileName.FileName
+						break
+					}
+				}
+			}
+		}
+		return info
 	case *tg.MessageMediaGeo:
 		return &MediaInfo{Type: "geo"}
 	case *tg.MessageMediaContact:
 		return &MediaInfo{Type: "contact"}
 	case *tg.MessageMediaWebPage:
-		return &MediaInfo{Type: "webpage"}
+		info := &MediaInfo{Type: "webpage"}
+		if webpage, ok := m.Webpage.(*tg.WebPage); ok {
+			info.URL = webpage.URL
+		}
+		return info
 	case *tg.MessageMediaVenue:
 		return &MediaInfo{Type: "venue"}
 	case *tg.MessageMediaPoll:
