@@ -11,6 +11,7 @@ require (
 	github.com/mark3labs/mcp-go v0.43.2
 	github.com/urfave/cli/v3 v3.6.1
 	go.uber.org/ratelimit v0.3.1
+	golang.org/x/sync v0.19.0
 	golang.org/x/term v0.38.0
 )
 
@@ -52,7 +53,6 @@ require (
 	golang.org/x/exp v0.0.0-20251209150349-8475f28825e9 // indirect
 	golang.org/x/mod v0.31.0 // indirect
 	golang.org/x/net v0.48.0 // indirect
-	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.39.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
 	golang.org/x/tools v0.40.0 // indirect

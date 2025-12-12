@@ -22,7 +22,6 @@ type ChatInfo struct {
 	Muted        bool   `json:"muted"`
 	Pinned       bool   `json:"pinned"`
 	Archived     bool   `json:"archived"`
-	Deleted      bool   `json:"deleted"`
 }
 
 // ChatFullInfo represents detailed information about a chat

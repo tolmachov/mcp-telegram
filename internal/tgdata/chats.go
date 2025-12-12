@@ -78,7 +78,9 @@ func GetChats(ctx context.Context, client *tg.Client, onProgress ProgressFunc) (
 
 		muted := dialog.NotifySettings.MuteUntil > int(startTime.Unix())
 		archived := dialog.FolderID != 0
-		deleted := dlg.Deleted()
+		if dlg.Deleted() {
+			return nil
+		}
 
 		chatsList = append(chatsList, ChatInfo{
 			ID:           id,
@@ -90,7 +92,6 @@ func GetChats(ctx context.Context, client *tg.Client, onProgress ProgressFunc) (
 			Muted:        muted,
 			Pinned:       dialog.Pinned,
 			Archived:     archived,
-			Deleted:      deleted,
 		})
 
 		return nil
@@ -108,4 +109,21 @@ func GetChats(ctx context.Context, client *tg.Client, onProgress ProgressFunc) (
 		Chats: chatsList,
 		Count: len(chatsList),
 	}, nil
+}
+
+// GetPinnedChats retrieves only pinned chats
+func GetPinnedChats(ctx context.Context, client *tg.Client) ([]ChatInfo, error) {
+	result, err := GetChats(ctx, client, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var pinned []ChatInfo
+	for _, chat := range result.Chats {
+		if chat.Pinned {
+			pinned = append(pinned, chat)
+		}
+	}
+
+	return pinned, nil
 }

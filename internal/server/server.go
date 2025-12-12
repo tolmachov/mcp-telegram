@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
@@ -18,6 +19,7 @@ import (
 // Server represents the MCP server for Telegram
 type Server struct {
 	mcpServer    *server.MCPServer
+	hooks        *server.Hooks
 	tgConfig     *tgclient.Config
 	allowedPaths []string
 	summarizeCfg summarize.Config
@@ -28,11 +30,14 @@ type Server struct {
 
 // New creates a new MCP server
 func New(cfg *tgclient.Config, version string, allowedPaths []string, summarizeCfg summarize.Config, stdin io.Reader, stdout, errOut io.Writer) (*Server, error) {
+	hooks := &server.Hooks{}
+
 	mcpServer := server.NewMCPServer(
 		"mcp-telegram",
 		version,
 		server.WithToolCapabilities(true),
 		server.WithResourceCapabilities(true, true),
+		server.WithHooks(hooks),
 	)
 
 	// Enable sampling capability for LLM requests
@@ -40,6 +45,7 @@ func New(cfg *tgclient.Config, version string, allowedPaths []string, summarizeC
 
 	return &Server{
 		mcpServer:    mcpServer,
+		hooks:        hooks,
 		tgConfig:     cfg,
 		allowedPaths: allowedPaths,
 		summarizeCfg: summarizeCfg,
@@ -67,7 +73,7 @@ func (s *Server) Run(ctx context.Context) error {
 				return fmt.Errorf("not authorized, please run 'login' command first")
 			}
 
-			// Create shared message provider with rate limiting
+			// Create a shared message provider with rate limiting
 			msgProvider := messages.NewProvider(client.API())
 
 			tools.RegisterTools(s.mcpServer, []tools.Handler{
@@ -98,6 +104,12 @@ func (s *Server) Run(ctx context.Context) error {
 					resources.NewChatInfoHandler(client.API()),
 				},
 			)
+
+			// Set up dynamic pinned chat resources
+			pinnedProvider := resources.NewPinnedChatsProvider(client.API(), msgProvider, s.mcpServer)
+			s.hooks.AddBeforeListResources(func(ctx context.Context, id any, req *mcp.ListResourcesRequest) {
+				_ = pinnedProvider.RefreshResources(ctx)
+			})
 
 			// Run MCP server over stdio
 			errLogger := log.New(s.errOut, "[mcp-telegram] ", log.LstdFlags)
