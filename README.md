@@ -117,6 +117,7 @@ Add to `~/.claude/settings.json`:
 | `MuteChat` | Mute chat notifications |
 | `UnmuteChat` | Unmute chat notifications |
 | `SummarizeChat` | AI-powered chat summarization |
+| `GetMedia` | Get photo from a message by resource URI |
 
 ## Available Resources
 

@@ -21,11 +21,12 @@ type Message struct {
 
 // MediaInfo represents media attached to a message.
 type MediaInfo struct {
-	Type     string `json:"type"`
-	URL      string `json:"url,omitempty"`       // URL for webpage media
-	FileName string `json:"file_name,omitempty"` // Filename for documents
-	Width    int    `json:"width,omitempty"`     // Width for photos/videos
-	Height   int    `json:"height,omitempty"`    // Height for photos/videos
+	Type        string `json:"type"`
+	URL         string `json:"url,omitempty"`          // URL for webpage media
+	FileName    string `json:"file_name,omitempty"`    // Filename for documents
+	Width       int    `json:"width,omitempty"`        // Width for photos/videos
+	Height      int    `json:"height,omitempty"`       // Height for photos/videos
+	ResourceURI string `json:"resource_uri,omitempty"` // MCP resource URI for downloading
 }
 
 // FetchResult contains messages and metadata from a fetch operation.

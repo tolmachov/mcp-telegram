@@ -533,6 +533,50 @@ func logToolResult(t *testing.T, result *mcp.CallToolResult) {
 	}
 }
 
+func TestGetMedia(t *testing.T) {
+	mediaURI := os.Getenv("TEST_MEDIA_URI")
+	if mediaURI == "" {
+		t.Skip("TEST_MEDIA_URI not set")
+	}
+
+	c, ctx, cleanup := setupClient(t)
+	defer cleanup()
+
+	callRequest := mcp.CallToolRequest{}
+	callRequest.Params.Name = "GetMedia"
+	callRequest.Params.Arguments = map[string]any{
+		"uri": mediaURI,
+	}
+
+	t.Logf("Calling GetMedia with uri=%s", mediaURI)
+
+	result, err := c.CallTool(ctx, callRequest)
+	if err != nil {
+		t.Fatalf("failed to call GetMedia: %v", err)
+	}
+
+	if result.IsError {
+		logToolResult(t, result)
+		t.Fatalf("GetMedia returned error")
+	}
+
+	// Check that we got image content
+	var hasImage bool
+	for _, content := range result.Content {
+		switch c := content.(type) {
+		case mcp.ImageContent:
+			hasImage = true
+			t.Logf("Received image: mimeType=%s, data length=%d bytes", c.MIMEType, len(c.Data))
+		case mcp.TextContent:
+			t.Logf("Text: %s", c.Text)
+		}
+	}
+
+	if !hasImage {
+		t.Error("expected image content in result")
+	}
+}
+
 func logResourceResult(t *testing.T, result *mcp.ReadResourceResult) {
 	t.Helper()
 	for _, content := range result.Contents {

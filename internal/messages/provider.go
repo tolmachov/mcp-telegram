@@ -2,6 +2,7 @@ package messages
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"time"
 
@@ -372,23 +373,34 @@ func extractMediaType(media tg.MessageMediaClass) *MediaInfo {
 		info := &MediaInfo{Type: "photo"}
 		if photo, ok := m.GetPhoto(); ok {
 			if p, ok := photo.(*tg.Photo); ok {
-				// Get the largest photo size for dimensions
+				// Get the largest photo size for dimensions and thumb type
+				var thumbType string
 				for _, size := range p.Sizes {
 					var w, h int
+					var sizeType string
 					switch s := size.(type) {
 					case *tg.PhotoSize:
-						w, h = s.W, s.H
+						w, h, sizeType = s.W, s.H, s.Type
 					case *tg.PhotoSizeProgressive:
-						w, h = s.W, s.H
+						w, h, sizeType = s.W, s.H, s.Type
 					case *tg.PhotoCachedSize:
-						w, h = s.W, s.H
+						w, h, sizeType = s.W, s.H, s.Type
 					default:
 						continue
 					}
 					if w > info.Width {
 						info.Width = w
 						info.Height = h
+						thumbType = sizeType
 					}
+				}
+				// Generate resource URI for photo download
+				if thumbType != "" {
+					fileRef := base64.URLEncoding.EncodeToString(p.FileReference)
+					info.ResourceURI = fmt.Sprintf(
+						"telegram://media/%d/%d/%d/%s?ref=%s",
+						p.ID, p.AccessHash, p.DCID, thumbType, fileRef,
+					)
 				}
 			}
 		}

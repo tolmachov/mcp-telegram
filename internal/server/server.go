@@ -92,6 +92,7 @@ func (s *Server) Run(ctx context.Context) error {
 				tools.NewChatMuteHandler(client.API()),
 				tools.NewChatUnmuteHandler(client.API()),
 				tools.NewChatSummarizeHandler(msgProvider, s.mcpServer, s.summarizeCfg),
+				tools.NewMediaGetHandler(client.API()),
 			})
 
 			resources.RegisterResources(s.mcpServer, []resources.ResourceHandler{
