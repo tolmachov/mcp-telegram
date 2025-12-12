@@ -258,6 +258,43 @@ func TestGetMe(t *testing.T) {
 	}
 }
 
+func TestGetChatInfo(t *testing.T) {
+	cases := []struct {
+		name   string
+		envVar string
+	}{
+		{"Dialog", "TEST_CHAT_ID"},
+		{"Group", "TEST_GROUP_ID"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			chatID := os.Getenv(tc.envVar)
+			if chatID == "" {
+				t.Skipf("%s not set", tc.envVar)
+			}
+
+			c, ctx, cleanup := setupClient(t)
+			defer cleanup()
+
+			callRequest := mcp.CallToolRequest{}
+			callRequest.Params.Name = "GetChatInfo"
+			callRequest.Params.Arguments = map[string]any{
+				"chat_id": chatID,
+			}
+
+			t.Logf("Calling GetChatInfo with chat_id=%s", chatID)
+
+			result, err := c.CallTool(ctx, callRequest)
+			if err != nil {
+				t.Fatalf("failed to call GetChatInfo: %v", err)
+			}
+
+			logToolResult(t, result)
+		})
+	}
+}
+
 func TestPinnedChatResource(t *testing.T) {
 	c, ctx, cleanup := setupClient(t)
 	defer cleanup()
