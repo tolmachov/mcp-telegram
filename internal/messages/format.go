@@ -12,31 +12,6 @@ const DateFormat = "2006-01-02 15:04:05"
 // ShortDateFormat is a shorter timestamp format.
 const ShortDateFormat = "2006-01-02 15:04"
 
-// FormatForBackup formats a message for backup file output.
-// Format: [timestamp] [sender_name] [id=N] [reply_to=N]\n<text>
-func FormatForBackup(msg Message) string {
-	var sb strings.Builder
-
-	sb.WriteByte('[')
-	sb.WriteString(msg.Date.Format(DateFormat))
-	sb.WriteString("] [")
-	sb.WriteString(msg.SenderName)
-	sb.WriteString("] [id=")
-	sb.WriteString(strconv.Itoa(msg.ID))
-	sb.WriteByte(']')
-
-	if msg.ReplyToID != 0 {
-		sb.WriteString(" [reply_to=")
-		sb.WriteString(strconv.Itoa(msg.ReplyToID))
-		sb.WriteByte(']')
-	}
-
-	sb.WriteByte('\n')
-	sb.WriteString(msg.Text)
-
-	return sb.String()
-}
-
 // FormatForSummary formats a message for LLM summarization.
 // Format: [timestamp] sender_id: text
 func FormatForSummary(msg Message) string {
@@ -48,24 +23,40 @@ func FormatForSummary(msg Message) string {
 }
 
 // FormatBatchForBackup formats a batch of messages for a backup file.
+// Format: -----\n[timestamp] [sender_name] [id=N] [reply_to=N]\n<text>\n-----
 func FormatBatchForBackup(messages []Message) string {
 	if len(messages) == 0 {
 		return ""
 	}
 
 	var sb strings.Builder
-	hasContent := false
+	sb.Grow(len(messages) * 1 << 8) // Preallocate approx 256 bytes per message
+
 	for _, msg := range messages {
 		if msg.Text == "" {
 			continue
 		}
-		sb.WriteString("-----\n")
-		sb.WriteString(FormatForBackup(msg))
-		sb.WriteString("\n")
-		hasContent = true
+
+		sb.WriteString("-----\n[")
+		sb.WriteString(msg.Date.Format(DateFormat))
+		sb.WriteString("] [")
+		sb.WriteString(msg.SenderName)
+		sb.WriteString("] [id=")
+		sb.WriteString(strconv.Itoa(msg.ID))
+		sb.WriteByte(']')
+
+		if msg.ReplyToID != 0 {
+			sb.WriteString(" [reply_to=")
+			sb.WriteString(strconv.Itoa(msg.ReplyToID))
+			sb.WriteByte(']')
+		}
+
+		sb.WriteByte('\n')
+		sb.WriteString(msg.Text)
+		sb.WriteByte('\n')
 	}
 
-	if hasContent {
+	if sb.Len() > 0 {
 		sb.WriteString("-----")
 	}
 
