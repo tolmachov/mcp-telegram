@@ -26,6 +26,7 @@ func NewScheduledGetHandler(client *tg.Client) *ScheduledGetHandler {
 func (h *ScheduledGetHandler) Tool() mcp.Tool {
 	return mcp.NewTool("GetScheduledMessages",
 		mcp.WithDescription("Get all scheduled messages for a specific chat from Telegram's schedule queue."),
+		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithNumber("chat_id",
 			mcp.Description("The ID of the chat to get scheduled messages from"),
 			mcp.Required(),

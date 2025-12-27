@@ -30,6 +30,7 @@ func NewChatsSearchHandler(client *tg.Client) *ChatsSearchHandler {
 func (h *ChatsSearchHandler) Tool() mcp.Tool {
 	return mcp.NewTool("SearchChats",
 		mcp.WithDescription("Search for chats, groups, and channels by name using fuzzy matching."),
+		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("query",
 			mcp.Required(),
 			mcp.Description("Search query to match against chat names"),

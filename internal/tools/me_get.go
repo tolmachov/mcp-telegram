@@ -25,6 +25,7 @@ func NewMeGetHandler(client *tg.Client) *MeGetHandler {
 func (h *MeGetHandler) Tool() mcp.Tool {
 	return mcp.NewTool("GetMe",
 		mcp.WithDescription("Get information about the currently authenticated Telegram user."),
+		mcp.WithReadOnlyHintAnnotation(true),
 	)
 }
 

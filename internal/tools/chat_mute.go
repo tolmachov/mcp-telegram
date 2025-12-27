@@ -25,6 +25,7 @@ func NewChatMuteHandler(client *tg.Client) *ChatMuteHandler {
 func (h *ChatMuteHandler) Tool() mcp.Tool {
 	return mcp.NewTool("MuteChat",
 		mcp.WithDescription("Mute notifications for a chat."),
+		mcp.WithIdempotentHintAnnotation(true),
 		mcp.WithNumber("chat_id",
 			mcp.Description("The ID of the chat to mute"),
 			mcp.Required(),
@@ -115,6 +116,7 @@ func NewChatUnmuteHandler(client *tg.Client) *ChatUnmuteHandler {
 func (h *ChatUnmuteHandler) Tool() mcp.Tool {
 	return mcp.NewTool("UnmuteChat",
 		mcp.WithDescription("Unmute notifications for a chat."),
+		mcp.WithIdempotentHintAnnotation(true),
 		mcp.WithNumber("chat_id",
 			mcp.Description("The ID of the chat to unmute"),
 			mcp.Required(),

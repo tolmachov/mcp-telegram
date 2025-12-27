@@ -25,6 +25,7 @@ func NewMessageScheduleHandler(client *tg.Client) *MessageScheduleHandler {
 func (h *MessageScheduleHandler) Tool() mcp.Tool {
 	return mcp.NewTool("ScheduleMessage",
 		mcp.WithDescription("Schedule a message to be sent at a specific time using Telegram's native scheduling API."),
+		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithNumber("chat_id",
 			mcp.Description("The ID of the chat to schedule the message for"),
 			mcp.Required(),

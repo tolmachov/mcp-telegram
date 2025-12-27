@@ -25,6 +25,7 @@ func NewMessageSendHandler(client *tg.Client) *MessageSendHandler {
 func (h *MessageSendHandler) Tool() mcp.Tool {
 	return mcp.NewTool("SendMessage",
 		mcp.WithDescription("Send a message to a contact, group, or channel."),
+		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithNumber("chat_id",
 			mcp.Description("The ID of the chat to send the message to"),
 			mcp.Required(),

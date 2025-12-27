@@ -23,6 +23,7 @@ func NewUsernameResolveHandler(client *tg.Client) *UsernameResolveHandler {
 func (h *UsernameResolveHandler) Tool() mcp.Tool {
 	return mcp.NewTool("ResolveUsername",
 		mcp.WithDescription("Resolve a Telegram username to get user/chat/channel ID and information."),
+		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("username",
 			mcp.Description("The username to resolve (with or without @ prefix)"),
 			mcp.Required(),

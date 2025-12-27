@@ -26,6 +26,7 @@ func NewChatsGetHandler(client *tg.Client) *ChatsGetHandler {
 func (h *ChatsGetHandler) Tool() mcp.Tool {
 	return mcp.NewTool("GetChats",
 		mcp.WithDescription("Get a list of all chats, groups, and channels."),
+		mcp.WithReadOnlyHintAnnotation(true),
 	)
 }
 
