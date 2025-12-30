@@ -31,7 +31,7 @@ func NewChatSummarizeHandler(msgProvider *messages.Provider, mcpServer *server.M
 // Tool returns the MCP tool definition
 func (h *ChatSummarizeHandler) Tool() mcp.Tool {
 	return mcp.NewTool("SummarizeChat",
-		mcp.WithDescription("Summarize messages from a Telegram chat using rolling/incremental summarization."),
+		mcp.WithDescription("Summarize messages from a Telegram chat using rolling/incremental summarization with AI."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithNumber("chat_id",
@@ -39,7 +39,7 @@ func (h *ChatSummarizeHandler) Tool() mcp.Tool {
 			mcp.Required(),
 		),
 		mcp.WithString("goal",
-			mcp.Description("The goal of summarization - what to focus on (e.g., 'key decisions', 'bug discussions', 'meeting arrangements')"),
+			mcp.Description("What you want from the summary. Examples: 'key points and decisions', 'extract all action items and deadlines', 'analyze sentiment and mood', 'identify top 5 discussed topics', 'create meeting minutes', 'find all decisions made', 'summarize bug discussions', 'track project progress'"),
 			mcp.Required(),
 		),
 		mcp.WithString("period",
