@@ -1,6 +1,6 @@
 module github.com/tolmachov/mcp-telegram
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/gotd/contrib v0.21.1
