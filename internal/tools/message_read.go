@@ -24,8 +24,9 @@ func NewMessageReadHandler(client *tg.Client) *MessageReadHandler {
 // Tool returns the MCP tool definition
 func (h *MessageReadHandler) Tool() mcp.Tool {
 	return mcp.NewTool("MarkAsRead",
-		mcp.WithDescription("Mark all messages in one or more chats as read."),
+		mcp.WithDescription("Mark all messages in one or more chats as read. Accepts up to 100 chat IDs at once. This cannot be undone."),
 		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithArray("chat_ids",
 			mcp.WithNumberItems(),
 			mcp.Description("List of chat IDs to mark as read (max 100)"),

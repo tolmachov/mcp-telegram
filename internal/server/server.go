@@ -38,6 +38,7 @@ func New(cfg *tgclient.Config, version string, allowedPaths []string, summarizeC
 		server.WithToolCapabilities(true),
 		server.WithResourceCapabilities(true, true),
 		server.WithHooks(hooks),
+		server.WithInstructions("Use SearchChats or GetChats to find chat IDs before calling other tools. Chat IDs are numeric. If you only have a username, use ResolveUsername to get the chat ID. When the user asks to message someone, always confirm the recipient before sending."),
 	)
 
 	// Enable sampling capability for LLM requests

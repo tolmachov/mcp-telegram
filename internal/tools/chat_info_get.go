@@ -24,7 +24,7 @@ func NewChatInfoGetHandler(client *tg.Client) *ChatInfoGetHandler {
 // Tool returns the MCP tool definition
 func (h *ChatInfoGetHandler) Tool() mcp.Tool {
 	return mcp.NewTool("GetChatInfo",
-		mcp.WithDescription("Get detailed information about a specific chat, group, or channel."),
+		mcp.WithDescription("Get detailed information about a specific chat, group, or channel including member count, description, and settings. Requires a chat ID — use SearchChats to find one."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithNumber("chat_id",
 			mcp.Description("The chat ID to get information about"),

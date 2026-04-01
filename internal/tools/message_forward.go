@@ -24,7 +24,7 @@ func NewMessageForwardHandler(client *tg.Client) *MessageForwardHandler {
 // Tool returns the MCP tool definition
 func (h *MessageForwardHandler) Tool() mcp.Tool {
 	return mcp.NewTool("ForwardMessage",
-		mcp.WithDescription("Forward a message from one chat to another."),
+		mcp.WithDescription("Forward a message from one chat to another. The forwarded message retains the original sender attribution."),
 		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithNumber("from_chat_id",
 			mcp.Description("The ID of the chat to forward from"),

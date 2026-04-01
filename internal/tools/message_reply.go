@@ -24,7 +24,7 @@ func NewMessageReplyHandler(client *tg.Client) *MessageReplyHandler {
 // Tool returns the MCP tool definition
 func (h *MessageReplyHandler) Tool() mcp.Tool {
 	return mcp.NewTool("ReplyToMessage",
-		mcp.WithDescription("Reply to a specific message in a chat."),
+		mcp.WithDescription("Reply to a specific message in a chat, creating a threaded reply linked to the original. For new messages without reply context, use SendMessage."),
 		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithNumber("chat_id",
 			mcp.Description("The ID of the chat containing the message"),

@@ -25,7 +25,7 @@ func NewMessagesGetHandler(provider *messages.Provider) *MessagesGetHandler {
 // Tool returns the MCP tool definition
 func (h *MessagesGetHandler) Tool() mcp.Tool {
 	return mcp.NewTool("GetMessages",
-		mcp.WithDescription("Get messages from a specific chat."),
+		mcp.WithDescription("Get messages from a specific chat. Returns up to `limit` messages (default 50, max 100). Supports pagination via `offset_id` and filtering to unread only. For bulk export, use BackupMessages instead."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithNumber("chat_id",
 			mcp.Description("The chat ID to get messages from"),

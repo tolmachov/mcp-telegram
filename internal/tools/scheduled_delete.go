@@ -23,7 +23,7 @@ func NewScheduledDeleteHandler(client *tg.Client) *ScheduledDeleteHandler {
 // Tool returns the MCP tool definition
 func (h *ScheduledDeleteHandler) Tool() mcp.Tool {
 	return mcp.NewTool("DeleteScheduledMessage",
-		mcp.WithDescription("Cancel a scheduled message before it's sent."),
+		mcp.WithDescription("Cancel a scheduled message before it's sent. Use GetScheduledMessages first to find the message ID."),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithNumber("chat_id",
 			mcp.Description("The ID of the chat containing the scheduled message"),

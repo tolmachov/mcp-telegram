@@ -25,7 +25,7 @@ func NewChatsGetHandler(client *tg.Client) *ChatsGetHandler {
 // Tool returns the MCP tool definition
 func (h *ChatsGetHandler) Tool() mcp.Tool {
 	return mcp.NewTool("GetChats",
-		mcp.WithDescription("Get a list of all chats, groups, and channels."),
+		mcp.WithDescription("Get a list of ALL chats, groups, and channels. May be slow for accounts with many chats. To find a specific chat by name, use SearchChats instead."),
 		mcp.WithReadOnlyHintAnnotation(true),
 	)
 }

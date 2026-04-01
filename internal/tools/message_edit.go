@@ -23,7 +23,7 @@ func NewMessageEditHandler(client *tg.Client) *MessageEditHandler {
 // Tool returns the MCP tool definition
 func (h *MessageEditHandler) Tool() mcp.Tool {
 	return mcp.NewTool("EditMessage",
-		mcp.WithDescription("Edit a message you previously sent."),
+		mcp.WithDescription("Edit a message you previously sent. Only your own messages can be edited. For channel posts, admin rights may be required."),
 		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithNumber("chat_id",
 			mcp.Description("The ID of the chat containing the message"),

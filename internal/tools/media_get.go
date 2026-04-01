@@ -27,7 +27,7 @@ func NewMediaGetHandler(client *tg.Client) *MediaGetHandler {
 // Tool returns the MCP tool definition
 func (h *MediaGetHandler) Tool() mcp.Tool {
 	return mcp.NewTool("GetMedia",
-		mcp.WithDescription("Get media (photo) from Telegram using a resource URI from message media."),
+		mcp.WithDescription("Download a photo from Telegram using a media resource URI (telegram://media/...) returned by GetMessages. Returns the image as base64-encoded data."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("uri",
 			mcp.Required(),

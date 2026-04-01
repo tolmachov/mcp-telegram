@@ -31,7 +31,7 @@ func NewChatSummarizeHandler(msgProvider *messages.Provider, mcpServer *server.M
 // Tool returns the MCP tool definition
 func (h *ChatSummarizeHandler) Tool() mcp.Tool {
 	return mcp.NewTool("SummarizeChat",
-		mcp.WithDescription("Summarize messages from a Telegram chat using rolling/incremental summarization with AI."),
+		mcp.WithDescription("Summarize messages from a Telegram chat using rolling/incremental summarization with AI. Specify a goal (e.g., 'key decisions', 'action items') and a time period. Uses the configured LLM provider for summarization."),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithNumber("chat_id",

@@ -23,7 +23,7 @@ func NewMessageDeleteHandler(client *tg.Client) *MessageDeleteHandler {
 // Tool returns the MCP tool definition
 func (h *MessageDeleteHandler) Tool() mcp.Tool {
 	return mcp.NewTool("DeleteMessage",
-		mcp.WithDescription("Delete a message from a chat. This action cannot be undone. For non-channel chats, the message will be deleted for all participants."),
+		mcp.WithDescription("Delete a message from a chat. This action cannot be undone. For non-channel chats, the message will be deleted for all participants. Use GetMessages first to verify the correct message ID."),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithNumber("chat_id",
 			mcp.Description("The ID of the chat containing the message"),

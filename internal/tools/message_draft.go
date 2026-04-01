@@ -23,7 +23,8 @@ func NewMessageDraftHandler(client *tg.Client) *MessageDraftHandler {
 // Tool returns the MCP tool definition
 func (h *MessageDraftHandler) Tool() mcp.Tool {
 	return mcp.NewTool("DraftMessage",
-		mcp.WithDescription("Draft a message in a given chat, group or channel. The message will be saved as a draft and can be sent later."),
+		mcp.WithDescription("Save a message as a draft in a chat without sending it. The draft appears in the user's Telegram app and can be sent later. To send immediately, use SendMessage."),
+		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithNumber("chat_id",
 			mcp.Description("The ID of the chat to save the draft to"),
 			mcp.Required(),

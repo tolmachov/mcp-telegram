@@ -159,7 +159,8 @@ func NewMessageBackupHandler(client *tg.Client, provider *messages.Provider, all
 // Tool returns the MCP tool definition
 func (h *MessageBackupHandler) Tool() mcp.Tool {
 	return mcp.NewTool("BackupMessages",
-		mcp.WithDescription("Backup messages from a chat to a text file. Messages are saved with timestamp, sender name, ID, and reply info. If filepath is not specified, generates automatic filename like 'ChatName-2024-01-15.txt' in default backup directory. All filter parameters are optional - if none specified, backs up last 1000 messages."),
+		mcp.WithDescription("Backup messages from a chat to a text file. Messages are saved with timestamp, sender name, ID, and reply info. If filepath is not specified, generates automatic filename like 'ChatName-2024-01-15.txt' in default backup directory. All filter parameters are optional — if none specified, backs up last 1000 messages. For reading messages in-chat, use GetMessages instead."),
+		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithNumber("chat_id",
 			mcp.Description("The ID of the chat to backup messages from"),
 			mcp.Required(),
@@ -262,15 +263,15 @@ func newBackupProgress(
 	return bp
 }
 
-func (bp *backupProgress) Start() {
+func (bp *backupProgress) Start() error {
 	bp.stateMu.Lock()
+	defer bp.stateMu.Unlock()
+
 	if bp.state != progressStateCreated {
-		bp.stateMu.Unlock()
-		panic("backupProgress already started")
+		return fmt.Errorf("backupProgress already started")
 	}
 	bp.state = progressStateRunning
 	bp.ticker = time.NewTicker(5 * time.Second)
-	bp.stateMu.Unlock()
 
 	go func() {
 		for {
@@ -287,18 +288,22 @@ func (bp *backupProgress) Start() {
 			}
 		}
 	}()
+
+	return nil
 }
 
-func (bp *backupProgress) Stop() {
+func (bp *backupProgress) Stop() error {
 	bp.stateMu.Lock()
+	defer bp.stateMu.Unlock()
+
 	if bp.state != progressStateRunning {
-		bp.stateMu.Unlock()
-		panic("backupProgress is not running")
+		return fmt.Errorf("backupProgress is not running")
 	}
 	bp.state = progressStateStopped
 	bp.ticker.Stop()
 	close(bp.done)
-	bp.stateMu.Unlock()
+
+	return nil
 }
 
 func (bp *backupProgress) SetMessage(msg string) {
@@ -426,8 +431,10 @@ func (h *MessageBackupHandler) Handle(ctx context.Context, request mcp.CallToolR
 		fromDate, toDate,
 		count,
 	)
-	progress.Start()
-	defer progress.Stop()
+	if err := progress.Start(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("starting progress: %v", err)), nil
+	}
+	defer func() { _ = progress.Stop() }()
 
 	// Configure fetch options
 	opts := messages.FetchOptions{

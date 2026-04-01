@@ -24,7 +24,7 @@ func NewMessageSendHandler(client *tg.Client) *MessageSendHandler {
 // Tool returns the MCP tool definition
 func (h *MessageSendHandler) Tool() mcp.Tool {
 	return mcp.NewTool("SendMessage",
-		mcp.WithDescription("Send a message to a contact, group, or channel."),
+		mcp.WithDescription("Send a new message to a contact, group, or channel. For replies to specific messages, use ReplyToMessage. To save a draft without sending, use DraftMessage. To schedule for later, use ScheduleMessage."),
 		mcp.WithOpenWorldHintAnnotation(true),
 		mcp.WithNumber("chat_id",
 			mcp.Description("The ID of the chat to send the message to"),
