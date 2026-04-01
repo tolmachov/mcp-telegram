@@ -97,6 +97,29 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					return tgclient.Logout(ctx, cfg)
 				},
 			},
+			{
+				Name:  "config",
+				Usage: "Manage secure configuration values",
+				Commands: []*cli.Command{
+					{
+						Name:      "set",
+						Usage:     "Store a config value securely (e.g., TELEGRAM_API_ID, ANTHROPIC_API_KEY)",
+						ArgsUsage: "<key> <value>",
+						Action:    configSetAction,
+					},
+					{
+						Name:   "list",
+						Usage:  "List stored config keys",
+						Action: configListAction,
+					},
+					{
+						Name:      "delete",
+						Usage:     "Remove a stored config value",
+						ArgsUsage: "<key>",
+						Action:    configDeleteAction,
+					},
+				},
+			},
 		},
 	}
 }

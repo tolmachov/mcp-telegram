@@ -11,6 +11,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/tolmachov/mcp-telegram/internal"
+	"github.com/tolmachov/mcp-telegram/internal/config"
 )
 
 func main() {
@@ -19,6 +20,10 @@ func main() {
 
 	if err := godotenv.Load(); err != nil && !errors.Is(err, os.ErrNotExist) {
 		log.Fatalf("failed to load .env file: %v", err)
+	}
+
+	if err := config.LoadIntoEnv(config.NewStore()); err != nil {
+		log.Fatalf("failed to load config from secure store: %v", err)
 	}
 
 	if err := internal.New(os.Stdin, os.Stdout, os.Stderr).Run(ctx, os.Args); err != nil {
