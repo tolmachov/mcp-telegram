@@ -84,7 +84,7 @@ func (p *AnthropicProvider) Summarize(ctx context.Context, prompt string) (strin
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", p.apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("anthropic-version", "2024-10-22")
 
 	resp, err := p.client.Do(req)
 	if err != nil {
