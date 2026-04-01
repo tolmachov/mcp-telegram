@@ -2,6 +2,7 @@ package tgclient
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/gotd/td/tg"
 )
@@ -51,7 +52,7 @@ func ResolvePeer(ctx context.Context, client *tg.Client, dialogID int64) (tg.Inp
 		&tg.InputChannel{ChannelID: channelID},
 	})
 	if err != nil {
-		return &tg.InputPeerChannel{ChannelID: channelID}, nil
+		return nil, fmt.Errorf("resolving channel %d: %w", channelID, err)
 	}
 
 	if chats, ok := channels.(*tg.MessagesChats); ok && len(chats.Chats) > 0 {
@@ -63,5 +64,5 @@ func ResolvePeer(ctx context.Context, client *tg.Client, dialogID int64) (tg.Inp
 		}
 	}
 
-	return &tg.InputPeerChannel{ChannelID: channelID}, nil
+	return nil, fmt.Errorf("channel %d not found", channelID)
 }
