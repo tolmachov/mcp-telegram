@@ -7,7 +7,7 @@ import (
 
 	"github.com/urfave/cli/v3"
 
-	"github.com/tolmachov/mcp-telegram/internal/config"
+	"github.com/tolmachov/mcp-telegram/internal/flags"
 	"github.com/tolmachov/mcp-telegram/internal/server"
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
@@ -32,32 +32,32 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 				Name:  "run",
 				Usage: "Run the MCP server",
 				Flags: []cli.Flag{
-					apiIDFlag(),
-					apiHashFlag(),
-					allowedPathsFlag(),
-					summarizeProviderFlag(),
-					summarizeModelFlag(),
-					ollamaURLFlag(),
-					geminiAPIKeyFlag(),
-					anthropicAPIKeyFlag(),
-					summarizeBatchTokensFlag(),
+					flags.APIIDFlag(),
+					flags.APIHashFlag(),
+					flags.AllowedPathsFlag(),
+					flags.SummarizeProviderFlag(),
+					flags.SummarizeModelFlag(),
+					flags.OllamaURLFlag(),
+					flags.GeminiAPIKeyFlag(),
+					flags.AnthropicAPIKeyFlag(),
+					flags.SummarizeBatchTokensFlag(),
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					cfg := &tgclient.Config{
-						APIID:   cmd.Int(flagAPIID),
-						APIHash: cmd.String(flagAPIHash),
+						APIID:   cmd.Int(flags.APIID),
+						APIHash: cmd.String(flags.APIHash),
 					}
 					if cfg.APIID == 0 || cfg.APIHash == "" {
-						return fmt.Errorf("%s and %s are required (set via env, flags, or 'config set')", config.EnvTelegramAPIID, config.EnvTelegramAPIHash)
+						return fmt.Errorf("%s and %s are required (set via env, flags, or 'config set')", flags.EnvTelegramAPIID, flags.EnvTelegramAPIHash)
 					}
-					allowedPaths := cmd.StringSlice(flagAllowedPaths)
+					allowedPaths := cmd.StringSlice(flags.AllowedPaths)
 					summarizeCfg := summarize.Config{
-						Provider:        summarize.ProviderName(cmd.String(flagSummarizeProvider)),
-						Model:           cmd.String(flagSummarizeModel),
-						OllamaURL:       cmd.String(flagOllamaURL),
-						GeminiAPIKey:    cmd.String(flagGeminiAPIKey),
-						AnthropicAPIKey: cmd.String(flagAnthropicAPIKey),
-						BatchTokens:     cmd.Int(flagSummarizeBatchTokens),
+						Provider:        summarize.ProviderName(cmd.String(flags.SummarizeProvider)),
+						Model:           cmd.String(flags.SummarizeModel),
+						OllamaURL:       cmd.String(flags.OllamaURL),
+						GeminiAPIKey:    cmd.String(flags.GeminiAPIKey),
+						AnthropicAPIKey: cmd.String(flags.AnthropicAPIKey),
+						BatchTokens:     cmd.Int(flags.SummarizeBatchTokens),
 					}
 					srv, err := server.New(cfg, Version, allowedPaths, summarizeCfg, cmd.Root().Reader, cmd.Root().Writer, cmd.Root().ErrWriter)
 					if err != nil {
@@ -70,21 +70,21 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 				Name:  "login",
 				Usage: "Login to Telegram",
 				Flags: []cli.Flag{
-					apiIDFlag(),
-					apiHashFlag(),
-					phoneFlag(),
+					flags.APIIDFlag(),
+					flags.APIHashFlag(),
+					flags.PhoneFlag(),
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
-					phone := cmd.String(flagPhone)
+					phone := cmd.String(flags.Phone)
 					if phone == "" {
 						return fmt.Errorf("phone number is required")
 					}
 					cfg := &tgclient.Config{
-						APIID:   cmd.Int(flagAPIID),
-						APIHash: cmd.String(flagAPIHash),
+						APIID:   cmd.Int(flags.APIID),
+						APIHash: cmd.String(flags.APIHash),
 					}
 					if cfg.APIID == 0 || cfg.APIHash == "" {
-						return fmt.Errorf("%s and %s are required (set via env, flags, or 'config set')", config.EnvTelegramAPIID, config.EnvTelegramAPIHash)
+						return fmt.Errorf("%s and %s are required (set via env, flags, or 'config set')", flags.EnvTelegramAPIID, flags.EnvTelegramAPIHash)
 					}
 					return tgclient.Login(ctx, cfg, phone)
 				},
@@ -93,13 +93,13 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 				Name:  "logout",
 				Usage: "Logout from Telegram",
 				Flags: []cli.Flag{
-					apiIDFlag(),
-					apiHashFlag(),
+					flags.APIIDFlag(),
+					flags.APIHashFlag(),
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					cfg := &tgclient.Config{
-						APIID:   cmd.Int(flagAPIID),
-						APIHash: cmd.String(flagAPIHash),
+						APIID:   cmd.Int(flags.APIID),
+						APIHash: cmd.String(flags.APIHash),
 					}
 					return tgclient.Logout(ctx, cfg)
 				},
@@ -110,7 +110,7 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 				Commands: []*cli.Command{
 					{
 						Name:      "set",
-						Usage:     fmt.Sprintf("Store a config value securely (e.g., %s, %s)", config.EnvTelegramAPIID, config.EnvAnthropicAPIKey),
+						Usage:     fmt.Sprintf("Store a config value securely (e.g., %s, %s)", flags.EnvTelegramAPIID, flags.EnvAnthropicAPIKey),
 						ArgsUsage: "<key> <value>",
 						Action:    configSetAction,
 					},

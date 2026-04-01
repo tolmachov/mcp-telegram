@@ -1,67 +1,75 @@
-package internal
+package flags
 
 import (
 	"context"
 
 	"github.com/urfave/cli/v3"
 
-	"github.com/tolmachov/mcp-telegram/internal/config"
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
 	"github.com/tolmachov/mcp-telegram/internal/tools"
 )
 
+// Environment variable name constants.
 const (
-	flagAPIID                = "api-id"
-	flagAPIHash              = "api-hash"
-	flagAllowedPaths         = "allowed-paths"
-	flagPhone                = "phone"
-	flagSummarizeProvider    = "summarize-provider"
-	flagSummarizeModel       = "summarize-model"
-	flagOllamaURL            = "ollama-url"
-	flagGeminiAPIKey         = "gemini-api-key"    //nolint:gosec // flag name, not a credential
-	flagAnthropicAPIKey      = "anthropic-api-key" //nolint:gosec // flag name, not a credential
-	flagSummarizeBatchTokens = "summarize-batch-tokens"
+	EnvTelegramAPIID   = "TELEGRAM_API_ID"
+	EnvTelegramAPIHash = "TELEGRAM_API_HASH"
+	EnvAnthropicAPIKey = "ANTHROPIC_API_KEY" //nolint:gosec // env var name, not a credential
+	EnvGeminiAPIKey    = "GEMINI_API_KEY"    //nolint:gosec // env var name, not a credential
 )
 
-func apiIDFlag() *cli.IntFlag {
+// Flag name constants.
+const (
+	APIID                = "api-id"
+	APIHash              = "api-hash"
+	AllowedPaths         = "allowed-paths"
+	Phone                = "phone"
+	SummarizeProvider    = "summarize-provider"
+	SummarizeModel       = "summarize-model"
+	OllamaURL            = "ollama-url"
+	GeminiAPIKey         = "gemini-api-key"    //nolint:gosec // flag name, not a credential
+	AnthropicAPIKey      = "anthropic-api-key" //nolint:gosec // flag name, not a credential
+	SummarizeBatchTokens = "summarize-batch-tokens"
+)
+
+func APIIDFlag() *cli.IntFlag {
 	return &cli.IntFlag{
-		Name:     flagAPIID,
+		Name:     APIID,
 		Usage:    "Telegram API ID",
-		Sources:  cli.EnvVars(config.EnvTelegramAPIID),
+		Sources:  cli.EnvVars(EnvTelegramAPIID),
 		Required: true,
 	}
 }
 
-func apiHashFlag() *cli.StringFlag {
+func APIHashFlag() *cli.StringFlag {
 	return &cli.StringFlag{
-		Name:     flagAPIHash,
+		Name:     APIHash,
 		Usage:    "Telegram API Hash",
-		Sources:  cli.EnvVars(config.EnvTelegramAPIHash),
+		Sources:  cli.EnvVars(EnvTelegramAPIHash),
 		Required: true,
 	}
 }
 
-func allowedPathsFlag() *cli.StringSliceFlag {
+func AllowedPathsFlag() *cli.StringSliceFlag {
 	return &cli.StringSliceFlag{
-		Name:    flagAllowedPaths,
+		Name:    AllowedPaths,
 		Usage:   "Allowed directories for file operations",
 		Sources: cli.EnvVars("TELEGRAM_ALLOWED_PATHS"),
 		Value:   []string{tools.DefaultBackupDir()},
 	}
 }
 
-func phoneFlag() *cli.StringFlag {
+func PhoneFlag() *cli.StringFlag {
 	return &cli.StringFlag{
-		Name:     flagPhone,
+		Name:     Phone,
 		Aliases:  []string{"p"},
 		Usage:    "Phone number with country code (e.g., +1234567890)",
 		Required: true,
 	}
 }
 
-func summarizeProviderFlag() *cli.StringFlag {
+func SummarizeProviderFlag() *cli.StringFlag {
 	return &cli.StringFlag{
-		Name:    flagSummarizeProvider,
+		Name:    SummarizeProvider,
 		Value:   string(summarize.ProviderSampling),
 		Usage:   "Provider for summarization: 'sampling', 'ollama', 'gemini', or 'anthropic'",
 		Sources: cli.EnvVars("SUMMARIZE_PROVIDER"),
@@ -71,42 +79,42 @@ func summarizeProviderFlag() *cli.StringFlag {
 	}
 }
 
-func summarizeModelFlag() *cli.StringFlag {
+func SummarizeModelFlag() *cli.StringFlag {
 	return &cli.StringFlag{
-		Name:    flagSummarizeModel,
+		Name:    SummarizeModel,
 		Usage:   "Model for summarization (provider-specific)",
 		Sources: cli.EnvVars("SUMMARIZE_MODEL"),
 	}
 }
 
-func ollamaURLFlag() *cli.StringFlag {
+func OllamaURLFlag() *cli.StringFlag {
 	return &cli.StringFlag{
-		Name:    flagOllamaURL,
+		Name:    OllamaURL,
 		Value:   "http://localhost:11434",
 		Usage:   "Ollama API URL (used when summarize-provider is 'ollama')",
 		Sources: cli.EnvVars("OLLAMA_URL"),
 	}
 }
 
-func geminiAPIKeyFlag() *cli.StringFlag {
+func GeminiAPIKeyFlag() *cli.StringFlag {
 	return &cli.StringFlag{
-		Name:    flagGeminiAPIKey,
+		Name:    GeminiAPIKey,
 		Usage:   "Gemini API key (used when summarize-provider is 'gemini')",
-		Sources: cli.EnvVars(config.EnvGeminiAPIKey),
+		Sources: cli.EnvVars(EnvGeminiAPIKey),
 	}
 }
 
-func anthropicAPIKeyFlag() *cli.StringFlag {
+func AnthropicAPIKeyFlag() *cli.StringFlag {
 	return &cli.StringFlag{
-		Name:    flagAnthropicAPIKey,
+		Name:    AnthropicAPIKey,
 		Usage:   "Anthropic API key (used when summarize-provider is 'anthropic')",
-		Sources: cli.EnvVars(config.EnvAnthropicAPIKey),
+		Sources: cli.EnvVars(EnvAnthropicAPIKey),
 	}
 }
 
-func summarizeBatchTokensFlag() *cli.IntFlag {
+func SummarizeBatchTokensFlag() *cli.IntFlag {
 	return &cli.IntFlag{
-		Name:    flagSummarizeBatchTokens,
+		Name:    SummarizeBatchTokens,
 		Value:   summarize.DefaultBatchTokens,
 		Usage:   "Approximate number of tokens per batch for summarization",
 		Sources: cli.EnvVars("SUMMARIZE_BATCH_TOKENS"),
