@@ -155,7 +155,7 @@ func (h *ChatsSearchHandler) searchGlobal(ctx context.Context, query string) ([]
 				chatType = "supergroup"
 			}
 			// Convert to user-facing format with -100 prefix
-			id := -1000000000000 - c.ID
+			id := -tgclient.ChannelIDPrefix - c.ID
 			results = append(results, tgdata.ChatInfo{
 				ID:       id,
 				Type:     chatType,

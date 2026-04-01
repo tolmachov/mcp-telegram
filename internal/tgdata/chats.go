@@ -61,7 +61,7 @@ func GetChats(ctx context.Context, client *tg.Client, onProgress ProgressFunc) (
 			}
 		case *tg.InputPeerChannel:
 			// Convert to user-facing format with -100 prefix
-			id = -1000000000000 - p.ChannelID
+			id = -tgclient.ChannelIDPrefix - p.ChannelID
 			chatType = "channel"
 			if channel, ok := channels[p.ChannelID]; ok {
 				name = channel.Title

@@ -6,6 +6,9 @@ import (
 	"github.com/gotd/td/tg"
 )
 
+// ChannelIDPrefix is the offset Telegram Bot API adds to channel IDs (the -100 prefix).
+const ChannelIDPrefix = 1_000_000_000_000
+
 // ResolvePeer resolves a dialog ID to an InputPeerClass.
 // Handles users, chats, channels, and supergroups.
 //
@@ -39,9 +42,9 @@ func ResolvePeer(ctx context.Context, client *tg.Client, dialogID int64) (tg.Inp
 	// Negative IDs are channels or supergroups.
 	// Convert from user-facing format to MTProto format.
 	channelID := -dialogID // Remove minus sign: -(-1001234567890) = 1001234567890
-	if channelID > 1000000000000 {
+	if channelID > ChannelIDPrefix {
 		// Has -100 prefix, remove it: 1001234567890 - 1000000000000 = 1234567890
-		channelID -= 1000000000000
+		channelID -= ChannelIDPrefix
 	}
 
 	channels, err := client.ChannelsGetChannels(ctx, []tg.InputChannelClass{
