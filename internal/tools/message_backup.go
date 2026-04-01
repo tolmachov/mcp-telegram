@@ -62,9 +62,10 @@ func sanitizeFilename(name string) string {
 	}
 	// Trim spaces and dots from edges
 	result = strings.Trim(result, " .")
-	// Limit length
-	if len(result) > maxFilenameLength {
-		result = result[:maxFilenameLength]
+	// Limit length (use runes to avoid splitting multi-byte UTF-8 characters)
+	runes := []rune(result)
+	if len(runes) > maxFilenameLength {
+		result = string(runes[:maxFilenameLength])
 	}
 	if result == "" {
 		result = "backup"
