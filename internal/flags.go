@@ -5,6 +5,7 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/tolmachov/mcp-telegram/internal/config"
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
 	"github.com/tolmachov/mcp-telegram/internal/tools"
 )
@@ -26,7 +27,7 @@ func apiIDFlag() *cli.IntFlag {
 	return &cli.IntFlag{
 		Name:     flagAPIID,
 		Usage:    "Telegram API ID",
-		Sources:  cli.EnvVars("TELEGRAM_API_ID"),
+		Sources:  cli.EnvVars(config.EnvTelegramAPIID),
 		Required: true,
 	}
 }
@@ -35,7 +36,7 @@ func apiHashFlag() *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:     flagAPIHash,
 		Usage:    "Telegram API Hash",
-		Sources:  cli.EnvVars("TELEGRAM_API_HASH"),
+		Sources:  cli.EnvVars(config.EnvTelegramAPIHash),
 		Required: true,
 	}
 }

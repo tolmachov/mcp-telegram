@@ -7,6 +7,7 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/tolmachov/mcp-telegram/internal/config"
 	"github.com/tolmachov/mcp-telegram/internal/server"
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
@@ -47,7 +48,7 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 						APIHash: cmd.String(flagAPIHash),
 					}
 					if cfg.APIID == 0 || cfg.APIHash == "" {
-						return fmt.Errorf("TELEGRAM_API_ID and TELEGRAM_API_HASH are required (set via env, flags, or 'config set')")
+						return fmt.Errorf("%s and %s are required (set via env, flags, or 'config set')", config.EnvTelegramAPIID, config.EnvTelegramAPIHash)
 					}
 					allowedPaths := cmd.StringSlice(flagAllowedPaths)
 					summarizeCfg := summarize.Config{
@@ -83,7 +84,7 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 						APIHash: cmd.String(flagAPIHash),
 					}
 					if cfg.APIID == 0 || cfg.APIHash == "" {
-						return fmt.Errorf("TELEGRAM_API_ID and TELEGRAM_API_HASH are required (set via env, flags, or 'config set')")
+						return fmt.Errorf("%s and %s are required (set via env, flags, or 'config set')", config.EnvTelegramAPIID, config.EnvTelegramAPIHash)
 					}
 					return tgclient.Login(ctx, cfg, phone)
 				},
@@ -109,7 +110,7 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 				Commands: []*cli.Command{
 					{
 						Name:      "set",
-						Usage:     "Store a config value securely (e.g., TELEGRAM_API_ID, ANTHROPIC_API_KEY)",
+						Usage:     fmt.Sprintf("Store a config value securely (e.g., %s, %s)", config.EnvTelegramAPIID, config.EnvAnthropicAPIKey),
 						ArgsUsage: "<key> <value>",
 						Action:    configSetAction,
 					},
