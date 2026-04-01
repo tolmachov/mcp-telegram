@@ -46,6 +46,9 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 						APIID:   cmd.Int(flagAPIID),
 						APIHash: cmd.String(flagAPIHash),
 					}
+					if cfg.APIID == 0 || cfg.APIHash == "" {
+						return fmt.Errorf("TELEGRAM_API_ID and TELEGRAM_API_HASH are required (set via env, flags, or 'config set')")
+					}
 					allowedPaths := cmd.StringSlice(flagAllowedPaths)
 					summarizeCfg := summarize.Config{
 						Provider:        summarize.ProviderName(cmd.String(flagSummarizeProvider)),
@@ -78,6 +81,9 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					cfg := &tgclient.Config{
 						APIID:   cmd.Int(flagAPIID),
 						APIHash: cmd.String(flagAPIHash),
+					}
+					if cfg.APIID == 0 || cfg.APIHash == "" {
+						return fmt.Errorf("TELEGRAM_API_ID and TELEGRAM_API_HASH are required (set via env, flags, or 'config set')")
 					}
 					return tgclient.Login(ctx, cfg, phone)
 				},
