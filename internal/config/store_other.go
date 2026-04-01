@@ -28,7 +28,9 @@ func configPath() string {
 	}
 
 	configDir := filepath.Join(stateHome, "mcp-telegram")
-	_ = os.MkdirAll(configDir, 0o700)
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "warning: failed to create config directory %s: %v\n", configDir, err)
+	}
 
 	return filepath.Join(configDir, "config.json")
 }
