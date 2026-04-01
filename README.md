@@ -31,7 +31,7 @@ Or build from source:
 ```bash
 git clone https://github.com/tolmachov/mcp-telegram.git
 cd mcp-telegram
-go build -o mcp-telegram .
+make
 ```
 
 ## Setup
@@ -80,23 +80,11 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 
 #### Claude Code
 
-Add to `~/.claude/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "tg": {
-      "type": "stdio",
-      "command": "/path/to/mcp-telegram",
-      "args": ["run"],
-      "env": {
-        "TELEGRAM_API_ID": "your_api_id",
-        "TELEGRAM_API_HASH": "your_api_hash"
-      }
-    }
-  }
-}
+```bash
+claude mcp add telegram -- /path/to/mcp-telegram run
 ```
+
+Set environment variables in your `.env` file or pass them via `--env`.
 
 ## Available Tools
 
