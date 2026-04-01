@@ -92,7 +92,7 @@ func geminiAPIKeyFlag() *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:    flagGeminiAPIKey,
 		Usage:   "Gemini API key (used when summarize-provider is 'gemini')",
-		Sources: cli.EnvVars("GEMINI_API_KEY"),
+		Sources: cli.EnvVars(config.EnvGeminiAPIKey),
 	}
 }
 
@@ -100,7 +100,7 @@ func anthropicAPIKeyFlag() *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:    flagAnthropicAPIKey,
 		Usage:   "Anthropic API key (used when summarize-provider is 'anthropic')",
-		Sources: cli.EnvVars("ANTHROPIC_API_KEY"),
+		Sources: cli.EnvVars(config.EnvAnthropicAPIKey),
 	}
 }
 
