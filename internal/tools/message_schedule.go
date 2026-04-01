@@ -54,7 +54,7 @@ func (h *MessageScheduleHandler) Handle(ctx context.Context, request mcp.CallToo
 	}
 
 	delaySeconds := mcp.ParseInt(request, "delay_seconds", 0)
-	if delaySeconds < 0 {
+	if delaySeconds <= 0 {
 		return mcp.NewToolResultError("delay_seconds must be a positive number"), nil
 	}
 
