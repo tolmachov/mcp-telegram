@@ -44,6 +44,15 @@ make
 
 ### 2. Configure Environment
 
+Store credentials securely (macOS Keychain / encrypted file on Linux):
+
+```bash
+mcp-telegram config set TELEGRAM_API_ID 123456789
+mcp-telegram config set TELEGRAM_API_HASH abcd1234efgh5678
+```
+
+Or use a `.env` file:
+
 ```bash
 cp .env.example .env
 # Edit .env with your credentials
@@ -168,7 +177,19 @@ mcp-telegram login --phone +1234567890
 
 # Logout and delete session
 mcp-telegram logout
+
+# Securely store config values (macOS Keychain / file on Linux)
+mcp-telegram config set TELEGRAM_API_ID 123456789
+mcp-telegram config set TELEGRAM_API_HASH abcd1234
+
+# List stored keys
+mcp-telegram config list
+
+# Delete a stored value
+mcp-telegram config delete TELEGRAM_API_ID
 ```
+
+Allowed keys: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`.
 
 ## Configuration Options
 
