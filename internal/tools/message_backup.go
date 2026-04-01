@@ -8,7 +8,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gotd/td/tg"
@@ -215,10 +214,11 @@ type backupProgress struct {
 	messageCount    int
 	lastMsg         string
 
-	// Ticker for periodic notifications
-	ticker *time.Ticker
-	done   chan struct{}
-	state  atomic.Uint32 // progressStateCreated -> progressStateRunning -> progressStateStopped
+	// Lifecycle state protected by stateMu
+	stateMu sync.Mutex
+	ticker  *time.Ticker
+	done    chan struct{}
+	state   uint32 // progressStateCreated -> progressStateRunning -> progressStateStopped
 }
 
 func newBackupProgress(
@@ -262,10 +262,15 @@ func newBackupProgress(
 }
 
 func (bp *backupProgress) Start() {
-	if !bp.state.CompareAndSwap(progressStateCreated, progressStateRunning) {
+	bp.stateMu.Lock()
+	if bp.state != progressStateCreated {
+		bp.stateMu.Unlock()
 		panic("backupProgress already started")
 	}
+	bp.state = progressStateRunning
 	bp.ticker = time.NewTicker(5 * time.Second)
+	bp.stateMu.Unlock()
+
 	go func() {
 		for {
 			select {
@@ -284,13 +289,15 @@ func (bp *backupProgress) Start() {
 }
 
 func (bp *backupProgress) Stop() {
-	if !bp.state.CompareAndSwap(progressStateRunning, progressStateStopped) {
+	bp.stateMu.Lock()
+	if bp.state != progressStateRunning {
+		bp.stateMu.Unlock()
 		panic("backupProgress is not running")
 	}
-	if bp.ticker != nil {
-		bp.ticker.Stop()
-	}
+	bp.state = progressStateStopped
+	bp.ticker.Stop()
 	close(bp.done)
+	bp.stateMu.Unlock()
 }
 
 func (bp *backupProgress) SetMessage(msg string) {
