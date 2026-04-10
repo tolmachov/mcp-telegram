@@ -20,8 +20,8 @@ const (
 type SessionStorage struct{}
 
 // NewSessionStorage creates a new SessionStorage.
-func NewSessionStorage() *SessionStorage {
-	return &SessionStorage{}
+func NewSessionStorage() (*SessionStorage, error) {
+	return &SessionStorage{}, nil
 }
 
 // LoadSession loads session data from Keychain.
@@ -55,7 +55,9 @@ func (s *SessionStorage) StoreSession(_ context.Context, data []byte) error {
 	deleteItem.SetSecClass(keychain.SecClassGenericPassword)
 	deleteItem.SetService(keychainService)
 	deleteItem.SetAccount(keychainAccount)
-	_ = keychain.DeleteItem(deleteItem) // Ignore error if not found
+	if err := keychain.DeleteItem(deleteItem); err != nil && !errors.Is(err, keychain.ErrorItemNotFound) {
+		return fmt.Errorf("removing existing keychain item: %w", err)
+	}
 
 	// Add new item
 	item := keychain.NewItem()

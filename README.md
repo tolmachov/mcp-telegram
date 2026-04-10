@@ -16,7 +16,7 @@
 ## Features
 
 - **Chat Management**: List, search, mute/unmute chats
-- **Messages**: Read, send, draft, schedule, and backup messages
+- **Messages**: Read, search, inspect context, send, draft, schedule, link-resolve, and backup messages
 - **AI Summarization**: Summarize chat conversations using multiple LLM providers
 - **Secure**: Session stored in macOS Keychain (file-based storage on Linux/Windows)
 
@@ -44,7 +44,7 @@ make
 
 ### 2. Configure Environment
 
-Store credentials securely (macOS Keychain / encrypted file on Linux):
+Store credentials (macOS Keychain; plaintext JSON at `~/.local/state/mcp-telegram/config.json` with `0600` perms on Linux/Windows):
 
 ```bash
 mcp-telegram config set TELEGRAM_API_ID 123456789
@@ -97,24 +97,32 @@ Set environment variables in your `.env` file or pass them via `--env`.
 
 ## Available Tools
 
+19 tools exposed to MCP clients. Messages are identified by opaque string
+handles (`"42"` for regular, `"s:42"` for scheduled) — copy them back
+verbatim from tool outputs to follow-up calls, never parse or construct
+them manually.
+
 | Tool | Description |
 |------|-------------|
 | `GetMe` | Get current user information |
 | `GetChats` | List all chats, groups, and channels |
 | `SearchChats` | Fuzzy search for chats by name |
 | `GetChatInfo` | Get detailed information about a chat |
-| `GetMessages` | Get messages from a chat |
-| `SendMessage` | Send a message |
-| `DraftMessage` | Save a draft message |
-| `ScheduleMessage` | Schedule a message for later |
-| `GetScheduledMessages` | List scheduled messages |
-| `DeleteScheduledMessage` | Cancel a scheduled message |
-| `BackupMessages` | Export messages to a text file |
+| `GetMessages` | Get messages from a chat (set `include_scheduled=true` to also list pending scheduled messages in a separate field) |
+| `SearchMessages` | Search within one chat by substring, with optional date / sender / media / thread filters |
+| `SearchMessagesGlobal` | Search by substring across all chats with opaque cursor-based pagination |
+| `GetMessageContext` | Get messages around a specific anchor message in chronological order |
+| `SendMessage` | Send, reply, schedule, or draft a message. `mode` = `send` (default) / `schedule` / `draft`; `reply_to_message_id` works with any mode; `schedule_at` is RFC3339 |
+| `EditMessage` | Edit a message; for scheduled handles, `schedule_at` reschedules delivery in the same call |
+| `DeleteMessage` | Delete a message; `"s:<id>"` handles cancel pending scheduled messages |
+| `ForwardMessage` | Forward a delivered message (scheduled handles are rejected) |
+| `ResolveMessageLink` | Parse `t.me` / `tg://` message links into `chat_id`, `message_id`, and `topic_message_id` for forum links |
+| `MarkAsRead` | Mark one or more chats as read |
+| `BackupMessages` | Export messages to a text file (idempotent; overwrites target) |
 | `ResolveUsername` | Resolve @username to user/chat info |
-| `MuteChat` | Mute chat notifications |
-| `UnmuteChat` | Unmute chat notifications |
-| `SummarizeChat` | AI-powered chat summarization |
-| `GetMedia` | Get photo from a message by resource URI |
+| `SetChatMute` | Mute or unmute chat notifications (`muted` bool + optional `duration_seconds`) |
+| `SummarizeChat` | AI-powered chat summarization via sampling / Gemini / Ollama / Anthropic |
+| `GetMedia` | Download photo media from a message resource URI; returns MCP image content |
 
 ## Available Resources
 
@@ -122,9 +130,10 @@ Set environment variables in your `.env` file or pass them via `--env`.
 |-----|-------------|
 | `telegram://me` | Current user info |
 | `telegram://chats` | All chats list |
-| `telegram://chats/{id}` | Last 100 messages from a pinned chat (dynamic) |
+| `telegram://chat/{id}/info` | Detailed info for any chat ID via resource template |
+| `telegram://chats/{id}` | Last 100 messages from a pinned chat (dynamic resource, only for currently pinned chats) |
 
-Pinned chat resources are created dynamically for each pinned chat and updated on every `resources/list` request.
+Pinned chat resources are created dynamically for each pinned chat and refreshed in the background; clients will receive `resources/list_changed` when the set changes.
 
 ## Prompt Examples
 
@@ -135,6 +144,8 @@ Here are some example prompts you can use with AI assistants:
 - "Summarize all my unread Telegram messages"
 - "Read and analyze my unread messages, prepare draft responses where needed"
 - "Check non-critical unread messages and give me a brief overview"
+- "Find messages mentioning 'invoice' in my work chat from last week"
+- "Open the context around this Telegram link: https://t.me/example/123"
 
 ### Organization
 - "Analyze my Telegram dialogs and suggest a folder structure"
@@ -145,10 +156,12 @@ Here are some example prompts you can use with AI assistants:
 - "Monitor specific chat for updates about [topic]"
 - "Draft a polite response to the last message in [chat]"
 - "Check if there are any unanswered questions in my chats"
+- "Resolve this Telegram message link and show me the thread context"
 
 ### Backup & Export
 - "Backup my conversation with [contact] to a file"
 - "Export the last week of messages from [group]"
+- "Backup media-only updates too so nothing is silently skipped"
 
 ## Chat Summarization
 
@@ -205,10 +218,16 @@ Allowed keys: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `ANTHROPIC_API_KEY`, `GEMI
 | `GEMINI_API_KEY` | Google Gemini API key | - |
 | `ANTHROPIC_API_KEY` | Anthropic API key | - |
 
+## Destructive Actions
+
+Tools like `DeleteMessage` request user confirmation via [MCP elicitation](https://modelcontextprotocol.io/docs/concepts/elicitation) before proceeding. If your MCP client does not support elicitation, the server relies on the LLM's instructions to confirm verbally before executing destructive operations.
+
 ## Session Storage
 
-- **macOS**: Stored securely in Keychain
-- **Linux/Windows**: Stored in `~/.local/state/mcp-telegram/session.json`
+- **macOS**: Stored securely in Keychain.
+- **Linux/Windows**: Stored in `~/.local/state/mcp-telegram/session.json` with `0600` file permissions. The file is **plaintext** — keep the containing user account trusted, and prefer running on macOS when handling sensitive accounts.
+
+Config values set via `mcp-telegram config set` (API keys, Telegram credentials) follow the same backend: Keychain on macOS, plaintext JSON on Linux/Windows.
 
 ## License
 

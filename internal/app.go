@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/urfave/cli/v3"
 
@@ -41,6 +42,9 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					flags.GeminiAPIKeyFlag(),
 					flags.AnthropicAPIKeyFlag(),
 					flags.SummarizeBatchTokensFlag(),
+					flags.MediaMaxBytesFlag(),
+					flags.TGRateLimitRPSFlag(),
+					flags.PinnedRefreshSecsFlag(),
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					cfg := &tgclient.Config{
@@ -59,7 +63,19 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 						AnthropicAPIKey: cmd.String(flags.AnthropicAPIKey),
 						BatchTokens:     cmd.Int(flags.SummarizeBatchTokens),
 					}
-					srv, err := server.New(cfg, Version, allowedPaths, summarizeCfg, cmd.Root().Reader, cmd.Root().Writer, cmd.Root().ErrWriter)
+					serverOpts := server.Options{
+						Config:           cfg,
+						Version:          Version,
+						AllowedPaths:     allowedPaths,
+						SummarizeCfg:     summarizeCfg,
+						MediaMaxBytes:    cmd.Int(flags.MediaMaxBytes),
+						TGRateLimitRPS:   cmd.Int(flags.TGRateLimitRPS),
+						PinnedRefresh:    time.Duration(cmd.Int(flags.PinnedRefreshSecs)) * time.Second,
+						Stdin:            cmd.Root().Reader,
+						Stdout:           cmd.Root().Writer,
+						ErrOut:           cmd.Root().ErrWriter,
+					}
+					srv, err := server.New(serverOpts)
 					if err != nil {
 						return err
 					}
@@ -100,6 +116,9 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					cfg := &tgclient.Config{
 						APIID:   cmd.Int(flags.APIID),
 						APIHash: cmd.String(flags.APIHash),
+					}
+					if cfg.APIID == 0 || cfg.APIHash == "" {
+						return fmt.Errorf("%s and %s are required (set via env, flags, or 'config set')", flags.EnvTelegramAPIID, flags.EnvTelegramAPIHash)
 					}
 					return tgclient.Logout(ctx, cfg)
 				},

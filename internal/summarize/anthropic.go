@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -84,21 +86,25 @@ func (p *AnthropicProvider) Summarize(ctx context.Context, prompt string) (strin
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", p.apiKey)
-	req.Header.Set("anthropic-version", "2024-10-22")
+	req.Header.Set("anthropic-version", "2023-06-01")
 
 	resp, err := p.client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("sending request: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Debug("anthropic: response body close failed", "err", err)
+		}
+	}()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if err != nil {
 		return "", fmt.Errorf("reading response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("anthropic returned status %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("anthropic returned status %d: %s", resp.StatusCode, errBodySnippet(respBody))
 	}
 
 	var anthropicResp anthropicResponse
@@ -114,11 +120,21 @@ func (p *AnthropicProvider) Summarize(ctx context.Context, prompt string) (strin
 		return "", fmt.Errorf("no content in response")
 	}
 
+	var textParts []string
 	for _, content := range anthropicResp.Content {
-		if content.Type == "text" {
-			return content.Text, nil
+		if content.Type != "text" {
+			continue
 		}
+		text := strings.TrimSpace(content.Text)
+		if text == "" {
+			continue
+		}
+		textParts = append(textParts, text)
 	}
 
-	return "", fmt.Errorf("no text content in response")
+	if len(textParts) == 0 {
+		return "", fmt.Errorf("no text content in response")
+	}
+
+	return strings.Join(textParts, "\n\n"), nil
 }

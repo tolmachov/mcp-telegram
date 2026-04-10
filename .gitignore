@@ -22,3 +22,6 @@ Thumbs.db
 coverage.html
 
 research/
+
+# Build cache
+.gocache/

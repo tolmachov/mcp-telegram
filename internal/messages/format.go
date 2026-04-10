@@ -30,10 +30,11 @@ func FormatBatchForBackup(messages []Message) string {
 	}
 
 	var sb strings.Builder
-	sb.Grow(len(messages) * 1 << 8) // Preallocate approx 256 bytes per message
+	sb.Grow(len(messages) * 256)
 
 	for _, msg := range messages {
-		if msg.Text == "" {
+		body := backupMessageBody(msg)
+		if body == "" {
 			continue
 		}
 
@@ -52,7 +53,7 @@ func FormatBatchForBackup(messages []Message) string {
 		}
 
 		sb.WriteByte('\n')
-		sb.WriteString(msg.Text)
+		sb.WriteString(body)
 		sb.WriteByte('\n')
 	}
 
@@ -61,6 +62,39 @@ func FormatBatchForBackup(messages []Message) string {
 	}
 
 	return sb.String()
+}
+
+// backupMessageBody returns the textual payload to persist in a backup. Text
+// messages are stored verbatim. Media-only messages are preserved as compact
+// placeholders so the export does not silently drop them.
+func backupMessageBody(msg Message) string {
+	if msg.Text != "" {
+		return msg.Text
+	}
+	if msg.Media == nil {
+		return ""
+	}
+
+	var parts []string
+	if msg.Media.Type != "" {
+		parts = append(parts, msg.Media.Type)
+	}
+	if msg.Media.FileName != "" {
+		parts = append(parts, "file="+msg.Media.FileName)
+	}
+	if msg.Media.URL != "" {
+		parts = append(parts, "url="+msg.Media.URL)
+	}
+	if msg.Media.ResourceURI != "" {
+		parts = append(parts, "resource="+msg.Media.ResourceURI)
+	}
+	if msg.Media.Width > 0 && msg.Media.Height > 0 {
+		parts = append(parts, fmt.Sprintf("size=%dx%d", msg.Media.Width, msg.Media.Height))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "[media: " + strings.Join(parts, ", ") + "]"
 }
 
 // FormatBatchForSummary formats a batch of messages for summarization.

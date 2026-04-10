@@ -17,8 +17,8 @@ const (
 type keychainStore struct{}
 
 // NewStore creates a new config store backed by macOS Keychain.
-func NewStore() Store {
-	return &keychainStore{}
+func NewStore() (Store, error) {
+	return &keychainStore{}, nil
 }
 
 func keychainAccount(key string) string {
@@ -49,12 +49,18 @@ func (s *keychainStore) Get(key string) (string, error) {
 }
 
 func (s *keychainStore) Set(key, value string) error {
-	// Delete existing item first.
+	// Delete existing item first. ErrorItemNotFound is expected on the
+	// "first write" path and must be ignored; any other error is real
+	// (locked keychain, permissions) and would silently corrupt the
+	// store if we proceeded — surface it so the caller can re-try with
+	// the keychain unlocked.
 	deleteItem := keychain.NewItem()
 	deleteItem.SetSecClass(keychain.SecClassGenericPassword)
 	deleteItem.SetService(keychainService)
 	deleteItem.SetAccount(keychainAccount(key))
-	_ = keychain.DeleteItem(deleteItem)
+	if err := keychain.DeleteItem(deleteItem); err != nil && !errors.Is(err, keychain.ErrorItemNotFound) {
+		return fmt.Errorf("clearing previous keychain entry for %s: %w", key, err)
+	}
 
 	item := keychain.NewItem()
 	item.SetSecClass(keychain.SecClassGenericPassword)

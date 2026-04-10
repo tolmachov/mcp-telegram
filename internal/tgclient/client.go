@@ -70,25 +70,43 @@ func (a userAuthenticator) SignUp(_ context.Context) (auth.UserInfo, error) {
 	return auth.UserInfo{}, fmt.Errorf("sign up is not supported")
 }
 
+// FloodWaitCallback is invoked when the floodwait middleware throttles a
+// request. The duration is how long the middleware will sleep before retrying.
+// Use this to surface throttling to the MCP client (via mcpLog at warning
+// level) so users understand why a tool is slow.
+type FloodWaitCallback func(ctx context.Context, duration time.Duration)
+
 // CreateClient creates a new Telegram client with session storage and flood wait handling.
 // Returns the client and a floodwait.Waiter that should wrap the client.Run() call.
-func CreateClient(cfg *Config) (*telegram.Client, *floodwait.Waiter) {
-	storage := NewSessionStorage()
+// If onFloodWait is non-nil, it is invoked each time the waiter sleeps for a flood wait.
+func CreateClient(cfg *Config, onFloodWait FloodWaitCallback) (*telegram.Client, *floodwait.Waiter, error) {
+	storage, err := NewSessionStorage()
+	if err != nil {
+		return nil, nil, err
+	}
 	waiter := floodwait.NewWaiter().WithMaxWait(60 * time.Second)
+	if onFloodWait != nil {
+		waiter = waiter.WithCallback(func(ctx context.Context, wait floodwait.FloodWait) {
+			onFloodWait(ctx, wait.Duration)
+		})
+	}
 
 	client := telegram.NewClient(cfg.APIID, cfg.APIHash, telegram.Options{
 		SessionStorage: storage,
 		Middlewares:    []telegram.Middleware{waiter},
 	})
 
-	return client, waiter
+	return client, waiter, nil
 }
 
 // Login performs interactive sign-in to Telegram
 func Login(ctx context.Context, cfg *Config, phone string) error {
-	client, waiter := CreateClient(cfg)
+	client, waiter, err := CreateClient(cfg, nil)
+	if err != nil {
+		return fmt.Errorf("creating Telegram client: %w", err)
+	}
 
-	err := waiter.Run(ctx, func(ctx context.Context) error {
+	err = waiter.Run(ctx, func(ctx context.Context) error {
 		return client.Run(ctx, func(ctx context.Context) error {
 			// Check if already authorized
 			status, err := client.Auth().Status(ctx)
@@ -98,8 +116,10 @@ func Login(ctx context.Context, cfg *Config, phone string) error {
 
 			if status.Authorized {
 				user, err := client.Self(ctx)
-				if err == nil {
-					fmt.Printf("Already logged in as @%s\n", user.Username)
+				if err != nil {
+					fmt.Printf("Already logged in (could not fetch display name: %v)\n", err)
+				} else {
+					fmt.Printf("Already logged in as %s\n", UserName(user))
 				}
 				return nil
 			}
@@ -119,7 +139,7 @@ func Login(ctx context.Context, cfg *Config, phone string) error {
 				return fmt.Errorf("getting user info: %w", err)
 			}
 
-			fmt.Printf("Successfully logged in as @%s\n", user.Username)
+			fmt.Printf("Successfully logged in as %s\n", UserName(user))
 			fmt.Println("You can now use the mcp-telegram server.")
 
 			return nil
@@ -133,17 +153,24 @@ func Login(ctx context.Context, cfg *Config, phone string) error {
 
 // Logout logs out from Telegram
 func Logout(ctx context.Context, cfg *Config) error {
-	client, waiter := CreateClient(cfg)
+	client, waiter, err := CreateClient(cfg, nil)
+	if err != nil {
+		return fmt.Errorf("creating Telegram client: %w", err)
+	}
 
-	err := waiter.Run(ctx, func(ctx context.Context) error {
+	err = waiter.Run(ctx, func(ctx context.Context) error {
 		return client.Run(ctx, func(ctx context.Context) error {
 			if _, err := client.API().AuthLogOut(ctx); err != nil {
 				return fmt.Errorf("calling auth logout: %w", err)
 			}
 
 			// Also delete stored session
-			if err := NewSessionStorage().DeleteSession(); err != nil {
-				fmt.Println("Failed to wipe session:", err)
+			ss, err := NewSessionStorage()
+			if err != nil {
+				return fmt.Errorf("logged out from Telegram but failed to init session storage: %w", err)
+			}
+			if err := ss.DeleteSession(); err != nil {
+				return fmt.Errorf("logged out from Telegram but failed to delete local session: %w", err)
 			}
 
 			fmt.Println("Successfully logged out from Telegram.")

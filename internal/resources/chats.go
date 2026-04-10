@@ -6,58 +6,51 @@ import (
 	"fmt"
 
 	"github.com/gotd/td/tg"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
-// ChatsHandler handles the telegram://chats resource
+// ChatsHandler handles the telegram://chats resource.
 type ChatsHandler struct {
 	client *tg.Client
 }
 
-// NewChatsHandler creates a new ChatsHandler
+// NewChatsHandler creates a new ChatsHandler.
 func NewChatsHandler(client *tg.Client) *ChatsHandler {
 	return &ChatsHandler{client: client}
 }
 
-// Resource returns the MCP resource definition
-func (h *ChatsHandler) Resource() mcp.Resource {
-	return mcp.NewResource(
-		"telegram://chats",
-		"Chats List",
-		mcp.WithResourceDescription("List of all chats, groups, and channels"),
-		mcp.WithMIMEType("application/json"),
-	)
+// Register adds the resource to the MCP server.
+func (h *ChatsHandler) Register(s *mcp.Server) {
+	s.AddResource(&mcp.Resource{
+		URI:         "telegram://chats",
+		Name:        "Chats List",
+		Description: "List of all chats, groups, and channels",
+		MIMEType:    "application/json",
+	}, h.handle)
 }
 
-// Handle processes the telegram://chats resource request
-func (h *ChatsHandler) Handle(ctx context.Context, _ mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-	onProgress := func(current int, message string) {
-		if srv := server.ServerFromContext(ctx); srv != nil {
-			_ = srv.SendNotificationToClient(ctx, "notifications/progress", map[string]any{
-				"progress": current,
-				"message":  message,
-			})
-		}
-	}
+func (h *ChatsHandler) handle(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+	// Resource handlers don't get a progress token in the same way tools do —
+	// reads are typically fast and clients don't expect progress on them.
+	// If the progress channel is needed in the future, capture req.Session
+	// and call NotifyProgress with a server-generated token.
+	onProgress := func(_ int, _ string) {}
 
 	result, err := tgdata.GetChats(ctx, h.client, onProgress)
 	if err != nil {
 		return nil, err
 	}
-
 	data, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshaling chats: %w", err)
 	}
-
-	return []mcp.ResourceContents{
-		mcp.TextResourceContents{
+	return &mcp.ReadResourceResult{
+		Contents: []*mcp.ResourceContents{{
 			URI:      "telegram://chats",
 			MIMEType: "application/json",
 			Text:     string(data),
-		},
+		}},
 	}, nil
 }

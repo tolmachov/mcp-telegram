@@ -6,108 +6,124 @@ import (
 	"strings"
 
 	"github.com/gotd/td/tg"
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// UsernameResolveHandler handles the ResolveUsername tool
+// UsernameResolveHandler handles the ResolveUsername tool.
 type UsernameResolveHandler struct {
 	client *tg.Client
 }
 
-// NewUsernameResolveHandler creates a new UsernameResolveHandler
+// NewUsernameResolveHandler creates a new UsernameResolveHandler.
 func NewUsernameResolveHandler(client *tg.Client) *UsernameResolveHandler {
 	return &UsernameResolveHandler{client: client}
 }
 
-// Tool returns the MCP tool definition
-func (h *UsernameResolveHandler) Tool() mcp.Tool {
-	return mcp.NewTool("ResolveUsername",
-		mcp.WithDescription("Resolve a Telegram username to get user/chat/channel ID and information. Use this when you have a @username but need a numeric chat ID for other tools."),
-		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("username",
-			mcp.Description("The username to resolve (with or without @ prefix)"),
-			mcp.Required(),
-		),
-	)
+// ResolveUsernameInput is the input for the ResolveUsername tool.
+type ResolveUsernameInput struct {
+	Username string `json:"username" jsonschema:"The username to resolve (with or without @ prefix)"`
 }
 
-// Handle processes the ResolveUsername tool request
-func (h *UsernameResolveHandler) Handle(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	username := mcp.ParseString(request, "username", "")
-	if username == "" {
-		return mcp.NewToolResultError("username is required"), nil
+// ResolveUsernameEntity is a single resolved entity (user, bot, chat,
+// channel, or supergroup). Kind is always set; other fields are
+// populated when available from the Telegram API response.
+type ResolveUsernameEntity struct {
+	Kind              string `json:"kind"` // "user" | "bot" | "chat" | "channel" | "supergroup"
+	ID                int64  `json:"id"`
+	Username          string `json:"username,omitempty"`
+	Title             string `json:"title,omitempty"`
+	FirstName         string `json:"first_name,omitempty"`
+	LastName          string `json:"last_name,omitempty"`
+	ParticipantsCount int    `json:"participants_count,omitempty"`
+	Verified          bool   `json:"verified,omitempty"`
+	Premium           bool   `json:"premium,omitempty"`
+}
+
+// ResolveUsernameResult is the typed output of ResolveUsername. Returns
+// a list because a single @username can resolve to multiple entities in
+// Telegram's response (e.g., a bot inside a chat), and the model may
+// need to pick the right one.
+type ResolveUsernameResult struct {
+	Query    string                  `json:"query"`
+	Entities []ResolveUsernameEntity `json:"entities"`
+}
+
+// Register adds the tool to the MCP server.
+func (h *UsernameResolveHandler) Register(s *mcp.Server) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "ResolveUsername",
+		Description: "Resolve a Telegram username to get user/chat/channel ID and information. Use this when you have a @username but need a numeric chat ID for other tools. Returns structured entities with kind, id, and metadata.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
+	}, h.handle)
+}
+
+func (h *UsernameResolveHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in ResolveUsernameInput) (*mcp.CallToolResult, *ResolveUsernameResult, error) {
+	if in.Username == "" {
+		return errResult("username is required (e.g. '@durov' or 'durov'). For chats without a public @username, use SearchChats by title instead."), nil, nil
 	}
 
-	// Remove @ prefix if present
-	username = strings.TrimPrefix(username, "@")
+	username := strings.TrimPrefix(in.Username, "@")
 
-	// Resolve username
 	resolved, err := h.client.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{
 		Username: username,
 	})
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to resolve username @%s: %v", username, err)), nil
+		return errResult(fmt.Sprintf("Failed to resolve username @%s: %v", username, err)), nil, nil
 	}
 
-	var results []string
+	out := &ResolveUsernameResult{
+		Query:    "@" + username,
+		Entities: make([]ResolveUsernameEntity, 0, len(resolved.Users)+len(resolved.Chats)),
+	}
 
-	// Check users
 	for _, user := range resolved.Users {
-		if u, ok := user.(*tg.User); ok {
-			result := fmt.Sprintf("type=user id=%d", u.ID)
-			if u.Username != "" {
-				result += fmt.Sprintf(" username=@%s", u.Username)
-			}
-			name := u.FirstName
-			if u.LastName != "" {
-				name += " " + u.LastName
-			}
-			if name != "" {
-				result += fmt.Sprintf(" name='%s'", name)
-			}
-			if u.Bot {
-				result += " bot=true"
-			}
-			if u.Verified {
-				result += " verified=true"
-			}
-			if u.Premium {
-				result += " premium=true"
-			}
-			results = append(results, result)
+		u, ok := user.(*tg.User)
+		if !ok {
+			continue
 		}
+		e := ResolveUsernameEntity{
+			Kind:      "user",
+			ID:        u.ID,
+			Username:  u.Username,
+			FirstName: u.FirstName,
+			LastName:  u.LastName,
+			Verified:  u.Verified,
+			Premium:   u.Premium,
+		}
+		if u.Bot {
+			e.Kind = "bot"
+		}
+		out.Entities = append(out.Entities, e)
 	}
 
-	// Check chats
 	for _, chat := range resolved.Chats {
 		switch c := chat.(type) {
 		case *tg.Chat:
-			result := fmt.Sprintf("type=chat id=%d title='%s' participants=%d",
-				c.ID, c.Title, c.ParticipantsCount)
-			results = append(results, result)
+			out.Entities = append(out.Entities, ResolveUsernameEntity{
+				Kind:              "chat",
+				ID:                c.ID,
+				Title:             c.Title,
+				ParticipantsCount: c.ParticipantsCount,
+			})
 		case *tg.Channel:
-			channelType := "channel"
+			kind := "channel"
 			if c.Megagroup {
-				channelType = "supergroup"
+				kind = "supergroup"
 			}
-			result := fmt.Sprintf("type=%s id=%d title='%s'",
-				channelType, c.ID, c.Title)
-			if c.Username != "" {
-				result += fmt.Sprintf(" username=@%s", c.Username)
-			}
-			if c.ParticipantsCount > 0 {
-				result += fmt.Sprintf(" participants=%d", c.ParticipantsCount)
-			}
-			if c.Verified {
-				result += " verified=true"
-			}
-			results = append(results, result)
+			out.Entities = append(out.Entities, ResolveUsernameEntity{
+				Kind:              kind,
+				ID:                c.ID,
+				Username:          c.Username,
+				Title:             c.Title,
+				ParticipantsCount: c.ParticipantsCount,
+				Verified:          c.Verified,
+			})
 		}
 	}
 
-	if len(results) == 0 {
-		return mcp.NewToolResultError(fmt.Sprintf("Username @%s not found", username)), nil
+	if len(out.Entities) == 0 {
+		return errResult(fmt.Sprintf("Username @%s not found. The user/chat may not exist, may be private, or may not have a public @username. Try SearchChats with a partial title instead.", username)), nil, nil
 	}
 
-	return mcp.NewToolResultText(strings.Join(results, "\n")), nil
+	return nil, out, nil
 }

@@ -22,7 +22,10 @@ func configSetAction(_ context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	store := config.NewStore()
+	store, err := config.NewStore()
+	if err != nil {
+		return fmt.Errorf("initializing config store: %w", err)
+	}
 	if err := store.Set(key, args.Get(1)); err != nil {
 		return fmt.Errorf("storing config value: %w", err)
 	}
@@ -33,7 +36,10 @@ func configSetAction(_ context.Context, cmd *cli.Command) error {
 }
 
 func configListAction(_ context.Context, cmd *cli.Command) error {
-	store := config.NewStore()
+	store, err := config.NewStore()
+	if err != nil {
+		return fmt.Errorf("initializing config store: %w", err)
+	}
 
 	keys, err := store.List()
 	if err != nil {
@@ -64,7 +70,10 @@ func configDeleteAction(_ context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	store := config.NewStore()
+	store, err := config.NewStore()
+	if err != nil {
+		return fmt.Errorf("initializing config store: %w", err)
+	}
 	if err := store.Delete(key); err != nil {
 		return fmt.Errorf("deleting config value: %w", err)
 	}

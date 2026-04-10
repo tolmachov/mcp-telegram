@@ -2,54 +2,44 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/gotd/td/tg"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
-// ChatsGetHandler handles the GetChats tool
+// ChatsGetHandler handles the GetChats tool.
 type ChatsGetHandler struct {
 	client *tg.Client
 }
 
-// NewChatsGetHandler creates a new ChatsGetHandler
+// NewChatsGetHandler creates a new ChatsGetHandler.
 func NewChatsGetHandler(client *tg.Client) *ChatsGetHandler {
 	return &ChatsGetHandler{client: client}
 }
 
-// Tool returns the MCP tool definition
-func (h *ChatsGetHandler) Tool() mcp.Tool {
-	return mcp.NewTool("GetChats",
-		mcp.WithDescription("Get a list of ALL chats, groups, and channels. May be slow for accounts with many chats. To find a specific chat by name, use SearchChats instead."),
-		mcp.WithReadOnlyHintAnnotation(true),
-	)
+// GetChatsInput is the (empty) input for the GetChats tool.
+type GetChatsInput struct{}
+
+// Register adds the tool to the MCP server.
+func (h *ChatsGetHandler) Register(s *mcp.Server) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "GetChats",
+		Description: "Get a list of ALL chats, groups, and channels. May be slow for accounts with many chats. To find a specific chat by name, use SearchChats instead.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
+	}, h.handle)
 }
 
-// Handle processes the GetChats tool request
-func (h *ChatsGetHandler) Handle(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (h *ChatsGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest, _ GetChatsInput) (*mcp.CallToolResult, *tgdata.ChatsList, error) {
 	onProgress := func(current int, message string) {
-		if srv := server.ServerFromContext(ctx); srv != nil {
-			_ = srv.SendNotificationToClient(ctx, "notifications/progress", map[string]any{
-				"progress": current,
-				"message":  message,
-			})
-		}
+		sendProgress(ctx, req, float64(current), 0, message)
 	}
 
 	result, err := tgdata.GetChats(ctx, h.client, onProgress)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to get chats: %v", err)), nil
+		return errResult(fmt.Sprintf("Failed to get chats: %v", err)), nil, nil
 	}
-
-	data, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal chats: %v", err)), nil
-	}
-
-	return mcp.NewToolResultText(string(data)), nil
+	return nil, result, nil
 }

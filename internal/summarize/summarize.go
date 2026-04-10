@@ -170,6 +170,11 @@ func (s *Summarizer) summarizeWithProgress(ctx context.Context, prompt string, c
 	resultCh := make(chan result, 1)
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				resultCh <- result{err: fmt.Errorf("summarize provider panicked: %v", r)}
+			}
+		}()
 		summary, err := s.provider.Summarize(ctx, prompt)
 		resultCh <- result{summary: summary, err: err}
 	}()

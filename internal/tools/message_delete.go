@@ -5,89 +5,157 @@ import (
 	"fmt"
 
 	"github.com/gotd/td/tg"
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
-// MessageDeleteHandler handles the DeleteMessage tool
+// MessageDeleteHandler handles the DeleteMessage tool.
 type MessageDeleteHandler struct {
 	client *tg.Client
 }
 
-// NewMessageDeleteHandler creates a new MessageDeleteHandler
+// NewMessageDeleteHandler creates a new MessageDeleteHandler.
 func NewMessageDeleteHandler(client *tg.Client) *MessageDeleteHandler {
 	return &MessageDeleteHandler{client: client}
 }
 
-// Tool returns the MCP tool definition
-func (h *MessageDeleteHandler) Tool() mcp.Tool {
-	return mcp.NewTool("DeleteMessage",
-		mcp.WithDescription("Delete a message from a chat. This action cannot be undone. For non-channel chats, the message will be deleted for all participants. Use GetMessages first to verify the correct message ID."),
-		mcp.WithDestructiveHintAnnotation(true),
-		mcp.WithNumber("chat_id",
-			mcp.Description("The ID of the chat containing the message"),
-			mcp.Required(),
-		),
-		mcp.WithNumber("message_id",
-			mcp.Description("The ID of the message to delete"),
-			mcp.Required(),
-		),
-	)
+// DeleteMessageInput is the input for the DeleteMessage tool.
+//
+// MessageID is an opaque handle returned by GetMessages or SendMessage:
+//   - "42"   → delete a regular (delivered) message
+//   - "s:42" → cancel a pending scheduled message
+//
+// The handle format tells the server which API to call, so there is no
+// round-trip probe to detect the message type.
+type DeleteMessageInput struct {
+	ChatID    int64  `json:"chat_id" jsonschema:"The ID of the chat containing the message"`
+	MessageID string `json:"message_id" jsonschema:"Opaque message handle from GetMessages or SendMessage. \"42\" for a regular message\\, \"s:42\" for a pending scheduled message."`
 }
 
-// Handle processes the DeleteMessage tool request
-func (h *MessageDeleteHandler) Handle(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	chatID := mcp.ParseInt64(request, "chat_id", 0)
-	if chatID == 0 {
-		return mcp.NewToolResultError("chat_id is required"), nil
+// DeleteMessageResult is the typed output of DeleteMessage. The Kind field
+// reports whether the deleted message was regular or scheduled, so clients
+// can render the right confirmation text without re-parsing the input.
+type DeleteMessageResult struct {
+	Status        string `json:"status"`
+	Kind          string `json:"kind"` // "regular" | "scheduled"
+	ChatID        int64  `json:"chat_id"`
+	MessageID     string `json:"message_id"`
+	Pts           int    `json:"pts,omitempty"`
+	RevokedForAll bool   `json:"revoked_for_all,omitempty"`
+}
+
+// Register adds the tool to the MCP server.
+func (h *MessageDeleteHandler) Register(s *mcp.Server) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "DeleteMessage",
+		Description: "Delete a message from a chat. Works for both regular and scheduled messages — the server routes to the correct API based on the opaque handle format (\"42\" regular, \"s:42\" scheduled). Regular deletions remove the message for all participants and cannot be undone. Scheduled deletions cancel pending delivery — the message has not been sent yet. Use GetMessages first (with include_scheduled=true for the scheduled queue) to verify the correct handle.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptrTrue(), OpenWorldHint: ptrTrue()},
+	}, h.handle)
+}
+
+func (h *MessageDeleteHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in DeleteMessageInput) (*mcp.CallToolResult, *DeleteMessageResult, error) {
+	if in.ChatID == 0 {
+		return errChatIDRequired(), nil, nil
 	}
-
-	messageID := mcp.ParseInt(request, "message_id", 0)
-	if messageID == 0 {
-		return mcp.NewToolResultError("message_id is required"), nil
-	}
-
-	// Always revoke (delete for all participants)
-	revoke := true
-
-	// Resolve the peer
-	peer, err := tgclient.ResolvePeer(ctx, h.client, chatID)
+	ref, err := ParseMessageRef(in.MessageID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to resolve peer: %v", err)), nil
+		return errInvalidMessageID(in.MessageID, err), nil, nil
 	}
 
-	// Check if it's a channel
+	peer, err := tgclient.ResolvePeer(ctx, h.client, in.ChatID)
+	if err != nil {
+		return errResolvePeer(in.ChatID, err), nil, nil
+	}
+
+	if ref.Scheduled {
+		return h.deleteScheduled(ctx, req, in.ChatID, ref, peer)
+	}
+	return h.deleteRegular(ctx, req, in.ChatID, ref, peer)
+}
+
+// deleteScheduled cancels a pending scheduled message via
+// messages.deleteScheduledMessages. The confirmation wording calls out
+// that the message has not been sent yet (so "for all participants" is
+// meaningless), and the cancel-path recovery hint points back to
+// GetMessages+include_scheduled for re-discovery.
+func (h *MessageDeleteHandler) deleteScheduled(ctx context.Context, req *mcp.CallToolRequest, chatID int64, ref MessageRef, peer tg.InputPeerClass) (*mcp.CallToolResult, *DeleteMessageResult, error) {
+	confirmed, err := confirmDestructive(ctx, req, fmt.Sprintf(
+		"Cancel scheduled message %d in chat %d? It is stored on Telegram's servers and has not been sent yet.",
+		ref.ID, chatID,
+	))
+	if err != nil {
+		return errResult(fmt.Sprintf("confirmation failed: %v", err)), nil, nil
+	}
+	if !confirmed {
+		return textResult("Cancelled by user. No scheduled message was deleted. Run GetMessages with include_scheduled=true to view pending messages and retry when ready."), nil, nil
+	}
+
+	if _, err := h.client.MessagesDeleteScheduledMessages(ctx, &tg.MessagesDeleteScheduledMessagesRequest{
+		Peer: peer,
+		ID:   []int{ref.ID},
+	}); err != nil {
+		return errResult(fmt.Sprintf("Failed to delete scheduled message: %v", err)), nil, nil
+	}
+	return nil, &DeleteMessageResult{
+		Status:    "deleted",
+		Kind:      "scheduled",
+		ChatID:    chatID,
+		MessageID: ref.Format(),
+	}, nil
+}
+
+// deleteRegular deletes a delivered message via messages.deleteMessages
+// (or channels.deleteMessages for channels/supergroups). Always revokes
+// (deletes for all participants) where the API supports it.
+func (h *MessageDeleteHandler) deleteRegular(ctx context.Context, req *mcp.CallToolRequest, chatID int64, ref MessageRef, peer tg.InputPeerClass) (*mcp.CallToolResult, *DeleteMessageResult, error) {
+	confirmed, err := confirmDestructive(ctx, req, fmt.Sprintf(
+		"Delete message %d in chat %d? This deletes for all participants and cannot be undone.",
+		ref.ID, chatID,
+	))
+	if err != nil {
+		return errResult(fmt.Sprintf("confirmation failed: %v", err)), nil, nil
+	}
+	if !confirmed {
+		return textResult("Cancelled by user. No message was deleted."), nil, nil
+	}
+
 	switch p := peer.(type) {
 	case *tg.InputPeerChannel:
-		// For channels, use channels.deleteMessages
 		affected, err := h.client.ChannelsDeleteMessages(ctx, &tg.ChannelsDeleteMessagesRequest{
 			Channel: &tg.InputChannel{
 				ChannelID:  p.ChannelID,
 				AccessHash: p.AccessHash,
 			},
-			ID: []int{messageID},
+			ID: []int{ref.ID},
 		})
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to delete message: %v", err)), nil
+			return errResult(fmt.Sprintf("Failed to delete message: %v", err)), nil, nil
 		}
-
-		result := fmt.Sprintf("Message deleted successfully!\nChat ID: %d\nMessage ID: %d\nMessages affected: %d",
-			chatID, messageID, affected.Pts)
-		return mcp.NewToolResultText(result), nil
+		return nil, &DeleteMessageResult{
+			Status:        "deleted",
+			Kind:          "regular",
+			ChatID:        chatID,
+			MessageID:     ref.Format(),
+			Pts:           affected.Pts,
+			RevokedForAll: true,
+		}, nil
 
 	default:
-		// For private chats and groups, use messages.deleteMessages
 		affected, err := h.client.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{
-			Revoke: revoke,
-			ID:     []int{messageID},
+			Revoke: true,
+			ID:     []int{ref.ID},
 		})
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to delete message: %v", err)), nil
+			return errResult(fmt.Sprintf("Failed to delete message: %v", err)), nil, nil
 		}
-
-		result := fmt.Sprintf("Message deleted successfully!\nChat ID: %d\nMessage ID: %d\nMessages affected: %d\nRevoked for all: %t",
-			chatID, messageID, affected.Pts, revoke)
-		return mcp.NewToolResultText(result), nil
+		return nil, &DeleteMessageResult{
+			Status:        "deleted",
+			Kind:          "regular",
+			ChatID:        chatID,
+			MessageID:     ref.Format(),
+			Pts:           affected.Pts,
+			RevokedForAll: true,
+		}, nil
 	}
 }

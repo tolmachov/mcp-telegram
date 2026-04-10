@@ -6,111 +6,115 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
-// MessageForwardHandler handles the ForwardMessage tool
+// MessageForwardHandler handles the ForwardMessage tool.
 type MessageForwardHandler struct {
 	client *tg.Client
 }
 
-// NewMessageForwardHandler creates a new MessageForwardHandler
+// NewMessageForwardHandler creates a new MessageForwardHandler.
 func NewMessageForwardHandler(client *tg.Client) *MessageForwardHandler {
 	return &MessageForwardHandler{client: client}
 }
 
-// Tool returns the MCP tool definition
-func (h *MessageForwardHandler) Tool() mcp.Tool {
-	return mcp.NewTool("ForwardMessage",
-		mcp.WithDescription("Forward a message from one chat to another. The forwarded message retains the original sender attribution."),
-		mcp.WithOpenWorldHintAnnotation(true),
-		mcp.WithNumber("from_chat_id",
-			mcp.Description("The ID of the chat to forward from"),
-			mcp.Required(),
-		),
-		mcp.WithNumber("message_id",
-			mcp.Description("The ID of the message to forward"),
-			mcp.Required(),
-		),
-		mcp.WithNumber("to_chat_id",
-			mcp.Description("The ID of the chat to forward to"),
-			mcp.Required(),
-		),
-	)
+// ForwardMessageInput is the input for the ForwardMessage tool.
+//
+// MessageID is an opaque handle; scheduled handles ("s:...") are rejected
+// because scheduled messages haven't been delivered yet and cannot be
+// forwarded.
+type ForwardMessageInput struct {
+	FromChatID int64  `json:"from_chat_id" jsonschema:"The ID of the chat to forward from"`
+	MessageID  string `json:"message_id" jsonschema:"Opaque message handle from GetMessages. Scheduled handles (\"s:...\") are not supported."`
+	ToChatID   int64  `json:"to_chat_id" jsonschema:"The ID of the chat to forward to"`
 }
 
-// Handle processes the ForwardMessage tool request
-func (h *MessageForwardHandler) Handle(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	fromChatID := mcp.ParseInt64(request, "from_chat_id", 0)
-	if fromChatID == 0 {
-		return mcp.NewToolResultError("from_chat_id is required"), nil
-	}
+const statusForwarded = "forwarded"
 
-	messageID := mcp.ParseInt(request, "message_id", 0)
-	if messageID == 0 {
-		return mcp.NewToolResultError("message_id is required"), nil
-	}
+// ForwardMessageResult is the typed output of ForwardMessage.
+type ForwardMessageResult struct {
+	Status            string `json:"status"`
+	FromChatID        int64  `json:"from_chat_id"`
+	OriginalMessageID string `json:"original_message_id"`
+	ToChatID          int64  `json:"to_chat_id"`
+	NewMessageID      string `json:"new_message_id,omitempty"`
+	Date              string `json:"date,omitempty"`
+	Note              string `json:"note,omitempty"`
+}
 
-	toChatID := mcp.ParseInt64(request, "to_chat_id", 0)
-	if toChatID == 0 {
-		return mcp.NewToolResultError("to_chat_id is required"), nil
-	}
+// Register adds the tool to the MCP server.
+func (h *MessageForwardHandler) Register(s *mcp.Server) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "ForwardMessage",
+		Description: "Forward a message from one chat to another. The forwarded message retains the original sender attribution.",
+		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},
+	}, h.handle)
+}
 
-	// Resolve both peers
-	fromPeer, err := tgclient.ResolvePeer(ctx, h.client, fromChatID)
+func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in ForwardMessageInput) (*mcp.CallToolResult, *ForwardMessageResult, error) {
+	if in.FromChatID == 0 {
+		return errResult("from_chat_id is required. Use SearchChats or GetChats to find the source chat ID."), nil, nil
+	}
+	ref, err := ParseMessageRef(in.MessageID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to resolve source chat: %v", err)), nil
+		return errInvalidMessageID(in.MessageID, err), nil, nil
+	}
+	if ref.Scheduled {
+		return errCannotOnScheduled("forward"), nil, nil
+	}
+	if in.ToChatID == 0 {
+		return errResult("to_chat_id is required. Use SearchChats or GetChats to find the destination chat ID."), nil, nil
 	}
 
-	toPeer, err := tgclient.ResolvePeer(ctx, h.client, toChatID)
+	fromPeer, err := tgclient.ResolvePeer(ctx, h.client, in.FromChatID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to resolve destination chat: %v", err)), nil
+		return errResolvePeer(in.FromChatID, err), nil, nil
+	}
+	toPeer, err := tgclient.ResolvePeer(ctx, h.client, in.ToChatID)
+	if err != nil {
+		return errResolvePeer(in.ToChatID, err), nil, nil
 	}
 
-	// Forward the message
 	updates, err := h.client.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
 		FromPeer: fromPeer,
-		ID:       []int{messageID},
+		ID:       []int{ref.ID},
 		ToPeer:   toPeer,
-		RandomID: []int64{time.Now().UnixNano()},
+		RandomID: []int64{cryptoRandInt64()},
 	})
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to forward message: %v", err)), nil
+		mcpLog(ctx, req.Session, logLevelWarning, "ForwardMessage", map[string]any{
+			"action":   "forward_failed",
+			"from_id":  in.FromChatID,
+			"to_id":    in.ToChatID,
+			"msg_id":   ref.ID,
+			"error":    err.Error(),
+		})
+		return errResult(fmt.Sprintf("Failed to forward message: %v", err)), nil, nil
 	}
 
-	// Extract forwarded message info
-	var forwardedMsgID int
-	var date int
-
-	switch u := updates.(type) {
-	case *tg.Updates:
-		for _, update := range u.Updates {
-			if newMsg, ok := update.(*tg.UpdateNewMessage); ok {
-				if msg, ok := newMsg.Message.(*tg.Message); ok {
-					forwardedMsgID = msg.ID
-					date = msg.Date
-					break
-				}
-			}
-			if newMsg, ok := update.(*tg.UpdateNewChannelMessage); ok {
-				if msg, ok := newMsg.Message.(*tg.Message); ok {
-					forwardedMsgID = msg.ID
-					date = msg.Date
-					break
-				}
-			}
-		}
+	forwardedMsgID, date := extractSentMessageID(updates)
+	if forwardedMsgID == 0 {
+		mcpLog(ctx, req.Session, logLevelWarning, "ForwardMessage", map[string]any{
+			"action": "message_id_extraction_failed",
+			"note":   "Telegram returned an unrecognised update type; new_message_id in response is unreliable",
+		})
 	}
-
-	result := fmt.Sprintf("Message forwarded successfully!\nFrom chat ID: %d\nOriginal message ID: %d\nTo chat ID: %d\nNew message ID: %d\nDate: %s",
-		fromChatID,
-		messageID,
-		toChatID,
-		forwardedMsgID,
-		time.Unix(int64(date), 0).Format(time.RFC3339),
-	)
-
-	return mcp.NewToolResultText(result), nil
+	res := &ForwardMessageResult{
+		Status:            statusForwarded,
+		FromChatID:        in.FromChatID,
+		OriginalMessageID: ref.Format(),
+		ToChatID:          in.ToChatID,
+	}
+	if forwardedMsgID > 0 {
+		res.NewMessageID = FormatRegularRef(forwardedMsgID)
+	} else {
+		res.Note = "new_message_id unavailable: Telegram returned an unrecognised update type"
+	}
+	if date > 0 {
+		res.Date = time.Unix(int64(date), 0).UTC().Format(time.RFC3339)
+	}
+	return nil, res, nil
 }

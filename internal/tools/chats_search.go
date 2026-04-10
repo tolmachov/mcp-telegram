@@ -2,113 +2,102 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/gotd/td/tg"
 	"github.com/lithammer/fuzzysearch/fuzzy"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
-// ChatsSearchHandler handles the SearchChats tool
+// ChatsSearchHandler handles the SearchChats tool.
 type ChatsSearchHandler struct {
 	client *tg.Client
 }
 
-// NewChatsSearchHandler creates a new ChatsSearchHandler
+// NewChatsSearchHandler creates a new ChatsSearchHandler.
 func NewChatsSearchHandler(client *tg.Client) *ChatsSearchHandler {
 	return &ChatsSearchHandler{client: client}
 }
 
-// Tool returns the MCP tool definition
-func (h *ChatsSearchHandler) Tool() mcp.Tool {
-	return mcp.NewTool("SearchChats",
-		mcp.WithDescription("Search for chats, groups, and channels by name using fuzzy matching. Searches local chats first, then globally. Returns up to `limit` results (default 10, max 50). Preferred over GetChats when looking for a specific chat."),
-		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("query",
-			mcp.Required(),
-			mcp.Description("Search query to match against chat names"),
-		),
-		mcp.WithNumber("limit",
-			mcp.Description("Maximum number of results to return (default: 10, max: 50)"),
-		),
-	)
+// SearchChatsInput is the input for the SearchChats tool.
+type SearchChatsInput struct {
+	Query string `json:"query" jsonschema:"Search query to match against chat names"`
+	Limit int    `json:"limit,omitempty" jsonschema:"Maximum number of results to return (default: 10\\, max: 50)"`
 }
 
-// SearchResult represents a single search result with a match score
+// SearchResult represents a single search result with a match score.
 type SearchResult struct {
 	tgdata.ChatInfo
 	Score int `json:"score"` // Lower is a better match (Levenshtein distance)
 }
 
-// SearchResultsList represents the search results
+// SearchResultsList represents the search results.
 type SearchResultsList struct {
 	Query   string         `json:"query"`
 	Results []SearchResult `json:"results"`
 	Count   int            `json:"count"`
+	Warning string         `json:"warning,omitempty"`
 }
 
-// Handle processes the SearchChats tool request
-func (h *ChatsSearchHandler) Handle(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	query := mcp.ParseString(request, "query", "")
+// Register adds the tool to the MCP server.
+func (h *ChatsSearchHandler) Register(s *mcp.Server) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "SearchChats",
+		Description: "Search for chats, groups, and channels by name using fuzzy matching. Searches local chats first, then globally. Returns up to `limit` results (default 10, max 50). Preferred over GetChats when looking for a specific chat.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
+	}, h.handle)
+}
+
+func (h *ChatsSearchHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in SearchChatsInput) (*mcp.CallToolResult, *SearchResultsList, error) {
+	query := strings.TrimSpace(in.Query)
 	if query == "" {
-		return mcp.NewToolResultError("query parameter is required"), nil
+		return errResult("query parameter is required (search by chat title or @username; partial matches work)."), nil, nil
 	}
 
-	limit := mcp.ParseInt(request, "limit", 10)
-	if limit <= 0 {
-		limit = 10
-	}
-	if limit > 50 {
-		limit = 50
-	}
+	limit := clampLimit(in.Limit, 10, 50)
 
-	// Get all user's chats for local fuzzy search first
+	// Get all user's chats for local fuzzy search first.
 	onProgress := func(current int, message string) {
-		if srv := server.ServerFromContext(ctx); srv != nil {
-			_ = srv.SendNotificationToClient(ctx, "notifications/progress", map[string]any{
-				"progress": current,
-				"message":  message,
-			})
-		}
+		sendProgress(ctx, req, float64(current), 0, message)
 	}
 	chatsList, err := tgdata.GetChats(ctx, h.client, onProgress)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to get chats: %v", err)), nil
+		return errResult(fmt.Sprintf("Failed to get chats: %v", err)), nil, nil
 	}
 
-	// Perform local fuzzy search first
+	// Perform local fuzzy search first.
 	results := h.fuzzySearchLocal(query, chatsList.Chats, limit)
 
-	// Only search globally if we have room for more results
+	// Only search globally if we have room for more results.
+	var globalSearchWarning string
 	if len(results) < limit {
 		globalResults, err := h.searchGlobal(ctx, query)
-		if err == nil && len(globalResults) > 0 {
+		if err != nil {
+			mcpLog(ctx, req.Session, logLevelWarning, "SearchChats", map[string]any{
+				"action": "global_search_failed",
+				"query":  query,
+				"error":  err.Error(),
+			})
+			globalSearchWarning = "Global search failed; results may be incomplete (local matches only)."
+		} else if len(globalResults) > 0 {
 			results = h.addGlobalResults(query, results, globalResults, limit)
 		}
 	}
 
-	resultsList := SearchResultsList{
+	return nil, &SearchResultsList{
 		Query:   query,
 		Results: results,
 		Count:   len(results),
-	}
-
-	data, err := json.MarshalIndent(resultsList, "", "  ")
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal results: %v", err)), nil
-	}
-
-	return mcp.NewToolResultText(string(data)), nil
+		Warning: globalSearchWarning,
+	}, nil
 }
 
-// searchGlobal performs Telegram's global search by username
+// searchGlobal performs Telegram's global search by username.
 func (h *ChatsSearchHandler) searchGlobal(ctx context.Context, query string) ([]tgdata.ChatInfo, error) {
 	found, err := h.client.ContactsSearch(ctx, &tg.ContactsSearchRequest{
 		Q:     query,
@@ -120,41 +109,36 @@ func (h *ChatsSearchHandler) searchGlobal(ctx context.Context, query string) ([]
 
 	var results []tgdata.ChatInfo
 
-	// Process users
+	// Process users; bots are intentionally excluded (not meaningful chat targets).
 	for _, user := range found.Users {
 		u, ok := user.(*tg.User)
 		if !ok || u.Bot {
 			continue
 		}
 
-		chatType := "user"
-		if u.Bot {
-			chatType = "bot"
-		}
-
 		results = append(results, tgdata.ChatInfo{
 			ID:       u.ID,
-			Type:     chatType,
+			Type:     tgdata.ChatTypeUser,
 			Name:     tgclient.UserName(u),
 			Username: u.Username,
 		})
 	}
 
-	// Process chats
+	// Process chats.
 	for _, chat := range found.Chats {
 		switch c := chat.(type) {
 		case *tg.Chat:
 			results = append(results, tgdata.ChatInfo{
 				ID:   c.ID,
-				Type: "group",
+				Type: tgdata.ChatTypeGroup,
 				Name: c.Title,
 			})
 		case *tg.Channel:
-			chatType := "channel"
+			chatType := tgdata.ChatTypeChannel
 			if c.Megagroup {
-				chatType = "supergroup"
+				chatType = tgdata.ChatTypeSupergroup
 			}
-			// Convert to user-facing format with -100 prefix
+			// Convert to user-facing format with -100 prefix.
 			id := -tgclient.ChannelIDPrefix - c.ID
 			results = append(results, tgdata.ChatInfo{
 				ID:       id,
@@ -168,18 +152,15 @@ func (h *ChatsSearchHandler) searchGlobal(ctx context.Context, query string) ([]
 	return results, nil
 }
 
-// fuzzySearchLocal performs fuzzy search on local chats only
+// fuzzySearchLocal performs fuzzy search on local chats only.
 func (h *ChatsSearchHandler) fuzzySearchLocal(query string, chats []tgdata.ChatInfo, limit int) []SearchResult {
-	// Create a slice of chat names for fuzzy matching
 	names := make([]string, len(chats))
 	for i, chat := range chats {
 		names[i] = chat.Name
 	}
 
-	// Find matches using fuzzy search (RankFindNormalizedFold is already case-insensitive)
 	matches := fuzzy.RankFindNormalizedFold(query, names)
 
-	// Sort by score (lower distance = better match)
 	sort.Slice(matches, func(i, j int) bool {
 		return matches[i].Distance < matches[j].Distance
 	})
@@ -206,13 +187,12 @@ func (h *ChatsSearchHandler) fuzzySearchLocal(query string, chats []tgdata.ChatI
 	return results
 }
 
-// addGlobalResults adds global search results to fill remaining slots
+// addGlobalResults adds global search results to fill remaining slots.
 func (h *ChatsSearchHandler) addGlobalResults(query string, localResults []SearchResult, globalChats []tgdata.ChatInfo, limit int) []SearchResult {
 	if len(localResults) >= limit {
 		return localResults
 	}
 
-	// Track already seen IDs from local results
 	seen := make(map[int64]bool)
 	for _, r := range localResults {
 		seen[r.ID] = true

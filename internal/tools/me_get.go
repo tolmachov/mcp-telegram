@@ -2,44 +2,42 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/gotd/td/tg"
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
-// MeGetHandler handles the GetMe tool
+// MeGetHandler handles the GetMe tool.
 type MeGetHandler struct {
 	client *tg.Client
 }
 
-// NewMeGetHandler creates a new MeGetHandler
+// NewMeGetHandler creates a new MeGetHandler.
 func NewMeGetHandler(client *tg.Client) *MeGetHandler {
 	return &MeGetHandler{client: client}
 }
 
-// Tool returns the MCP tool definition
-func (h *MeGetHandler) Tool() mcp.Tool {
-	return mcp.NewTool("GetMe",
-		mcp.WithDescription("Get information about the currently authenticated Telegram user, including ID, name, username, and phone number."),
-		mcp.WithReadOnlyHintAnnotation(true),
-	)
+// GetMeInput is the (empty) input for the GetMe tool.
+type GetMeInput struct{}
+
+// Register adds the tool to the MCP server using the typed mcp.AddTool helper.
+// The output is the existing tgdata.UserInfo struct so the StructuredContent
+// payload matches the JSON shape clients already see today.
+func (h *MeGetHandler) Register(s *mcp.Server) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "GetMe",
+		Description: "Get information about the currently authenticated Telegram user, including ID, name, username, and phone number.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
+	}, h.handle)
 }
 
-// Handle processes the GetMe tool request
-func (h *MeGetHandler) Handle(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (h *MeGetHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, _ GetMeInput) (*mcp.CallToolResult, *tgdata.UserInfo, error) {
 	info, err := tgdata.GetCurrentUser(ctx, h.client)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to get current user: %v", err)), nil
+		return errResult(fmt.Sprintf("Failed to get current user: %v", err)), nil, nil
 	}
-
-	data, err := json.MarshalIndent(info, "", "  ")
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal user info: %v", err)), nil
-	}
-
-	return mcp.NewToolResultText(string(data)), nil
+	return nil, info, nil
 }

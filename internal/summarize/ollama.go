@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -63,16 +64,19 @@ func (p *OllamaProvider) Summarize(ctx context.Context, prompt string) (string, 
 	if err != nil {
 		return "", fmt.Errorf("sending request: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Debug("ollama: response body close failed", "error", err)
+		}
+	}()
 
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(respBody))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return "", fmt.Errorf("reading response (status %d): %w", resp.StatusCode, err)
 	}
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("reading response: %w", err)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, errBodySnippet(respBody))
 	}
 
 	var ollamaResp ollamaResponse

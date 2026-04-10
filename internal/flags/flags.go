@@ -29,7 +29,22 @@ const (
 	GeminiAPIKey         = "gemini-api-key"    //nolint:gosec // flag name, not a credential
 	AnthropicAPIKey      = "anthropic-api-key" //nolint:gosec // flag name, not a credential
 	SummarizeBatchTokens = "summarize-batch-tokens"
+	MediaMaxBytes        = "media-max-bytes"
+	TGRateLimitRPS       = "tg-rate-limit-rps"
+	PinnedRefreshSecs    = "pinned-refresh-seconds"
 )
+
+// DefaultPinnedRefreshSeconds is the default polling interval for the
+// pinned-chat background watcher. 30s balances freshness against API load;
+// the previous SDK supported on-demand refresh, but the official Go SDK
+// has no BeforeListResources hook.
+const DefaultPinnedRefreshSeconds = 30
+
+// DefaultMediaMaxBytes is the default cap on a single GetMedia download.
+// 50 MiB is large enough for any practical photo (Telegram's photo limit is
+// 10 MiB) and any reasonable thumbnail of a video, while being small enough
+// to keep base64-encoded responses inside MCP context-window economics.
+const DefaultMediaMaxBytes = 50 * 1024 * 1024
 
 func APIIDFlag() *cli.IntFlag {
 	return &cli.IntFlag{
@@ -118,5 +133,32 @@ func SummarizeBatchTokensFlag() *cli.IntFlag {
 		Value:   summarize.DefaultBatchTokens,
 		Usage:   "Approximate number of tokens per batch for summarization",
 		Sources: cli.EnvVars("SUMMARIZE_BATCH_TOKENS"),
+	}
+}
+
+func MediaMaxBytesFlag() *cli.IntFlag {
+	return &cli.IntFlag{
+		Name:    MediaMaxBytes,
+		Value:   DefaultMediaMaxBytes,
+		Usage:   "Maximum bytes that GetMedia will download in a single call (cap to avoid OOM on huge attachments)",
+		Sources: cli.EnvVars("TELEGRAM_MEDIA_MAX_BYTES"),
+	}
+}
+
+func TGRateLimitRPSFlag() *cli.IntFlag {
+	return &cli.IntFlag{
+		Name:    TGRateLimitRPS,
+		Value:   0, // 0 → use messages.DefaultRateLimitRPS at provider construction
+		Usage:   "Requests-per-second ceiling for history-fetching calls to Telegram. 0 uses the safe default. Raise with care: exceeding Telegram's FLOOD_WAIT thresholds will pause all tools.",
+		Sources: cli.EnvVars("TELEGRAM_RATE_LIMIT_RPS"),
+	}
+}
+
+func PinnedRefreshSecsFlag() *cli.IntFlag {
+	return &cli.IntFlag{
+		Name:    PinnedRefreshSecs,
+		Value:   DefaultPinnedRefreshSeconds,
+		Usage:   "Polling interval (seconds) for the pinned-chat resource watcher. 0 disables the watcher entirely.",
+		Sources: cli.EnvVars("TELEGRAM_PINNED_REFRESH_SECONDS"),
 	}
 }

@@ -22,7 +22,11 @@ func main() {
 		log.Fatalf("failed to load .env file: %v", err)
 	}
 
-	if err := config.LoadIntoEnv(config.NewStore()); err != nil {
+	store, err := config.NewStore()
+	if err != nil {
+		log.Fatalf("failed to initialize config store: %v", err)
+	}
+	if err := config.LoadIntoEnv(store); err != nil {
 		log.Fatalf("failed to load config from secure store: %v", err)
 	}
 

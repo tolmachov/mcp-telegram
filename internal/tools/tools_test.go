@@ -1,6 +1,36 @@
 package tools
 
-import "testing"
+import (
+	"testing"
+)
+
+// Note: progress-token extraction is now SDK-provided
+// (req.Params.GetProgressToken()), so the previous TestProgressToken case was
+// removed — there is no longer a project-owned helper to test. Coverage of
+// our sendProgress wrapper is implicit via the per-tool handler tests once
+// in-memory transport-based integration tests are added.
+
+func TestClampLimit(t *testing.T) {
+	tests := []struct {
+		name              string
+		limit, def, max   int
+		want              int
+	}{
+		{"zero uses default", 0, 50, 100, 50},
+		{"negative uses default", -5, 50, 100, 50},
+		{"within range passes through", 30, 50, 100, 30},
+		{"above max clamps", 200, 50, 100, 100},
+		{"equal to max passes through", 100, 50, 100, 100},
+		{"equal to one passes through", 1, 50, 100, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := clampLimit(tt.limit, tt.def, tt.max); got != tt.want {
+				t.Errorf("clampLimit(%d, %d, %d) = %d, want %d", tt.limit, tt.def, tt.max, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestTruncateRunes(t *testing.T) {
 	tests := []struct {

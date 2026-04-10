@@ -3,106 +3,156 @@ package tools
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/gotd/td/tg"
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
-// MessageEditHandler handles the EditMessage tool
+// MessageEditHandler handles the EditMessage tool.
 type MessageEditHandler struct {
 	client *tg.Client
 }
 
-// NewMessageEditHandler creates a new MessageEditHandler
+// NewMessageEditHandler creates a new MessageEditHandler.
 func NewMessageEditHandler(client *tg.Client) *MessageEditHandler {
 	return &MessageEditHandler{client: client}
 }
 
-// Tool returns the MCP tool definition
-func (h *MessageEditHandler) Tool() mcp.Tool {
-	return mcp.NewTool("EditMessage",
-		mcp.WithDescription("Edit a message you previously sent. Only your own messages can be edited. For channel posts, admin rights may be required."),
-		mcp.WithOpenWorldHintAnnotation(true),
-		mcp.WithNumber("chat_id",
-			mcp.Description("The ID of the chat containing the message"),
-			mcp.Required(),
-		),
-		mcp.WithNumber("message_id",
-			mcp.Description("The ID of the message to edit"),
-			mcp.Required(),
-		),
-		mcp.WithString("new_text",
-			mcp.Description("The new text for the message"),
-			mcp.Required(),
-		),
-	)
+// EditMessageInput is the input for the EditMessage tool.
+//
+// MessageID is an opaque handle. When it refers to a scheduled message
+// ("s:42"), ScheduleAt is required — Telegram's messages.editMessage
+// requires schedule_date to be set for scheduled edits, and the new
+// value fully replaces the old schedule (so edits can also reschedule
+// in one call). For regular messages, ScheduleAt must be empty.
+type EditMessageInput struct {
+	ChatID     int64  `json:"chat_id" jsonschema:"The ID of the chat containing the message"`
+	MessageID  string `json:"message_id" jsonschema:"Opaque message handle from GetMessages or SendMessage (e.g. \"42\" or \"s:42\" for scheduled)"`
+	NewText    string `json:"new_text" jsonschema:"The new text for the message"`
+	ScheduleAt string `json:"schedule_at,omitempty" jsonschema:"New send time in RFC3339 (e.g. 2026-04-10T15:30:00Z). Required when message_id is a scheduled handle; must be omitted for regular messages. Setting this both edits the text and reschedules the pending delivery."`
 }
 
-// Handle processes the EditMessage tool request
-func (h *MessageEditHandler) Handle(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	chatID := mcp.ParseInt64(request, "chat_id", 0)
-	if chatID == 0 {
-		return mcp.NewToolResultError("chat_id is required"), nil
-	}
+// EditMessageResult is the typed output of EditMessage.
+type EditMessageResult struct {
+	Status     string `json:"status"`
+	Kind       string `json:"kind"` // "regular" | "scheduled"
+	ChatID     int64  `json:"chat_id"`
+	MessageID  string `json:"message_id"`
+	NewText    string `json:"new_text"`
+	EditedAt   string `json:"edited_at,omitempty"`
+	ScheduleAt string `json:"schedule_at,omitempty"`
+}
 
-	messageID := mcp.ParseInt(request, "message_id", 0)
-	if messageID == 0 {
-		return mcp.NewToolResultError("message_id is required"), nil
-	}
+// Register adds the tool to the MCP server.
+func (h *MessageEditHandler) Register(s *mcp.Server) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "EditMessage",
+		Description: "Edit a message you previously sent. Only your own messages can be edited. For channel posts, admin rights may be required. To edit a scheduled (pending) message, pass its \"s:...\" handle and provide a new schedule_at — the edit both rewrites the text and sets the new send time.",
+		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},
+	}, h.handle)
+}
 
-	newText := mcp.ParseString(request, "new_text", "")
-	if newText == "" {
-		return mcp.NewToolResultError("new_text is required"), nil
+func (h *MessageEditHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in EditMessageInput) (*mcp.CallToolResult, *EditMessageResult, error) {
+	if in.ChatID == 0 {
+		return errChatIDRequired(), nil, nil
 	}
-
-	// Resolve the peer
-	peer, err := tgclient.ResolvePeer(ctx, h.client, chatID)
+	ref, err := ParseMessageRef(in.MessageID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to resolve peer: %v", err)), nil
+		return errInvalidMessageID(in.MessageID, err), nil, nil
+	}
+	if in.NewText == "" {
+		return errResult("new_text is required"), nil, nil
 	}
 
-	// Edit the message
-	updates, err := h.client.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
-		Peer:    peer,
-		ID:      messageID,
-		Message: newText,
-	})
+	req := &tg.MessagesEditMessageRequest{
+		ID:      ref.ID,
+		Message: in.NewText,
+	}
+
+	// Validate schedule_at against the handle kind. Telegram's editMessage
+	// only accepts ScheduleDate when the target IS a scheduled message; for
+	// regular messages we reject the field to avoid silent no-ops.
+	if ref.Scheduled {
+		if in.ScheduleAt == "" {
+			return errResult("schedule_at is required when editing a scheduled message (\"s:...\"). Provide an RFC3339 timestamp in the future — it sets the new delivery time and fully replaces the old schedule."), nil, nil
+		}
+		t, err := time.Parse(time.RFC3339, in.ScheduleAt)
+		if err != nil {
+			return errResult(fmt.Sprintf("invalid schedule_at %q: %v. Expected RFC3339 format like \"2026-04-10T15:30:00Z\".", in.ScheduleAt, err)), nil, nil
+		}
+		if !t.After(time.Now()) {
+			return errResult("schedule_at must be in the future"), nil, nil
+		}
+		req.ScheduleDate = int(t.Unix())
+	} else if in.ScheduleAt != "" {
+		return errResult("schedule_at is only valid when editing a scheduled message (\"s:...\"). To reschedule a pending delivery, pass the scheduled handle instead."), nil, nil
+	}
+
+	peer, err := tgclient.ResolvePeer(ctx, h.client, in.ChatID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to edit message: %v", err)), nil
+		return errResolvePeer(in.ChatID, err), nil, nil
+	}
+	req.Peer = peer
+
+	updates, err := h.client.MessagesEditMessage(ctx, req)
+	if err != nil {
+		return errResult(fmt.Sprintf("Failed to edit message: %v", err)), nil, nil
 	}
 
-	// Extract updated message info
-	var editedMsgID int
-	var date int
+	editedMsgID, date := extractEditedMessageID(updates)
 
-	switch u := updates.(type) {
-	case *tg.Updates:
-		for _, update := range u.Updates {
-			if editMsg, ok := update.(*tg.UpdateEditMessage); ok {
-				if msg, ok := editMsg.Message.(*tg.Message); ok {
-					editedMsgID = msg.ID
-					date = msg.Date
-					break
-				}
+	res := &EditMessageResult{
+		Status:  "edited",
+		ChatID:  in.ChatID,
+		NewText: in.NewText,
+	}
+	if ref.Scheduled {
+		res.Kind = "scheduled"
+		res.ScheduleAt = in.ScheduleAt
+		// Preserve the scheduled handle form in the response so the LLM can
+		// keep referencing the edited message with the same handle it passed in.
+		if editedMsgID > 0 {
+			res.MessageID = FormatScheduledRef(editedMsgID)
+		} else {
+			res.MessageID = ref.Format()
+		}
+	} else {
+		res.Kind = "regular"
+		if editedMsgID > 0 {
+			res.MessageID = FormatRegularRef(editedMsgID)
+		} else {
+			res.MessageID = ref.Format()
+		}
+	}
+	if date > 0 {
+		res.EditedAt = time.Unix(int64(date), 0).UTC().Format(time.RFC3339)
+	}
+	return nil, res, nil
+}
+
+// extractEditedMessageID pulls the edited message ID + date out of an
+// UpdatesClass returned by messages.editMessage. Covers both
+// UpdateEditMessage (for regular chats and scheduled messages) and
+// UpdateEditChannelMessage (for channels/supergroups).
+func extractEditedMessageID(updates tg.UpdatesClass) (int, int) {
+	u, ok := updates.(*tg.Updates)
+	if !ok {
+		return 0, 0
+	}
+	for _, update := range u.Updates {
+		if editMsg, ok := update.(*tg.UpdateEditMessage); ok {
+			if msg, ok := editMsg.Message.(*tg.Message); ok {
+				return msg.ID, msg.Date
 			}
-			if editMsg, ok := update.(*tg.UpdateEditChannelMessage); ok {
-				if msg, ok := editMsg.Message.(*tg.Message); ok {
-					editedMsgID = msg.ID
-					date = msg.Date
-					break
-				}
+		}
+		if editMsg, ok := update.(*tg.UpdateEditChannelMessage); ok {
+			if msg, ok := editMsg.Message.(*tg.Message); ok {
+				return msg.ID, msg.Date
 			}
 		}
 	}
-
-	result := fmt.Sprintf("Message edited successfully!\nChat ID: %d\nMessage ID: %d\nUpdated text: %s",
-		chatID, editedMsgID, newText)
-
-	if date > 0 {
-		result += fmt.Sprintf("\nEdit time: %d", date)
-	}
-
-	return mcp.NewToolResultText(result), nil
+	return 0, 0
 }

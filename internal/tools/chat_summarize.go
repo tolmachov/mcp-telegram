@@ -2,105 +2,128 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
 )
 
-// ChatSummarizeHandler handles the SummarizeChat tool
+// ChatSummarizeHandler handles the SummarizeChat tool.
 type ChatSummarizeHandler struct {
 	msgProvider *messages.Provider
-	mcpServer   *server.MCPServer
 	config      summarize.Config
 }
 
-// NewChatSummarizeHandler creates a new ChatSummarizeHandler
-func NewChatSummarizeHandler(msgProvider *messages.Provider, mcpServer *server.MCPServer, config summarize.Config) *ChatSummarizeHandler {
+// NewChatSummarizeHandler creates a new ChatSummarizeHandler.
+func NewChatSummarizeHandler(msgProvider *messages.Provider, config summarize.Config) *ChatSummarizeHandler {
 	return &ChatSummarizeHandler{
 		msgProvider: msgProvider,
-		mcpServer:   mcpServer,
 		config:      config,
 	}
 }
 
-// Tool returns the MCP tool definition
-func (h *ChatSummarizeHandler) Tool() mcp.Tool {
-	return mcp.NewTool("SummarizeChat",
-		mcp.WithDescription("Summarize messages from a Telegram chat using rolling/incremental summarization with AI. Specify a goal (e.g., 'key decisions', 'action items') and a time period. Uses the configured LLM provider for summarization."),
-		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithOpenWorldHintAnnotation(true),
-		mcp.WithNumber("chat_id",
-			mcp.Description("The chat ID to summarize"),
-			mcp.Required(),
-		),
-		mcp.WithString("goal",
-			mcp.Description("What you want from the summary. Examples: 'key points and decisions', 'extract all action items and deadlines', 'analyze sentiment and mood', 'identify top 5 discussed topics', 'create meeting minutes', 'find all decisions made', 'summarize bug discussions', 'track project progress'"),
-			mcp.Required(),
-		),
-		mcp.WithString("period",
-			mcp.Description("Time period: 'day', 'week', or 'month' (default: 'month')"),
-		),
-		mcp.WithString("since",
-			mcp.Description("ISO 8601 date to start from (alternative to period, e.g., '2024-01-15')"),
-		),
-	)
+// SummarizeChatInput is the input for the SummarizeChat tool.
+type SummarizeChatInput struct {
+	ChatID int64  `json:"chat_id" jsonschema:"The chat ID to summarize"`
+	Goal   string `json:"goal" jsonschema:"What you want from the summary. Examples: 'key points and decisions'\\, 'extract all action items and deadlines'\\, 'analyze sentiment and mood'\\, 'identify top 5 discussed topics'\\, 'create meeting minutes'"`
+	Period string `json:"period,omitempty" jsonschema:"Time period: 'day'\\, 'week'\\, or 'month' (default: 'month')"`
+	Since  string `json:"since,omitempty" jsonschema:"Date in YYYY-MM-DD or RFC3339 format to start from (alternative to period\\, e.g.\\, '2024-01-15')"`
 }
 
-// Handle processes the SummarizeChat tool request
-func (h *ChatSummarizeHandler) Handle(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	chatID := mcp.ParseInt64(request, "chat_id", 0)
-	if chatID == 0 {
-		return mcp.NewToolResultError("chat_id is required"), nil
+// SummarizeChatResult is the typed output of SummarizeChat. Clients get
+// the summary text plus the analysis window so they can render provenance
+// without re-computing the period from the input.
+type SummarizeChatResult struct {
+	ChatID      int64  `json:"chat_id"`
+	Goal        string `json:"goal"`
+	Period      string `json:"period,omitempty"`
+	PeriodStart string `json:"period_start"` // RFC3339
+	PeriodEnd   string `json:"period_end"`   // RFC3339
+	Provider    string `json:"provider"`
+	Summary     string `json:"summary"`
+}
+
+// Register adds the tool to the MCP server.
+func (h *ChatSummarizeHandler) Register(s *mcp.Server) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "SummarizeChat",
+		Description: "Summarize messages from a Telegram chat using rolling/incremental summarization with AI. Specify a goal (e.g., 'key decisions', 'action items') and a time period. Uses the configured LLM provider for summarization.",
+		// Note: ReadOnlyHint is intentionally NOT set. The tool calls out
+		// to external LLM providers (sampling, Gemini, Ollama, Anthropic)
+		// which may cache, log, or bill for the content — it is not a
+		// pure read of Telegram state. OpenWorldHint reflects that.
+		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},
+	}, h.handle)
+}
+
+func (h *ChatSummarizeHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in SummarizeChatInput) (*mcp.CallToolResult, *SummarizeChatResult, error) {
+	if in.ChatID == 0 {
+		return errChatIDRequired(), nil, nil
+	}
+	if in.Goal == "" {
+		return errResult("goal is required"), nil, nil
 	}
 
-	goal := mcp.ParseString(request, "goal", "")
-	if goal == "" {
-		return mcp.NewToolResultError("goal is required"), nil
-	}
-
-	since, err := h.parseSinceTime(request)
+	periodEnd := time.Now()
+	since, err := h.parseSinceTime(in)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Invalid time parameters: %v", err)), nil
+		return errResult(fmt.Sprintf("Invalid time parameters: %v", err)), nil, nil
 	}
 
-	// Create a provider based on configuration
-	provider := h.createProvider(ctx)
-
+	provider, err := h.createProvider(req.Session)
+	if err != nil {
+		return errResult(fmt.Sprintf("summarization misconfigured: %v", err)), nil, nil
+	}
 	summarizer := summarize.NewSummarizer(provider, h.msgProvider, h.config.BatchTokens)
 
-	// Progress callback using MCP notifications
+	mcpLog(ctx, req.Session, logLevelInfo, "SummarizeChat", map[string]any{
+		"chat_id":  in.ChatID,
+		"goal":     in.Goal,
+		"since":    since.Format(time.RFC3339),
+		"provider": h.config.Provider,
+	})
+
+	// Progress callback using MCP notifications. sendProgress is a no-op when
+	// the client did not provide a progressToken.
 	onProgress := func(current, total int, message string) {
-		srv := server.ServerFromContext(ctx)
-		if srv != nil {
-			_ = srv.SendNotificationToClient(ctx, "notifications/progress", map[string]any{
-				"progress": current,
-				"total":    total,
-				"message":  message,
-			})
-		}
+		sendProgress(ctx, req, float64(current), float64(total), message)
 	}
 
-	result, err := summarizer.Summarize(ctx, chatID, goal, since, onProgress)
+	result, err := summarizer.Summarize(ctx, in.ChatID, in.Goal, since, onProgress)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Summarization failed: %v", err)), nil
+		mcpLog(ctx, req.Session, logLevelError, "SummarizeChat", map[string]any{
+			"chat_id": in.ChatID,
+			"error":   err.Error(),
+		})
+		// Specifically surface the sampling-unsupported case so the user gets a
+		// clear next step instead of a generic transport error.
+		if errors.Is(err, summarize.ErrSamplingUnsupported) {
+			return errResult(err.Error()), nil, nil
+		}
+		return errResult(fmt.Sprintf("Summarization failed: %v", err)), nil, nil
 	}
 
-	return mcp.NewToolResultText(result), nil
+	return nil, &SummarizeChatResult{
+		ChatID:      in.ChatID,
+		Goal:        in.Goal,
+		Period:      in.Period,
+		PeriodStart: since.UTC().Format(time.RFC3339),
+		PeriodEnd:   periodEnd.UTC().Format(time.RFC3339),
+		Provider:    string(h.config.Provider),
+		Summary:     result,
+	}, nil
 }
 
-func (h *ChatSummarizeHandler) parseSinceTime(request mcp.CallToolRequest) (time.Time, error) {
-	sinceStr := mcp.ParseString(request, "since", "")
-	if sinceStr != "" {
-		// Try parsing ISO 8601 date
-		t, err := time.Parse("2006-01-02", sinceStr)
+func (h *ChatSummarizeHandler) parseSinceTime(in SummarizeChatInput) (time.Time, error) {
+	if in.Since != "" {
+		// Try parsing ISO 8601 date.
+		t, err := time.Parse("2006-01-02", in.Since)
 		if err != nil {
-			// Try with time
-			t, err = time.Parse(time.RFC3339, sinceStr)
+			t, err = time.Parse(time.RFC3339, in.Since)
 			if err != nil {
 				return time.Time{}, fmt.Errorf("invalid since format, use ISO 8601 (e.g., '2024-01-15' or '2024-01-15T00:00:00Z')")
 			}
@@ -108,9 +131,11 @@ func (h *ChatSummarizeHandler) parseSinceTime(request mcp.CallToolRequest) (time
 		return t, nil
 	}
 
-	period := mcp.ParseString(request, "period", "month")
+	period := in.Period
+	if period == "" {
+		period = "month"
+	}
 	now := time.Now()
-
 	switch period {
 	case "day":
 		return now.Add(-24 * time.Hour), nil
@@ -123,18 +148,28 @@ func (h *ChatSummarizeHandler) parseSinceTime(request mcp.CallToolRequest) (time
 	}
 }
 
-func (h *ChatSummarizeHandler) createProvider(_ context.Context) summarize.Provider {
+func (h *ChatSummarizeHandler) createProvider(session *mcp.ServerSession) (summarize.Provider, error) {
 	switch h.config.Provider {
-	case summarize.ProviderSampling:
-		return summarize.NewSamplingProvider(h.mcpServer)
+	case "", summarize.ProviderSampling:
+		// Empty string is the zero value of ProviderName; treat it as the
+		// default (sampling) so programmatic Config{} works without surprises.
+		return summarize.NewSamplingProvider(session), nil
 	case summarize.ProviderGemini:
-		return summarize.NewGeminiProvider(h.config.GeminiAPIKey, h.config.Model)
+		if h.config.GeminiAPIKey == "" {
+			return nil, fmt.Errorf("GEMINI_API_KEY is required when using --summarize-provider=gemini")
+		}
+		return summarize.NewGeminiProvider(h.config.GeminiAPIKey, h.config.Model), nil
 	case summarize.ProviderOllama:
-		return summarize.NewOllamaProvider(h.config.OllamaURL, h.config.Model)
+		if h.config.OllamaURL == "" {
+			return nil, fmt.Errorf("OLLAMA_URL is required when using --summarize-provider=ollama")
+		}
+		return summarize.NewOllamaProvider(h.config.OllamaURL, h.config.Model), nil
 	case summarize.ProviderAnthropic:
-		return summarize.NewAnthropicProvider(h.config.AnthropicAPIKey, h.config.Model)
+		if h.config.AnthropicAPIKey == "" {
+			return nil, fmt.Errorf("ANTHROPIC_API_KEY is required when using --summarize-provider=anthropic")
+		}
+		return summarize.NewAnthropicProvider(h.config.AnthropicAPIKey, h.config.Model), nil
 	default:
-		// Default to sampling
-		return summarize.NewSamplingProvider(h.mcpServer)
+		return nil, fmt.Errorf("unknown summarization provider %q; expected one of: sampling, gemini, ollama, anthropic", h.config.Provider)
 	}
 }

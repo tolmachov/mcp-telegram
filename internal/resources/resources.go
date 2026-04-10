@@ -1,21 +1,19 @@
 package resources
 
 import (
-	"context"
-
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// ResourceHandler defines the interface for static resource handlers
+// ResourceHandler is the interface every static resource handler implements.
+// Each handler registers itself directly with the server, choosing whether
+// to expose a single resource (most common) or multiple via templates.
 type ResourceHandler interface {
-	Resource() mcp.Resource
-	Handle(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error)
+	Register(s *mcp.Server)
 }
 
-// RegisterResources registers all resource handlers with the MCP server
-func RegisterResources(s *server.MCPServer, handlers []ResourceHandler) {
+// RegisterResources registers all resource handlers with the MCP server.
+func RegisterResources(s *mcp.Server, handlers []ResourceHandler) {
 	for _, r := range handlers {
-		s.AddResource(r.Resource(), r.Handle)
+		r.Register(s)
 	}
 }

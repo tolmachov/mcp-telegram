@@ -36,7 +36,7 @@ func GetChats(ctx context.Context, client *tg.Client, onProgress ProgressFunc) (
 		var name string
 		var username string
 		var id int64
-		var chatType string
+		var chatType ChatType
 
 		users := dlg.Entities.Users()
 		chats := dlg.Entities.Chats()
@@ -45,29 +45,29 @@ func GetChats(ctx context.Context, client *tg.Client, onProgress ProgressFunc) (
 		switch p := dlg.Peer.(type) {
 		case *tg.InputPeerUser:
 			id = p.UserID
-			chatType = "user"
+			chatType = ChatTypeUser
 			if user, ok := users[p.UserID]; ok {
 				name = tgclient.UserName(user)
 				username = user.Username
 				if user.Bot {
-					chatType = "bot"
+					chatType = ChatTypeBot
 				}
 			}
 		case *tg.InputPeerChat:
 			id = p.ChatID
-			chatType = "group"
+			chatType = ChatTypeGroup
 			if chat, ok := chats[p.ChatID]; ok {
 				name = chat.Title
 			}
 		case *tg.InputPeerChannel:
 			// Convert to user-facing format with -100 prefix
 			id = -tgclient.ChannelIDPrefix - p.ChannelID
-			chatType = "channel"
+			chatType = ChatTypeChannel
 			if channel, ok := channels[p.ChannelID]; ok {
 				name = channel.Title
 				username = channel.Username
 				if channel.Megagroup {
-					chatType = "supergroup"
+					chatType = ChatTypeSupergroup
 				}
 			}
 		}
@@ -111,18 +111,88 @@ func GetChats(ctx context.Context, client *tg.Client, onProgress ProgressFunc) (
 	}, nil
 }
 
-// GetPinnedChats retrieves only pinned chats
+// GetPinnedChats retrieves only pinned chats using Telegram's dedicated
+// messages.getPinnedDialogs API. This is one API call regardless of how many
+// total dialogs the user has, vs. the old implementation which paginated
+// through ALL dialogs (1000+) and filtered client-side. The old approach
+// could take 30+ seconds under flood-wait conditions.
 func GetPinnedChats(ctx context.Context, client *tg.Client) ([]ChatInfo, error) {
-	result, err := GetChats(ctx, client, nil)
+	// folderid=0 is the default folder ("All chats"). Pinned dialogs in
+	// archived folders are uncommon enough to ignore for resource listing.
+	result, err := client.MessagesGetPinnedDialogs(ctx, 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("getting pinned dialogs: %w", err)
 	}
 
-	var pinned []ChatInfo
-	for _, chat := range result.Chats {
-		if chat.Pinned {
-			pinned = append(pinned, chat)
+	// Index users/chats/channels by ID so we can fill in titles for each
+	// pinned dialog.
+	users := make(map[int64]*tg.User, len(result.Users))
+	for _, u := range result.Users {
+		if user, ok := u.(*tg.User); ok {
+			users[user.ID] = user
 		}
+	}
+	chats := make(map[int64]*tg.Chat, len(result.Chats))
+	channels := make(map[int64]*tg.Channel, len(result.Chats))
+	for _, c := range result.Chats {
+		switch v := c.(type) {
+		case *tg.Chat:
+			chats[v.ID] = v
+		case *tg.Channel:
+			channels[v.ID] = v
+		}
+	}
+
+	startTime := time.Now()
+	pinned := make([]ChatInfo, 0, len(result.Dialogs))
+	for _, d := range result.Dialogs {
+		dialog, ok := d.(*tg.Dialog)
+		if !ok || !dialog.Pinned {
+			continue
+		}
+
+		var info ChatInfo
+		info.UnreadCount = dialog.UnreadCount
+		info.MentionCount = dialog.UnreadMentionsCount
+		info.Muted = dialog.NotifySettings.MuteUntil > int(startTime.Unix())
+		info.Pinned = true
+		info.Archived = dialog.FolderID != 0
+
+		switch peer := dialog.Peer.(type) {
+		case *tg.PeerUser:
+			info.ID = peer.UserID
+			info.Type = "user"
+			if user, ok := users[peer.UserID]; ok {
+				info.Name = tgclient.UserName(user)
+				info.Username = user.Username
+				if user.Bot {
+					info.Type = "bot"
+				}
+			}
+		case *tg.PeerChat:
+			info.ID = peer.ChatID
+			info.Type = "group"
+			if chat, ok := chats[peer.ChatID]; ok {
+				info.Name = chat.Title
+			}
+		case *tg.PeerChannel:
+			info.ID = -tgclient.ChannelIDPrefix - peer.ChannelID
+			info.Type = "channel"
+			if channel, ok := channels[peer.ChannelID]; ok {
+				info.Name = channel.Title
+				info.Username = channel.Username
+				if channel.Megagroup {
+					info.Type = "supergroup"
+				}
+			}
+		default:
+			continue
+		}
+
+		if info.Name == "" {
+			info.Name = "Unknown"
+		}
+		pinned = append(pinned, info)
 	}
 
 	return pinned, nil

@@ -6,168 +6,135 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
-// ChatMuteHandler handles the MuteChat tool
+// muteForeverUntil is Telegram's sentinel value for "muted forever":
+// int32 max, i.e. ~year 2038 in Unix seconds. Passing this to
+// account.updateNotifySettings.mute_until pins the chat to permanently
+// muted until the user explicitly unmutes.
+const muteForeverUntil = 2147483647
+
+// ChatMuteHandler handles the SetChatMute tool.
 type ChatMuteHandler struct {
 	client *tg.Client
 }
 
-// NewChatMuteHandler creates a new ChatMuteHandler
+// NewChatMuteHandler creates a new ChatMuteHandler.
 func NewChatMuteHandler(client *tg.Client) *ChatMuteHandler {
 	return &ChatMuteHandler{client: client}
 }
 
-// Tool returns the MCP tool definition
-func (h *ChatMuteHandler) Tool() mcp.Tool {
-	return mcp.NewTool("MuteChat",
-		mcp.WithDescription("Mute notifications for a chat. Mutes forever by default, or for a specified duration in seconds. To unmute, use UnmuteChat."),
-		mcp.WithIdempotentHintAnnotation(true),
-		mcp.WithOpenWorldHintAnnotation(true),
-		mcp.WithNumber("chat_id",
-			mcp.Description("The ID of the chat to mute"),
-			mcp.Required(),
-		),
-		mcp.WithNumber("duration",
-			mcp.Description("Duration in seconds (0 = forever, default: forever)"),
-		),
-	)
+// SetChatMuteInput is the input for the SetChatMute tool. Muted selects
+// the action (mute vs unmute) and DurationSeconds controls the mute
+// window when muting. DurationSeconds is ignored when Muted is false.
+type SetChatMuteInput struct {
+	ChatID          int64 `json:"chat_id" jsonschema:"The ID of the chat to mute or unmute"`
+	Muted           bool  `json:"muted" jsonschema:"true to mute\\, false to unmute"`
+	DurationSeconds int   `json:"duration_seconds,omitempty" jsonschema:"Mute duration in seconds when muted=true. 0 = mute forever. Ignored when muted=false. Must be >= 0."`
 }
 
-// Handle processes the MuteChat tool request
-func (h *ChatMuteHandler) Handle(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	chatID := mcp.ParseInt64(request, "chat_id", 0)
-	if chatID == 0 {
-		return mcp.NewToolResultError("chat_id is required"), nil
+// SetChatMuteResult is the typed output of SetChatMute.
+type SetChatMuteResult struct {
+	Status          string `json:"status"` // "muted" | "unmuted"
+	ChatID          int64  `json:"chat_id"`
+	DurationSeconds int    `json:"duration_seconds,omitempty"`
+	Forever         bool   `json:"forever,omitempty"`
+	MutedUntil      string `json:"muted_until,omitempty"`
+}
+
+// Register adds the tool to the MCP server.
+func (h *ChatMuteHandler) Register(s *mcp.Server) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "SetChatMute",
+		Description: "Mute or unmute chat notifications. When muted=true: duration_seconds=0 mutes forever, positive value mutes for N seconds (each call resets the timer — not idempotent). When muted=false: unmutes immediately (idempotent); duration_seconds is ignored.",
+		// Note: IdempotentHint is intentionally not set. The tool is
+		// idempotent only for muted=false; muting with a duration resets
+		// the timer on every call. MCP annotations apply at the tool
+		// level, not per-call, so we can't truthfully claim idempotence.
+		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},
+	}, h.handle)
+}
+
+func (h *ChatMuteHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in SetChatMuteInput) (*mcp.CallToolResult, *SetChatMuteResult, error) {
+	if in.ChatID == 0 {
+		return errChatIDRequired(), nil, nil
+	}
+	if in.DurationSeconds < 0 {
+		return errResult("duration_seconds must be >= 0 (0 = mute forever)"), nil, nil
 	}
 
-	// Duration in seconds, 0 = forever
-	duration := mcp.ParseInt(request, "duration", 0)
-
-	// Resolve the peer
-	peer, err := tgclient.ResolvePeer(ctx, h.client, chatID)
+	peer, err := tgclient.ResolvePeer(ctx, h.client, in.ChatID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to resolve peer: %v", err)), nil
+		return errResolvePeer(in.ChatID, err), nil, nil
 	}
 
-	// Convert InputPeer to InputNotifyPeer
-	var notifyPeer tg.InputNotifyPeerClass
-	switch p := peer.(type) {
-	case *tg.InputPeerUser:
-		notifyPeer = &tg.InputNotifyPeer{
-			Peer: &tg.InputPeerUser{UserID: p.UserID, AccessHash: p.AccessHash},
-		}
-	case *tg.InputPeerChat:
-		notifyPeer = &tg.InputNotifyPeer{
-			Peer: &tg.InputPeerChat{ChatID: p.ChatID},
-		}
-	case *tg.InputPeerChannel:
-		notifyPeer = &tg.InputNotifyPeer{
-			Peer: &tg.InputPeerChannel{ChannelID: p.ChannelID, AccessHash: p.AccessHash},
-		}
-	default:
-		return mcp.NewToolResultError("Unsupported peer type"), nil
+	notifyPeer, ok := toInputNotifyPeer(peer)
+	if !ok {
+		return errResult("Unsupported peer type"), nil, nil
 	}
 
-	// Set mute_until: 0 = default, max int32 = forever, or a specific Unix timestamp
+	// Unmute path: mute_until=0 restores default settings.
+	if !in.Muted {
+		if _, err := h.client.AccountUpdateNotifySettings(ctx, &tg.AccountUpdateNotifySettingsRequest{
+			Peer:     notifyPeer,
+			Settings: tg.InputPeerNotifySettings{MuteUntil: 0},
+		}); err != nil {
+			return errResult(fmt.Sprintf("Failed to unmute chat: %v", err)), nil, nil
+		}
+		return nil, &SetChatMuteResult{
+			Status: "unmuted",
+			ChatID: in.ChatID,
+		}, nil
+	}
+
+	// Mute path: either forever (sentinel) or a relative duration from now.
 	var muteUntil int
-	if duration == 0 {
-		// Mute forever (max int32 value)
-		muteUntil = 2147483647
+	if in.DurationSeconds == 0 {
+		muteUntil = muteForeverUntil
 	} else {
-		// Mute until specific time (current Unix timestamp + duration in seconds)
-		muteUntil = int(time.Now().Unix()) + duration
+		muteUntil = int(time.Now().Unix()) + in.DurationSeconds
 	}
 
-	// Update notification settings
-	_, err = h.client.AccountUpdateNotifySettings(ctx, &tg.AccountUpdateNotifySettingsRequest{
-		Peer: notifyPeer,
-		Settings: tg.InputPeerNotifySettings{
-			MuteUntil: muteUntil,
-		},
-	})
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to mute chat: %v", err)), nil
+	if _, err := h.client.AccountUpdateNotifySettings(ctx, &tg.AccountUpdateNotifySettingsRequest{
+		Peer:     notifyPeer,
+		Settings: tg.InputPeerNotifySettings{MuteUntil: muteUntil},
+	}); err != nil {
+		return errResult(fmt.Sprintf("Failed to mute chat: %v", err)), nil, nil
 	}
 
-	var result string
-	if duration == 0 {
-		result = fmt.Sprintf("Chat %d muted forever", chatID)
+	res := &SetChatMuteResult{
+		Status:          "muted",
+		ChatID:          in.ChatID,
+		DurationSeconds: in.DurationSeconds,
+	}
+	if in.DurationSeconds == 0 {
+		res.Forever = true
 	} else {
-		result = fmt.Sprintf("Chat %d muted for %d seconds", chatID, duration)
+		res.MutedUntil = time.Unix(int64(muteUntil), 0).UTC().Format(time.RFC3339)
 	}
-
-	return mcp.NewToolResultText(result), nil
+	return nil, res, nil
 }
 
-// ChatUnmuteHandler handles the UnmuteChat tool
-type ChatUnmuteHandler struct {
-	client *tg.Client
-}
-
-// NewChatUnmuteHandler creates a new ChatUnmuteHandler
-func NewChatUnmuteHandler(client *tg.Client) *ChatUnmuteHandler {
-	return &ChatUnmuteHandler{client: client}
-}
-
-// Tool returns the MCP tool definition
-func (h *ChatUnmuteHandler) Tool() mcp.Tool {
-	return mcp.NewTool("UnmuteChat",
-		mcp.WithDescription("Unmute notifications for a chat, restoring default notification settings. To mute, use MuteChat."),
-		mcp.WithIdempotentHintAnnotation(true),
-		mcp.WithOpenWorldHintAnnotation(true),
-		mcp.WithNumber("chat_id",
-			mcp.Description("The ID of the chat to unmute"),
-			mcp.Required(),
-		),
-	)
-}
-
-// Handle processes the UnmuteChat tool request
-func (h *ChatUnmuteHandler) Handle(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	chatID := mcp.ParseInt64(request, "chat_id", 0)
-	if chatID == 0 {
-		return mcp.NewToolResultError("chat_id is required"), nil
-	}
-
-	// Resolve the peer
-	peer, err := tgclient.ResolvePeer(ctx, h.client, chatID)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to resolve peer: %v", err)), nil
-	}
-
-	// Convert InputPeer to InputNotifyPeer
-	var notifyPeer tg.InputNotifyPeerClass
+// toInputNotifyPeer converts an InputPeer into the InputNotifyPeer wrapper
+// expected by AccountUpdateNotifySettings.
+func toInputNotifyPeer(peer tg.InputPeerClass) (tg.InputNotifyPeerClass, bool) {
 	switch p := peer.(type) {
 	case *tg.InputPeerUser:
-		notifyPeer = &tg.InputNotifyPeer{
+		return &tg.InputNotifyPeer{
 			Peer: &tg.InputPeerUser{UserID: p.UserID, AccessHash: p.AccessHash},
-		}
+		}, true
 	case *tg.InputPeerChat:
-		notifyPeer = &tg.InputNotifyPeer{
+		return &tg.InputNotifyPeer{
 			Peer: &tg.InputPeerChat{ChatID: p.ChatID},
-		}
+		}, true
 	case *tg.InputPeerChannel:
-		notifyPeer = &tg.InputNotifyPeer{
+		return &tg.InputNotifyPeer{
 			Peer: &tg.InputPeerChannel{ChannelID: p.ChannelID, AccessHash: p.AccessHash},
-		}
+		}, true
 	default:
-		return mcp.NewToolResultError("Unsupported peer type"), nil
+		return nil, false
 	}
-
-	// Reset notification settings (mute_until = 0 means use default/unmuted)
-	_, err = h.client.AccountUpdateNotifySettings(ctx, &tg.AccountUpdateNotifySettingsRequest{
-		Peer: notifyPeer,
-		Settings: tg.InputPeerNotifySettings{
-			MuteUntil: 0,
-		},
-	})
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to unmute chat: %v", err)), nil
-	}
-
-	return mcp.NewToolResultText(fmt.Sprintf("Chat %d unmuted", chatID)), nil
 }
