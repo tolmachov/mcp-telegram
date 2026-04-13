@@ -3,8 +3,8 @@ package tools
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/gotd/td/tg"
+	"github.com/stretchr/testify/assert"
 )
 
 // newUpdatesWith builds a *tg.Updates containing a single update, which is the

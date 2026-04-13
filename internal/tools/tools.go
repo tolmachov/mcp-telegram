@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -37,6 +38,19 @@ func RegisterTools(s *mcp.Server, handlers []Handler) {
 	for _, h := range handlers {
 		h.Register(s)
 	}
+}
+
+// parseDateFilter parses an RFC3339 date string for a filter field (e.g.
+// "from_date"). Returns an errResult on parse failure; ok is false in that case.
+func parseDateFilter(fieldName, value string) (t time.Time, errRes *mcp.CallToolResult, ok bool) {
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, errResult(fmt.Sprintf(
+			"invalid %s %q: %v. Expected RFC3339 format, e.g. \"2026-04-09T00:00:00Z\".",
+			fieldName, value, err,
+		)), false
+	}
+	return parsed, nil, true
 }
 
 // ptrTrue returns a pointer to true. Used for *bool fields on

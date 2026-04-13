@@ -134,7 +134,7 @@ func TestReverseOddLength(t *testing.T) {
 }
 
 func TestReverseEmptyAndSingle(t *testing.T) {
-	empty := []Message{}
+	var empty []Message
 	Reverse(empty)
 	assert.Empty(t, empty)
 

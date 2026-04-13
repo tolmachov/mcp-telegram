@@ -112,16 +112,16 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	// has no native equivalent and is applied as a post-filter inside the
 	// provider (drops messages older than MinDate and clamps HasMore).
 	if in.FromDate != "" {
-		t, err := time.Parse(time.RFC3339, in.FromDate)
-		if err != nil {
-			return errResult(fmt.Sprintf("invalid from_date %q: %v. Expected RFC3339 format, e.g. \"2026-04-09T00:00:00Z\".", in.FromDate, err)), nil, nil
+		t, errRes, ok := parseDateFilter("from_date", in.FromDate)
+		if !ok {
+			return errRes, nil, nil
 		}
 		opts.MinDate = t
 	}
 	if in.ToDate != "" {
-		t, err := time.Parse(time.RFC3339, in.ToDate)
-		if err != nil {
-			return errResult(fmt.Sprintf("invalid to_date %q: %v. Expected RFC3339 format, e.g. \"2026-04-10T00:00:00Z\" to include all of 2026-04-09.", in.ToDate, err)), nil, nil
+		t, errRes, ok := parseDateFilter("to_date", in.ToDate)
+		if !ok {
+			return errRes, nil, nil
 		}
 		opts.MaxDate = t
 	}

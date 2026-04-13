@@ -31,7 +31,7 @@ func (h *ChatsHandler) Register(s *mcp.Server) {
 	}, h.handle)
 }
 
-func (h *ChatsHandler) handle(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+func (h *ChatsHandler) handle(ctx context.Context, _ *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 	// Resource handlers don't get a progress token in the same way tools do —
 	// reads are typically fast and clients don't expect progress on them.
 	// If the progress channel is needed in the future, capture req.Session

@@ -248,9 +248,7 @@ func (p *Provider) processGlobalHistory(history tg.MessagesMessagesClass, limit 
 		}
 
 		if msg.ReplyTo != nil {
-			if reply, ok := msg.ReplyTo.(*tg.MessageReplyHeader); ok {
-				m.ReplyToID = reply.ReplyToMsgID
-			}
+			m.ReplyToID = extractReplyToID(msg.ReplyTo)
 		}
 		if msg.Media != nil {
 			m.Media = extractMediaType(msg.Media)

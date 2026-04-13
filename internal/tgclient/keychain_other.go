@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 
 	"github.com/gotd/td/session"
+
+	"github.com/tolmachov/mcp-telegram/internal/xdg"
 )
 
 // SessionStorage implements session.Storage using file storage on non-macOS platforms.
@@ -36,27 +38,11 @@ func getSessionPath() (string, error) {
 }
 
 func resolveSessionPath() (string, error) {
-	stateHome := os.Getenv("XDG_STATE_HOME")
-	if stateHome == "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("locating home directory: %w", err)
-		}
-		if homeDir == "" {
-			return "", fmt.Errorf("locating home directory: UserHomeDir returned empty path")
-		}
-		stateHome = filepath.Join(homeDir, ".local", "state")
+	stateDir, err := xdg.StateDir()
+	if err != nil {
+		return "", err
 	}
-	if !filepath.IsAbs(stateHome) {
-		return "", fmt.Errorf("state home %q is not absolute", stateHome)
-	}
-
-	sessionDir := filepath.Join(stateHome, "mcp-telegram")
-	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
-		return "", fmt.Errorf("creating session directory %s: %w", sessionDir, err)
-	}
-
-	return filepath.Join(sessionDir, "session.json"), nil
+	return filepath.Join(stateDir, "session.json"), nil
 }
 
 // LoadSession loads session data from file.

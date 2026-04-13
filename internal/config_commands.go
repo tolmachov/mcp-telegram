@@ -30,7 +30,7 @@ func configSetAction(_ context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("storing config value: %w", err)
 	}
 
-	fmt.Fprintf(cmd.Root().ErrWriter, "Stored %s securely\n", key)
+	_, _ = fmt.Fprintf(cmd.Root().ErrWriter, "Stored %s securely\n", key)
 
 	return nil
 }
@@ -47,12 +47,12 @@ func configListAction(_ context.Context, cmd *cli.Command) error {
 	}
 
 	if len(keys) == 0 {
-		fmt.Fprintln(cmd.Root().ErrWriter, "No config values stored")
+		_, _ = fmt.Fprintln(cmd.Root().ErrWriter, "No config values stored")
 		return nil
 	}
 
 	for _, k := range keys {
-		fmt.Fprintf(cmd.Root().Writer, "%s = ****\n", k)
+		_, _ = fmt.Fprintf(cmd.Root().Writer, "%s = ****\n", k)
 	}
 
 	return nil
@@ -78,7 +78,7 @@ func configDeleteAction(_ context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("deleting config value: %w", err)
 	}
 
-	fmt.Fprintf(cmd.Root().ErrWriter, "Deleted %s\n", key)
+	_, _ = fmt.Fprintf(cmd.Root().ErrWriter, "Deleted %s\n", key)
 
 	return nil
 }

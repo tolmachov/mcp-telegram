@@ -66,7 +66,7 @@ func APIHashFlag() *cli.StringFlag {
 }
 
 func AllowedPathsFlag() *cli.StringSliceFlag {
-	defaultDirs := []string{}
+	var defaultDirs []string
 	if d, err := tools.DefaultBackupDir(); err != nil {
 		slog.Warn("could not determine default backup directory; --allowed-paths will have no default", "err", err)
 	} else {

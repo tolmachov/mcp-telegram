@@ -103,9 +103,9 @@ func (h *MessageReadHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	}
 	if out.Failed > 0 && out.Successful == 0 {
 		var b strings.Builder
-		fmt.Fprintf(&b, "Failed to mark all %d chat(s) as read:", out.Failed)
+		b.WriteString(fmt.Sprintf("Failed to mark all %d chat(s) as read:", out.Failed))
 		for _, f := range out.Failures {
-			fmt.Fprintf(&b, "\n  chat_id=%d: %s", f.ChatID, f.Error)
+			b.WriteString(fmt.Sprintf("\n  chat_id=%d: %s", f.ChatID, f.Error))
 		}
 		return errResult(b.String()), nil, nil
 	}

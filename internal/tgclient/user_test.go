@@ -3,8 +3,8 @@ package tgclient
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/gotd/td/tg"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestUserName(t *testing.T) {

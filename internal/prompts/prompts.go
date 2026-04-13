@@ -49,10 +49,10 @@ func handleDailyDigest(_ context.Context, request *mcp.GetPromptRequest) (*mcp.G
 		period = "day"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Build a digest of Telegram activity over the last %s:\n", period)
+	b.WriteString(fmt.Sprintf("Build a digest of Telegram activity over the last %s:\n", period))
 	b.WriteString("1. Use GetChats to list active chats; focus on chats with unread messages or recent activity.\n")
 	b.WriteString("2. For each chat that looks relevant, call SummarizeChat with goal='key updates and action items' ")
-	fmt.Fprintf(&b, "and period='%s'.\n", period)
+	b.WriteString(fmt.Sprintf("and period='%s'.\n", period))
 	b.WriteString("3. Group the per-chat summaries into a single digest, ordered by importance (chats with mentions or unread > 0 first).\n")
 	b.WriteString("4. End with a short bullet list of action items the user should follow up on.\n")
 	b.WriteString("Do NOT send any messages — this is read-only.")
@@ -69,12 +69,12 @@ func handleChatCatchup(_ context.Context, request *mcp.GetPromptRequest) (*mcp.G
 		period = "week"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Catch me up on chat %q (last %s):\n", chat, period)
+	b.WriteString(fmt.Sprintf("Catch me up on chat %q (last %s):\n", chat, period))
 	b.WriteString("1. Resolve the chat ID:\n")
 	b.WriteString("   - If it looks like a username (starts with @), use ResolveUsername.\n")
 	b.WriteString("   - Otherwise, use SearchChats to find the chat by title.\n")
 	b.WriteString("   - If multiple matches, ask me which one before proceeding.\n")
-	fmt.Fprintf(&b, "2. Call SummarizeChat with goal='key decisions, action items, and anything I should respond to' and period='%s'.\n", period)
+	b.WriteString(fmt.Sprintf("2. Call SummarizeChat with goal='key decisions, action items, and anything I should respond to' and period='%s'.\n", period))
 	b.WriteString("3. After the summary, list any messages that look like they need a reply, with the message ID and a one-line excerpt.\n")
 	b.WriteString("Do NOT send any replies yet — wait for my instruction.")
 	return promptUser(b.String()), nil
@@ -94,7 +94,7 @@ func handleFindAndReply(_ context.Context, request *mcp.GetPromptRequest) (*mcp.
 		return nil, fmt.Errorf("argument 'reply' is required")
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Find a message in chat %q matching: %s\n", chat, query)
+	b.WriteString(fmt.Sprintf("Find a message in chat %q matching: %s\n", chat, query))
 	b.WriteString("Then draft a reply: ")
 	b.WriteString(reply)
 	b.WriteString("\n\nSteps:\n")

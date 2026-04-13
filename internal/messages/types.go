@@ -8,6 +8,15 @@ import (
 	"github.com/gotd/td/tg"
 )
 
+// extractReplyToID extracts the reply-to message ID from a MessageReplyHeader.
+// Returns 0 if replyTo is not a MessageReplyHeader.
+func extractReplyToID(replyTo tg.MessageReplyHeaderClass) int {
+	if reply, ok := replyTo.(*tg.MessageReplyHeader); ok {
+		return reply.ReplyToMsgID
+	}
+	return 0
+}
+
 // Message represents a Telegram message with parsed metadata.
 type Message struct {
 	ID         int         `json:"id"`

@@ -464,9 +464,7 @@ func (p *Provider) extractMessages(messages []tg.MessageClass, users map[int64]s
 
 		// Extract reply info
 		if msg.ReplyTo != nil {
-			if reply, ok := msg.ReplyTo.(*tg.MessageReplyHeader); ok {
-				m.ReplyToID = reply.ReplyToMsgID
-			}
+			m.ReplyToID = extractReplyToID(msg.ReplyTo)
 		}
 
 		// Extract media type

@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+
+	"github.com/tolmachov/mcp-telegram/internal/xdg"
 )
 
 type fileStore struct {
@@ -33,27 +35,11 @@ func configPath() (string, error) {
 }
 
 func resolveConfigPath() (string, error) {
-	stateHome := os.Getenv("XDG_STATE_HOME")
-	if stateHome == "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("locating home directory: %w", err)
-		}
-		if homeDir == "" {
-			return "", fmt.Errorf("locating home directory: UserHomeDir returned empty path")
-		}
-		stateHome = filepath.Join(homeDir, ".local", "state")
+	stateDir, err := xdg.StateDir()
+	if err != nil {
+		return "", err
 	}
-	if !filepath.IsAbs(stateHome) {
-		return "", fmt.Errorf("state home %q is not absolute", stateHome)
-	}
-
-	configDir := filepath.Join(stateHome, "mcp-telegram")
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		return "", fmt.Errorf("creating config directory %s: %w", configDir, err)
-	}
-
-	return filepath.Join(configDir, "config.json"), nil
+	return filepath.Join(stateDir, "config.json"), nil
 }
 
 func (s *fileStore) load() (map[string]string, error) {

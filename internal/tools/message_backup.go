@@ -184,9 +184,8 @@ func getChatName(ctx context.Context, raw *tg.Client, peer tg.InputPeerClass, ch
 		} else if len(users) > 0 {
 			if user, ok := users[0].(*tg.User); ok {
 				return tgclient.UserName(user), true
-			} else {
-				slog.Debug("getChatName: unexpected user type from API", "chat_id", chatID, "type", fmt.Sprintf("%T", users[0]))
 			}
+			slog.Debug("getChatName: unexpected user type from API", "chat_id", chatID, "type", fmt.Sprintf("%T", users[0]))
 		}
 	case *tg.InputPeerChat:
 		chats, err := raw.MessagesGetChats(ctx, []int64{p.ChatID})
@@ -613,6 +612,10 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 			"error":   err.Error(),
 		})
 		return errResult(fmt.Sprintf("Failed to get messages: %v", err)), nil, nil
+	}
+	// Provider may return (nil, nil) which the guard above misses (no err to check).
+	if result == nil {
+		return errResult("provider returned no result"), nil, nil
 	}
 	if partialErr != nil {
 		mcpLog(ctx, req.Session, logLevelWarning, "BackupMessages", map[string]any{
