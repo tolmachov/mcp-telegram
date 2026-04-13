@@ -135,6 +135,16 @@ them manually.
 
 Pinned chat resources are created dynamically for each pinned chat and refreshed in the background; clients will receive `resources/list_changed` when the set changes.
 
+## Available Prompts
+
+3 parameterized prompts that MCP clients expose as slash-commands or quick actions.
+
+| Prompt | Arguments | Description |
+|--------|-----------|-------------|
+| `daily-digest` | `period` — `day` (default) / `week` / `month` | Walks active chats and produces a per-chat digest of key updates and action items. Read-only. |
+| `chat-catchup` | `chat` (required) — ID / @username / title; `period` — `day` / `week` (default) / `month` | Summarizes a specific chat and lists messages that look like they need a reply. Read-only. |
+| `find-and-reply` | `chat` (required), `query` (required) — what to search for, `reply` (required) — reply text or instruction | Searches for a message, shows a draft reply, and sends **only after explicit user confirmation**. |
+
 ## Prompt Examples
 
 Here are some example prompts you can use with AI assistants:
@@ -217,6 +227,9 @@ Allowed keys: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `ANTHROPIC_API_KEY`, `GEMI
 | `OLLAMA_URL` | Ollama API URL | `http://localhost:11434` |
 | `GEMINI_API_KEY` | Google Gemini API key | - |
 | `ANTHROPIC_API_KEY` | Anthropic API key | - |
+| `TELEGRAM_MEDIA_MAX_BYTES` | Max bytes `GetMedia` will download per call (cap to avoid OOM on large attachments) | `52428800` (50 MiB) |
+| `TELEGRAM_RATE_LIMIT_RPS` | RPS ceiling for history-fetching calls to Telegram. Exceeding Telegram's FLOOD_WAIT thresholds pauses all tools. | `0` (safe built-in default) |
+| `TELEGRAM_PINNED_REFRESH_SECONDS` | Polling interval (seconds) for the pinned-chat resource watcher. `0` disables the watcher. | `30` |
 
 ## Destructive Actions
 
