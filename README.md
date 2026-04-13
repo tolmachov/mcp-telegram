@@ -8,6 +8,8 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/tolmachov/mcp-telegram)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Go Report Card](https://goreportcard.com/badge/github.com/tolmachov/mcp-telegram)](https://goreportcard.com/report/github.com/tolmachov/mcp-telegram)
+[![mcp-telegram MCP server](https://glama.ai/mcp/servers/tolmachov/mcp-telegram/badges/card.svg)](https://glama.ai/mcp/servers/tolmachov/mcp-telegram)
+[![mcp-telegram MCP server](https://glama.ai/mcp/servers/tolmachov/mcp-telegram/badges/score.svg)](https://glama.ai/mcp/servers/tolmachov/mcp-telegram)
 
 </div>
 
