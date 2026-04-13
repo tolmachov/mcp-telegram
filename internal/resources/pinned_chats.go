@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"sort"
 	"sync"
 	"time"
 
@@ -86,7 +85,7 @@ func (p *PinnedChatsProvider) doRefresh(ctx context.Context) error {
 		newURIs = append(newURIs, fmt.Sprintf("telegram://chats/%d", chat.ID))
 	}
 	sortedNew := append([]string(nil), newURIs...)
-	sort.Strings(sortedNew)
+	slices.Sort(sortedNew)
 
 	p.mu.Lock()
 	if slices.Equal(sortedNew, p.sortedURIs) {
@@ -147,6 +146,14 @@ func (p *PinnedChatsProvider) WatchInBackground(ctx context.Context, interval ti
 	go func() {
 		defer close(done)
 		defer ticker.Stop()
+		if err := p.RefreshResources(ctx); err != nil {
+			switch {
+			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+				p.logger.Debug("pinned chats initial refresh cancelled", "err", err)
+			default:
+				p.logger.Error("pinned chats initial refresh failed", "err", err)
+			}
+		}
 		for {
 			select {
 			case <-ctx.Done():

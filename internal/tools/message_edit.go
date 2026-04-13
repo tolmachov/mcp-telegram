@@ -35,6 +35,13 @@ type EditMessageInput struct {
 	ScheduleAt string `json:"schedule_at,omitempty" jsonschema:"New send time in RFC3339 (e.g. 2026-04-10T15:30:00Z). Required when message_id is a scheduled handle; must be omitted for regular messages. Setting this both edits the text and reschedules the pending delivery."`
 }
 
+const statusEdited = "edited"
+
+const (
+	kindRegular   = "regular"
+	kindScheduled = "scheduled"
+)
+
 // EditMessageResult is the typed output of EditMessage.
 type EditMessageResult struct {
 	Status     string `json:"status"`
@@ -44,6 +51,7 @@ type EditMessageResult struct {
 	NewText    string `json:"new_text"`
 	EditedAt   string `json:"edited_at,omitempty"`
 	ScheduleAt string `json:"schedule_at,omitempty"`
+	Note       string `json:"note,omitempty"`
 }
 
 // Register adds the tool to the MCP server.
@@ -55,7 +63,7 @@ func (h *MessageEditHandler) Register(s *mcp.Server) {
 	}, h.handle)
 }
 
-func (h *MessageEditHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in EditMessageInput) (*mcp.CallToolResult, *EditMessageResult, error) {
+func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in EditMessageInput) (*mcp.CallToolResult, *EditMessageResult, error) {
 	if in.ChatID == 0 {
 		return errChatIDRequired(), nil, nil
 	}
@@ -67,7 +75,7 @@ func (h *MessageEditHandler) handle(ctx context.Context, _ *mcp.CallToolRequest,
 		return errResult("new_text is required"), nil, nil
 	}
 
-	req := &tg.MessagesEditMessageRequest{
+	editReq := &tg.MessagesEditMessageRequest{
 		ID:      ref.ID,
 		Message: in.NewText,
 	}
@@ -86,7 +94,7 @@ func (h *MessageEditHandler) handle(ctx context.Context, _ *mcp.CallToolRequest,
 		if !t.After(time.Now()) {
 			return errResult("schedule_at must be in the future"), nil, nil
 		}
-		req.ScheduleDate = int(t.Unix())
+		editReq.ScheduleDate = int(t.Unix())
 	} else if in.ScheduleAt != "" {
 		return errResult("schedule_at is only valid when editing a scheduled message (\"s:...\"). To reschedule a pending delivery, pass the scheduled handle instead."), nil, nil
 	}
@@ -95,36 +103,44 @@ func (h *MessageEditHandler) handle(ctx context.Context, _ *mcp.CallToolRequest,
 	if err != nil {
 		return errResolvePeer(in.ChatID, err), nil, nil
 	}
-	req.Peer = peer
+	editReq.Peer = peer
 
-	updates, err := h.client.MessagesEditMessage(ctx, req)
+	updates, err := h.client.MessagesEditMessage(ctx, editReq)
 	if err != nil {
 		return errResult(fmt.Sprintf("Failed to edit message: %v", err)), nil, nil
 	}
 
 	editedMsgID, date := extractEditedMessageID(updates)
+	if editedMsgID == 0 {
+		mcpLog(ctx, req.Session, logLevelWarning, "EditMessage", map[string]any{
+			"action":  "edited_message_id_extraction_failed",
+			"chat_id": in.ChatID,
+			"note":    "Telegram returned an unrecognised update type; falling back to input handle",
+		})
+	}
 
 	res := &EditMessageResult{
-		Status:  "edited",
+		Status:  statusEdited,
 		ChatID:  in.ChatID,
 		NewText: in.NewText,
 	}
 	if ref.Scheduled {
-		res.Kind = "scheduled"
+		res.Kind = kindScheduled
 		res.ScheduleAt = in.ScheduleAt
-		// Preserve the scheduled handle form in the response so the LLM can
-		// keep referencing the edited message with the same handle it passed in.
 		if editedMsgID > 0 {
 			res.MessageID = FormatScheduledRef(editedMsgID)
 		} else {
+			// Telegram did not return the updated handle — preserve the input.
 			res.MessageID = ref.Format()
+			res.Note = "message_id may be stale: Telegram returned an unrecognised update type. Verify via GetMessages with include_scheduled=true."
 		}
 	} else {
-		res.Kind = "regular"
+		res.Kind = kindRegular
 		if editedMsgID > 0 {
 			res.MessageID = FormatRegularRef(editedMsgID)
 		} else {
 			res.MessageID = ref.Format()
+			res.Note = "message_id may be stale: Telegram returned an unrecognised update type. Verify via GetMessages."
 		}
 	}
 	if date > 0 {

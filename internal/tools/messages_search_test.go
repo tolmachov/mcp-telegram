@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // All test cases here exercise only the input-validation paths of the
@@ -85,19 +87,11 @@ func TestSearchMessagesHandleValidation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			result, out, err := h.handle(ctx, nil, tc.input)
-			if err != nil {
-				t.Fatalf("handle returned err: %v", err)
-			}
-			if out != nil {
-				t.Fatalf("expected nil output on validation error, got %+v", out)
-			}
-			if result == nil || !result.IsError {
-				t.Fatalf("expected IsError result, got %+v", result)
-			}
-			text := toolResultText(result)
-			if !strings.Contains(text, tc.errSubstr) {
-				t.Errorf("result text %q does not contain %q", text, tc.errSubstr)
-			}
+			require.NoError(t, err)
+			require.Nil(t, out)
+			require.NotNil(t, result)
+			require.True(t, result.IsError)
+			assert.Contains(t, toolResultText(result), tc.errSubstr)
 		})
 	}
 }
@@ -109,18 +103,11 @@ func TestMediaFilterMapCoverage(t *testing.T) {
 		"photos", "videos", "documents", "links",
 		"voice", "music", "gif", "round_video", "round_voice",
 	}
-	if len(mediaFilterMap) != len(want) {
-		t.Errorf("mediaFilterMap size = %d, want %d", len(mediaFilterMap), len(want))
-	}
+	assert.Equal(t, len(want), len(mediaFilterMap))
 	for _, k := range want {
 		ctor, ok := mediaFilterMap[k]
-		if !ok {
-			t.Errorf("mediaFilterMap missing %q", k)
-			continue
-		}
-		if ctor() == nil {
-			t.Errorf("mediaFilterMap[%q] constructor returned nil", k)
-		}
+		require.True(t, ok, "mediaFilterMap missing %q", k)
+		require.NotNil(t, ctor())
 	}
 }
 

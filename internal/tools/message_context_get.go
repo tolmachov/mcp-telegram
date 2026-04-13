@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -48,7 +49,7 @@ func (h *MessageContextGetHandler) Register(s *mcp.Server) {
 	}, h.handle)
 }
 
-func (h *MessageContextGetHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in GetMessageContextInput) (*mcp.CallToolResult, *getMessageContextOutput, error) {
+func (h *MessageContextGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in GetMessageContextInput) (*mcp.CallToolResult, *getMessageContextOutput, error) {
 	if in.ChatID == 0 {
 		return errChatIDRequired(), nil, nil
 	}
@@ -68,6 +69,12 @@ func (h *MessageContextGetHandler) handle(ctx context.Context, _ *mcp.CallToolRe
 
 	result, err := h.provider.FetchContext(ctx, in.ChatID, ref.ID, before, after)
 	if err != nil {
+		mcpLog(ctx, req.Session, logLevelWarning, "GetMessageContext", map[string]any{
+			"action":  "provider_fetch_failed",
+			"chat_id": in.ChatID,
+			"msg_id":  ref.ID,
+			"error":   err.Error(),
+		})
 		return errResult(fmt.Sprintf("Failed to get message context: %v", err)), nil, nil
 	}
 
@@ -77,7 +84,12 @@ func (h *MessageContextGetHandler) handle(ctx context.Context, _ *mcp.CallToolRe
 		Messages: make([]messageDTO, 0, len(result.Messages)),
 	}
 	for _, m := range result.Messages {
-		out.Messages = append(out.Messages, toMessageDTO(m, false))
+		dto := toMessageDTO(m, false)
+		if utf8.RuneCountInString(dto.Text) > maxMessageTextRunes {
+			dto.Text = truncateRunes(dto.Text, maxMessageTextRunes) +
+				refetchTruncatedTextHint(utf8.RuneCountInString(m.Text), maxMessageTextRunes, m.ID)
+		}
+		out.Messages = append(out.Messages, dto)
 	}
 	out.Count = len(out.Messages)
 	return nil, out, nil

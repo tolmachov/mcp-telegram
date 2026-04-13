@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -99,6 +100,14 @@ func (h *MessageReadHandler) handle(ctx context.Context, req *mcp.CallToolReques
 				Error:  fmt.Sprintf("%v", r.err),
 			})
 		}
+	}
+	if out.Failed > 0 && out.Successful == 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "Failed to mark all %d chat(s) as read:", out.Failed)
+		for _, f := range out.Failures {
+			fmt.Fprintf(&b, "\n  chat_id=%d: %s", f.ChatID, f.Error)
+		}
+		return errResult(b.String()), nil, nil
 	}
 	return nil, out, nil
 }

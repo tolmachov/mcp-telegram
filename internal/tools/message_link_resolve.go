@@ -32,20 +32,39 @@ type ResolveMessageLinkInput struct {
 }
 
 // ResolveMessageLinkResult is the typed output of ResolveMessageLink.
+//
+// ChatID and MessageID are always populated. For forum links, TopicMessageID
+// is the opaque regular-message handle of the topic/thread root, ready to feed
+// into SearchMessages.top_msg_id. TopicID is kept as the raw numeric message
+// ID for backward compatibility and is zero for non-forum links.
+//
+// Public-link only (populated together when resolved via username; omitted for
+// private channel links):
+//
+//	ChatTitle, Username
+//
+// Private-link only (offline resolution, no API call):
+//
+//	Hint
 type ResolveMessageLinkResult struct {
-	ChatID    int64  `json:"chat_id"`
+	ChatID         int64  `json:"chat_id"`
+	MessageID      string `json:"message_id"`
+	TopicID        int    `json:"topic_id,omitempty"`
+	TopicMessageID string `json:"topic_message_id,omitempty"`
+
+	// Public-link only.
 	ChatTitle string `json:"chat_title,omitempty"`
 	Username  string `json:"username,omitempty"`
-	MessageID string `json:"message_id"`
-	TopicID   int    `json:"topic_id,omitempty"`
-	Hint      string `json:"next_step_hint,omitempty"`
+
+	// Private-link only.
+	Hint string `json:"next_step_hint,omitempty"`
 }
 
 // Register adds the tool to the MCP server.
 func (h *MessageLinkResolveHandler) Register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "ResolveMessageLink",
-		Description: "Parse a Telegram message URL into a chat_id + opaque message handle ready for GetMessages / GetMessageContext / DeleteMessage. Supports public (t.me/<username>/<id>), private-channel (t.me/c/<internal_id>/<id>), and forum (…/<topic_id>/<id>) link forms. Returns chat metadata from Telegram for public links; private-channel links are resolved offline (no API call) and carry no chat_title.",
+		Description: "Parse a Telegram message URL into a chat_id + opaque message handle ready for GetMessages / GetMessageContext / DeleteMessage. Supports public (t.me/<username>/<id>), private-channel (t.me/c/<internal_id>/<id>), and forum (…/<topic_id>/<id>) link forms. Forum links also return topic_message_id, an opaque handle ready for SearchMessages.top_msg_id. Returns chat metadata from Telegram for public links; private-channel links are resolved offline (no API call) and carry no chat_title.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
 	}, h.handle)
 }
@@ -63,6 +82,9 @@ func (h *MessageLinkResolveHandler) handle(ctx context.Context, _ *mcp.CallToolR
 	out := &ResolveMessageLinkResult{
 		MessageID: FormatRegularRef(parsed.MessageID),
 		TopicID:   parsed.TopicID,
+	}
+	if parsed.TopicID > 0 {
+		out.TopicMessageID = FormatRegularRef(parsed.TopicID)
 	}
 
 	if parsed.Username != "" {
@@ -92,12 +114,25 @@ func (h *MessageLinkResolveHandler) handle(ctx context.Context, _ *mcp.CallToolR
 }
 
 // parsedLink captures the pieces we extract from a t.me URL. Exactly one of
-// Username and ChannelRaw is populated.
+// Username and ChannelRaw is populated; use newPublicParsedLink or
+// newPrivateParsedLink to construct values so the invariant is enforced.
 type parsedLink struct {
 	Username   string
 	ChannelRaw int64
 	TopicID    int
 	MessageID  int
+}
+
+// newPublicParsedLink constructs a parsedLink for a public username-based link.
+// ChannelRaw is always zero (the XOR invariant).
+func newPublicParsedLink(username string, topicID, msgID int) parsedLink {
+	return parsedLink{Username: username, TopicID: topicID, MessageID: msgID}
+}
+
+// newPrivateParsedLink constructs a parsedLink for a private channel link.
+// Username is always empty (the XOR invariant).
+func newPrivateParsedLink(channelRaw int64, topicID, msgID int) parsedLink {
+	return parsedLink{ChannelRaw: channelRaw, TopicID: topicID, MessageID: msgID}
 }
 
 // parseTMeLink parses a Telegram message URL into its components. The parser
@@ -149,15 +184,15 @@ func parseTMeLink(raw string) (parsedLink, error) {
 		if err := validateUsername(domain); err != nil {
 			return parsedLink{}, err
 		}
-		out := parsedLink{Username: domain, MessageID: id}
+		topicID := 0
 		if thread := q.Get("thread"); thread != "" {
 			tid, err := strconv.Atoi(thread)
 			if err != nil || tid <= 0 {
 				return parsedLink{}, fmt.Errorf("invalid thread id %q", thread)
 			}
-			out.TopicID = tid
+			topicID = tid
 		}
-		return out, nil
+		return newPublicParsedLink(domain, topicID, id), nil
 	}
 
 	// Path form: split and trim empty segments from both ends.
@@ -192,14 +227,13 @@ func parseTMeLink(raw string) (parsedLink, error) {
 		if err != nil || channelRaw <= 0 {
 			return parsedLink{}, fmt.Errorf("invalid channel id %q", segments[1])
 		}
-		out := parsedLink{ChannelRaw: channelRaw}
 		switch len(segments) {
 		case 3:
 			id, err := strconv.Atoi(segments[2])
 			if err != nil || id <= 0 {
 				return parsedLink{}, fmt.Errorf("invalid message id %q", segments[2])
 			}
-			out.MessageID = id
+			return newPrivateParsedLink(channelRaw, 0, id), nil
 		case 4:
 			tid, err := strconv.Atoi(segments[2])
 			if err != nil || tid <= 0 {
@@ -209,12 +243,10 @@ func parseTMeLink(raw string) (parsedLink, error) {
 			if err != nil || id <= 0 {
 				return parsedLink{}, fmt.Errorf("invalid message id %q", segments[3])
 			}
-			out.TopicID = tid
-			out.MessageID = id
+			return newPrivateParsedLink(channelRaw, tid, id), nil
 		default:
 			return parsedLink{}, fmt.Errorf("private channel link has too many segments")
 		}
-		return out, nil
 	}
 
 	// Public username form: /<username>/<msg_id> or /<username>/<topic>/<msg_id>.
@@ -224,14 +256,13 @@ func parseTMeLink(raw string) (parsedLink, error) {
 	if err := validateUsername(segments[0]); err != nil {
 		return parsedLink{}, err
 	}
-	out := parsedLink{Username: segments[0]}
 	switch len(segments) {
 	case 2:
 		id, err := strconv.Atoi(segments[1])
 		if err != nil || id <= 0 {
 			return parsedLink{}, fmt.Errorf("invalid message id %q", segments[1])
 		}
-		out.MessageID = id
+		return newPublicParsedLink(segments[0], 0, id), nil
 	case 3:
 		tid, err := strconv.Atoi(segments[1])
 		if err != nil || tid <= 0 {
@@ -241,12 +272,10 @@ func parseTMeLink(raw string) (parsedLink, error) {
 		if err != nil || id <= 0 {
 			return parsedLink{}, fmt.Errorf("invalid message id %q", segments[2])
 		}
-		out.TopicID = tid
-		out.MessageID = id
+		return newPublicParsedLink(segments[0], tid, id), nil
 	default:
 		return parsedLink{}, fmt.Errorf("link has too many path segments")
 	}
-	return out, nil
 }
 
 // validateUsername enforces Telegram's public username rules at parse time:

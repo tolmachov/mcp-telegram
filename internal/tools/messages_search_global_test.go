@@ -2,8 +2,10 @@ package tools
 
 import (
 	"context"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // As with TestSearchMessagesHandleValidation, these tests only touch the
@@ -56,18 +58,11 @@ func TestSearchMessagesGlobalHandleValidation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			result, out, err := h.handle(ctx, nil, tc.input)
-			if err != nil {
-				t.Fatalf("handle returned err: %v", err)
-			}
-			if out != nil {
-				t.Fatalf("expected nil output on validation error, got %+v", out)
-			}
-			if result == nil || !result.IsError {
-				t.Fatalf("expected IsError result, got %+v", result)
-			}
-			if text := toolResultText(result); !strings.Contains(text, tc.errSubstr) {
-				t.Errorf("result text %q does not contain %q", text, tc.errSubstr)
-			}
+			require.NoError(t, err)
+			require.Nil(t, out)
+			require.NotNil(t, result)
+			require.True(t, result.IsError)
+			assert.Contains(t, toolResultText(result), tc.errSubstr)
 		})
 	}
 }

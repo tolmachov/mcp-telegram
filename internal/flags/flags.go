@@ -2,6 +2,7 @@ package flags
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/urfave/cli/v3"
 
@@ -65,11 +66,17 @@ func APIHashFlag() *cli.StringFlag {
 }
 
 func AllowedPathsFlag() *cli.StringSliceFlag {
+	defaultDirs := []string{}
+	if d, err := tools.DefaultBackupDir(); err != nil {
+		slog.Warn("could not determine default backup directory; --allowed-paths will have no default", "err", err)
+	} else {
+		defaultDirs = []string{d}
+	}
 	return &cli.StringSliceFlag{
 		Name:    AllowedPaths,
 		Usage:   "Allowed directories for file operations",
 		Sources: cli.EnvVars("TELEGRAM_ALLOWED_PATHS"),
-		Value:   []string{tools.DefaultBackupDir()},
+		Value:   defaultDirs,
 	}
 }
 

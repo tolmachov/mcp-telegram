@@ -100,7 +100,14 @@ func ParseMessageRef(s string) (MessageRef, error) {
 // Format renders a MessageRef back to its opaque string handle form.
 // Format is the inverse of ParseMessageRef: Format(Parse(x)) == x for
 // every accepted input x.
+//
+// Panics when r.ID <= 0, consistent with FormatRegularRef/FormatScheduledRef.
+// This prevents the zero-value MessageRef{} from silently emitting "0", which
+// ParseMessageRef would later reject — making the contract symmetric.
 func (r MessageRef) Format() string {
+	if r.ID <= 0 {
+		panic(fmt.Sprintf("MessageRef.Format: ID must be positive, got %d", r.ID))
+	}
 	if r.Scheduled {
 		return scheduledPrefix + strconv.Itoa(r.ID)
 	}
@@ -111,14 +118,27 @@ func (r MessageRef) Format() string {
 // formatting a regular (non-scheduled) message ID as a handle. Use this
 // in tool outputs where the message ID is known to come from a regular
 // history fetch or send, to avoid constructing a MessageRef by hand.
+//
+// Panics when id <= 0: callers must verify the ID is positive before
+// calling (e.g. guard with "if msgID > 0"). The panic fires at the call
+// site rather than serialising a "0" handle that ParseMessageRef would
+// later reject, making the invariant violation immediately visible in tests.
 func FormatRegularRef(id int) string {
+	if id <= 0 {
+		panic(fmt.Sprintf("FormatRegularRef: id must be positive, got %d", id))
+	}
 	return MessageRef{ID: id, Scheduled: false}.Format()
 }
 
 // FormatScheduledRef is a convenience constructor for scheduled message
 // handles. Use in outputs from scheduled-specific code paths (e.g. when
-// GetMessages fetches MessagesGetScheduledHistory, or when SendMessage
-// with mode=schedule returns the queued message ID).
+// GetMessages calls provider.FetchScheduled, or when SendMessage with
+// mode=schedule returns the queued message ID).
+//
+// Panics when id <= 0 for the same reason as FormatRegularRef.
 func FormatScheduledRef(id int) string {
+	if id <= 0 {
+		panic(fmt.Sprintf("FormatScheduledRef: id must be positive, got %d", id))
+	}
 	return MessageRef{ID: id, Scheduled: true}.Format()
 }

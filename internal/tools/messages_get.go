@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -40,7 +41,7 @@ type GetMessagesInput struct {
 	Limit            int    `json:"limit,omitempty" jsonschema:"Maximum number of regular messages to return (default 50\\, max 100). Does not affect scheduled_messages which are always returned in full."`
 	OffsetID         string `json:"offset_id,omitempty" jsonschema:"Opaque message handle to paginate from (copy next_offset_id from a previous response). Only regular-message handles are accepted."`
 	FromDate         string `json:"from_date,omitempty" jsonschema:"RFC3339 lower bound (inclusive). Only messages on or after this date are returned. Applied as a post-filter\\, so with from_date the page may contain fewer than limit messages and has_more is forced to false once the window is exhausted."`
-	ToDate           string `json:"to_date,omitempty" jsonschema:"RFC3339 upper bound (inclusive). Only messages on or before this date are returned. Wired to Telegram's native offset_date parameter."`
+	ToDate           string `json:"to_date,omitempty" jsonschema:"RFC3339 exclusive upper bound (strictly-less-than). Only messages strictly before this timestamp are returned. Wired to Telegram's native offset_date parameter. To include a full day\\, pass midnight of the following day\\, e.g. 2026-04-11T00:00:00Z to include all of 2026-04-10."`
 	UnreadOnly       bool   `json:"unread_only,omitempty" jsonschema:"Only return unread messages"`
 	IncludeScheduled bool   `json:"include_scheduled,omitempty" jsonschema:"Also fetch pending scheduled messages into the separate scheduled_messages field. Default false. Scheduled messages are returned as a full dump (no pagination)."`
 }
@@ -64,21 +65,22 @@ type messageDTO struct {
 // ScheduledMessages field keeps regular-message pagination semantics intact
 // while still letting a single tool call surface the full chat picture.
 type getMessagesOutput struct {
-	ChatID            int64        `json:"chat_id"`
-	Messages          []messageDTO `json:"messages"`
-	ScheduledMessages []messageDTO `json:"scheduled_messages,omitempty"`
-	Count             int          `json:"count"`
-	HasMore           bool         `json:"has_more"`
-	NextOffsetID      string       `json:"next_offset_id,omitempty"`
-	TruncatedCount    int          `json:"truncated_count,omitempty"`
-	PaginationHint    string       `json:"pagination_hint,omitempty"`
+	ChatID               int64        `json:"chat_id"`
+	Messages             []messageDTO `json:"messages"`
+	ScheduledMessages    []messageDTO `json:"scheduled_messages,omitempty"`
+	Count                int          `json:"count"`
+	HasMore              bool         `json:"has_more"`
+	NextOffsetID         string       `json:"next_offset_id,omitempty"`
+	TruncatedCount       int          `json:"truncated_count,omitempty"`
+	PaginationHint       string       `json:"pagination_hint,omitempty"`
+	ScheduledFetchError  string       `json:"scheduled_fetch_error,omitempty"` // non-empty when include_scheduled fetch failed
 }
 
 // Register adds the tool to the MCP server.
 func (h *MessagesGetHandler) Register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "GetMessages",
-		Description: "Get messages from a specific chat. Returns up to `limit` regular messages (default 50, max 100). Supports pagination via `offset_id` (copy `next_offset_id` from a previous response) and date filtering via `from_date` / `to_date` (RFC3339, inclusive). Note: `limit` is applied before the `from_date` filter, so with `from_date` set you may receive fewer than `limit` results on the final page. Set `include_scheduled=true` to additionally fetch pending scheduled messages in a separate `scheduled_messages` field — these have opaque handles of the form \"s:<id>\" and are not paginated or affected by date filters. For bulk export, use BackupMessages instead.",
+		Description: "Get messages from a specific chat. Returns up to `limit` regular messages (default 50, max 100). Supports pagination via `offset_id` (copy `next_offset_id` from a previous response) and date filtering via `from_date` / `to_date` (RFC3339; `to_date` is exclusive — pass midnight of the next day to include a full day, e.g. 2026-04-11T00:00:00Z to include all of 2026-04-10). Note: `limit` is applied before the `from_date` filter, so with `from_date` set you may receive fewer than `limit` results on the final page. Set `include_scheduled=true` to additionally fetch pending scheduled messages in a separate `scheduled_messages` field — these have opaque handles of the form \"s:<id>\" and are not paginated or affected by date filters. For bulk export, use BackupMessages instead.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
 	}, h.handle)
 }
@@ -119,7 +121,7 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	if in.ToDate != "" {
 		t, err := time.Parse(time.RFC3339, in.ToDate)
 		if err != nil {
-			return errResult(fmt.Sprintf("invalid to_date %q: %v. Expected RFC3339 format, e.g. \"2026-04-09T23:59:59Z\".", in.ToDate, err)), nil, nil
+			return errResult(fmt.Sprintf("invalid to_date %q: %v. Expected RFC3339 format, e.g. \"2026-04-10T00:00:00Z\" to include all of 2026-04-09.", in.ToDate, err)), nil, nil
 		}
 		opts.MaxDate = t
 	}
@@ -129,6 +131,11 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 
 	result, err := h.provider.Fetch(ctx, in.ChatID, opts)
 	if err != nil {
+		mcpLog(ctx, req.Session, logLevelWarning, "GetMessages", map[string]any{
+			"action":  "provider_fetch_failed",
+			"chat_id": in.ChatID,
+			"error":   err.Error(),
+		})
 		return errResult(fmt.Sprintf("Failed to get messages: %v", err)), nil, nil
 	}
 
@@ -144,9 +151,9 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	truncated := 0
 	for _, m := range result.Messages {
 		dto := toMessageDTO(m, false)
-		if runeLen(dto.Text) > maxMessageTextRunes {
+		if utf8.RuneCountInString(dto.Text) > maxMessageTextRunes {
 			dto.Text = truncateRunes(dto.Text, maxMessageTextRunes) +
-				refetchTruncatedTextHint(runeLen(m.Text), maxMessageTextRunes, m.ID)
+				refetchTruncatedTextHint(utf8.RuneCountInString(m.Text), maxMessageTextRunes, m.ID)
 			truncated++
 		}
 		out.Messages = append(out.Messages, dto)
@@ -168,13 +175,15 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		out.ScheduledMessages = make([]messageDTO, 0)
 		scheduled, err := h.provider.FetchScheduled(ctx, in.ChatID)
 		if err != nil {
-			if req != nil && req.Session != nil {
-				mcpLog(ctx, req.Session, logLevelWarning, "GetMessages", map[string]any{
-					"action":  "include_scheduled_fetch_failed",
-					"chat_id": in.ChatID,
-					"error":   err.Error(),
-				})
-			}
+			// Log and surface the error so the LLM knows the scheduled list may
+			// be incomplete — an empty slice alone is indistinguishable from
+			// "no pending scheduled messages".
+			mcpLog(ctx, req.Session, logLevelWarning, "GetMessages", map[string]any{
+				"action":  "include_scheduled_fetch_failed",
+				"chat_id": in.ChatID,
+				"error":   err.Error(),
+			})
+			out.ScheduledFetchError = fmt.Sprintf("scheduled messages unavailable: %v", err)
 		} else {
 			for _, m := range scheduled.Messages {
 				out.ScheduledMessages = append(out.ScheduledMessages, toMessageDTO(m, true))
@@ -191,8 +200,14 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 // as a regular handle (invariant: scheduled messages cannot be reply
 // targets of anything the user would hold a handle to).
 func toMessageDTO(m messages.Message, scheduled bool) messageDTO {
+	var id string
+	if scheduled {
+		id = FormatScheduledRef(m.ID)
+	} else {
+		id = FormatRegularRef(m.ID)
+	}
 	dto := messageDTO{
-		ID:         MessageRef{ID: m.ID, Scheduled: scheduled}.Format(),
+		ID:         id,
 		Date:       m.Date,
 		SenderID:   m.SenderID,
 		SenderName: m.SenderName,
@@ -204,13 +219,4 @@ func toMessageDTO(m messages.Message, scheduled bool) messageDTO {
 		dto.ReplyToID = FormatRegularRef(m.ReplyToID)
 	}
 	return dto
-}
-
-// runeLen counts runes without allocating a slice.
-func runeLen(s string) int {
-	n := 0
-	for range s {
-		n++
-	}
-	return n
 }

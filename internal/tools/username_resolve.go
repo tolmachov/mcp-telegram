@@ -7,6 +7,8 @@ import (
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // UsernameResolveHandler handles the ResolveUsername tool.
@@ -58,11 +60,11 @@ func (h *UsernameResolveHandler) Register(s *mcp.Server) {
 }
 
 func (h *UsernameResolveHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in ResolveUsernameInput) (*mcp.CallToolResult, *ResolveUsernameResult, error) {
-	if in.Username == "" {
+	if strings.TrimSpace(in.Username) == "" {
 		return errResult("username is required (e.g. '@durov' or 'durov'). For chats without a public @username, use SearchChats by title instead."), nil, nil
 	}
 
-	username := strings.TrimPrefix(in.Username, "@")
+	username := strings.TrimPrefix(strings.TrimSpace(in.Username), "@")
 
 	resolved, err := h.client.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{
 		Username: username,
@@ -112,7 +114,7 @@ func (h *UsernameResolveHandler) handle(ctx context.Context, _ *mcp.CallToolRequ
 			}
 			out.Entities = append(out.Entities, ResolveUsernameEntity{
 				Kind:              kind,
-				ID:                c.ID,
+				ID:                -(tgclient.ChannelIDPrefix + c.ID),
 				Username:          c.Username,
 				Title:             c.Title,
 				ParticipantsCount: c.ParticipantsCount,

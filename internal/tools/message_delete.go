@@ -33,6 +33,8 @@ type DeleteMessageInput struct {
 	MessageID string `json:"message_id" jsonschema:"Opaque message handle from GetMessages or SendMessage. \"42\" for a regular message\\, \"s:42\" for a pending scheduled message."`
 }
 
+const statusDeleted = "deleted"
+
 // DeleteMessageResult is the typed output of DeleteMessage. The Kind field
 // reports whether the deleted message was regular or scheduled, so clients
 // can render the right confirmation text without re-parsing the input.
@@ -95,11 +97,17 @@ func (h *MessageDeleteHandler) deleteScheduled(ctx context.Context, req *mcp.Cal
 		Peer: peer,
 		ID:   []int{ref.ID},
 	}); err != nil {
+		mcpLog(ctx, req.Session, logLevelWarning, "DeleteMessage", map[string]any{
+			"action":  "delete_scheduled_failed",
+			"chat_id": chatID,
+			"msg_id":  ref.ID,
+			"error":   err.Error(),
+		})
 		return errResult(fmt.Sprintf("Failed to delete scheduled message: %v", err)), nil, nil
 	}
 	return nil, &DeleteMessageResult{
-		Status:    "deleted",
-		Kind:      "scheduled",
+		Status:    statusDeleted,
+		Kind:      kindScheduled,
 		ChatID:    chatID,
 		MessageID: ref.Format(),
 	}, nil
@@ -130,11 +138,17 @@ func (h *MessageDeleteHandler) deleteRegular(ctx context.Context, req *mcp.CallT
 			ID: []int{ref.ID},
 		})
 		if err != nil {
+			mcpLog(ctx, req.Session, logLevelWarning, "DeleteMessage", map[string]any{
+				"action":  "delete_channel_message_failed",
+				"chat_id": chatID,
+				"msg_id":  ref.ID,
+				"error":   err.Error(),
+			})
 			return errResult(fmt.Sprintf("Failed to delete message: %v", err)), nil, nil
 		}
 		return nil, &DeleteMessageResult{
-			Status:        "deleted",
-			Kind:          "regular",
+			Status:        statusDeleted,
+			Kind:          kindRegular,
 			ChatID:        chatID,
 			MessageID:     ref.Format(),
 			Pts:           affected.Pts,
@@ -147,11 +161,17 @@ func (h *MessageDeleteHandler) deleteRegular(ctx context.Context, req *mcp.CallT
 			ID:     []int{ref.ID},
 		})
 		if err != nil {
+			mcpLog(ctx, req.Session, logLevelWarning, "DeleteMessage", map[string]any{
+				"action":  "delete_message_failed",
+				"chat_id": chatID,
+				"msg_id":  ref.ID,
+				"error":   err.Error(),
+			})
 			return errResult(fmt.Sprintf("Failed to delete message: %v", err)), nil, nil
 		}
 		return nil, &DeleteMessageResult{
-			Status:        "deleted",
-			Kind:          "regular",
+			Status:        statusDeleted,
+			Kind:          kindRegular,
 			ChatID:        chatID,
 			MessageID:     ref.Format(),
 			Pts:           affected.Pts,

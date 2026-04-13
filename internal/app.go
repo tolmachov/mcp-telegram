@@ -64,16 +64,16 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 						BatchTokens:     cmd.Int(flags.SummarizeBatchTokens),
 					}
 					serverOpts := server.Options{
-						Config:           cfg,
-						Version:          Version,
-						AllowedPaths:     allowedPaths,
-						SummarizeCfg:     summarizeCfg,
-						MediaMaxBytes:    cmd.Int(flags.MediaMaxBytes),
-						TGRateLimitRPS:   cmd.Int(flags.TGRateLimitRPS),
-						PinnedRefresh:    time.Duration(cmd.Int(flags.PinnedRefreshSecs)) * time.Second,
-						Stdin:            cmd.Root().Reader,
-						Stdout:           cmd.Root().Writer,
-						ErrOut:           cmd.Root().ErrWriter,
+						Config:         cfg,
+						Version:        Version,
+						AllowedPaths:   allowedPaths,
+						SummarizeCfg:   summarizeCfg,
+						MediaMaxBytes:  cmd.Int(flags.MediaMaxBytes),
+						TGRateLimitRPS: cmd.Int(flags.TGRateLimitRPS),
+						PinnedRefresh:  time.Duration(cmd.Int(flags.PinnedRefreshSecs)) * time.Second,
+						Stdin:          cmd.Root().Reader,
+						Stdout:         cmd.Root().Writer,
+						ErrOut:         cmd.Root().ErrWriter,
 					}
 					srv, err := server.New(serverOpts)
 					if err != nil {

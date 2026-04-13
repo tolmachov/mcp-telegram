@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSanitizeFilename(t *testing.T) {
@@ -75,9 +78,7 @@ func TestSanitizeFilename(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := sanitizeFilename(tt.input)
-			if result != tt.expected {
-				t.Errorf("sanitizeFilename(%q) = %q, want %q", tt.input, result, tt.expected)
-			}
+			assert.Equal(t, tt.expected, result)
 		})
 	}
 }
@@ -85,9 +86,8 @@ func TestSanitizeFilename(t *testing.T) {
 func TestIsPathAllowed(t *testing.T) {
 	tmpDir := t.TempDir()
 	allowedDir := filepath.Join(tmpDir, "allowed")
-	if err := os.MkdirAll(allowedDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	err := os.MkdirAll(allowedDir, 0o755)
+	require.NoError(t, err)
 
 	tests := []struct {
 		name         string
@@ -148,8 +148,10 @@ func TestIsPathAllowed(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := isPathAllowed(tt.targetPath, tt.allowedPaths)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("isPathAllowed(%q, %v) error = %v, wantErr %v", tt.targetPath, tt.allowedPaths, err, tt.wantErr)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
 			}
 		})
 	}
@@ -168,52 +170,43 @@ func TestIsPathAllowedSymlinkEscapes(t *testing.T) {
 	allowed := filepath.Join(root, "allowed")
 	outside := filepath.Join(root, "outside")
 	for _, d := range []string{allowed, outside} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
+		err := os.MkdirAll(d, 0o755)
+		require.NoError(t, err)
 	}
 
 	// Case a: normal path inside allowlist — should pass.
 	inside := filepath.Join(allowed, "ok.txt")
-	if err := isPathAllowed(inside, []string{allowed}); err != nil {
-		t.Errorf("path inside allowed dir rejected: %v", err)
-	}
+	err := isPathAllowed(inside, []string{allowed})
+	assert.NoError(t, err)
 
 	// Case b: symlink at the leaf pointing outside. resolveSymlinks must
 	// resolve the leaf and notice it lives outside the sandbox.
 	leafLink := filepath.Join(allowed, "escape-leaf")
 	leafTarget := filepath.Join(outside, "leaked.txt")
-	if err := os.WriteFile(leafTarget, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(leafTarget, leafLink); err != nil {
-		t.Fatal(err)
-	}
-	if err := isPathAllowed(leafLink, []string{allowed}); err == nil {
-		t.Error("leaf symlink to outside was accepted — sandbox escape")
-	}
+	err = os.WriteFile(leafTarget, []byte("x"), 0o600)
+	require.NoError(t, err)
+	err = os.Symlink(leafTarget, leafLink)
+	require.NoError(t, err)
+	err = isPathAllowed(leafLink, []string{allowed})
+	assert.Error(t, err, "leaf symlink to outside was accepted — sandbox escape")
 
 	// Case c: symlink mid-path pointing outside. Writing `midLink/child.txt`
 	// where midLink is a dir-symlink to `outside` must fail.
 	midLink := filepath.Join(allowed, "escape-mid")
-	if err := os.Symlink(outside, midLink); err != nil {
-		t.Fatal(err)
-	}
-	if err := isPathAllowed(filepath.Join(midLink, "child.txt"), []string{allowed}); err == nil {
-		t.Error("mid-path symlink to outside was accepted — sandbox escape")
-	}
+	err = os.Symlink(outside, midLink)
+	require.NoError(t, err)
+	err = isPathAllowed(filepath.Join(midLink, "child.txt"), []string{allowed})
+	assert.Error(t, err, "mid-path symlink to outside was accepted — sandbox escape")
 
 	// Case d: target does not exist yet (common: new backup file). The
 	// parent exists and is inside the sandbox, so the check should pass.
 	nonExistent := filepath.Join(allowed, "not-there-yet", "file.txt")
-	if err := isPathAllowed(nonExistent, []string{allowed}); err != nil {
-		t.Errorf("non-existent leaf inside allowed dir rejected: %v", err)
-	}
+	err = isPathAllowed(nonExistent, []string{allowed})
+	assert.NoError(t, err)
 
 	// Case e: target equals the allowlist root (rel == ".").
-	if err := isPathAllowed(allowed, []string{allowed}); err != nil {
-		t.Errorf("allowlist root itself rejected: %v", err)
-	}
+	err = isPathAllowed(allowed, []string{allowed})
+	assert.NoError(t, err)
 }
 
 // TestParseDateTimezones pins the UTC-default semantics introduced with the
@@ -256,22 +249,45 @@ func TestParseDateTimezones(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := parseDate(tt.input)
-			if err != nil {
-				t.Fatalf("parseDate(%q) unexpected error: %v", tt.input, err)
-			}
-			if !got.Equal(tt.wantTime) {
-				t.Errorf("parseDate(%q) = %s, want %s", tt.input, got, tt.wantTime)
-			}
-			if tt.wantZone != nil && got.Location().String() != tt.wantZone.String() {
-				t.Errorf("parseDate(%q) zone = %q, want %q", tt.input, got.Location(), tt.wantZone)
+			require.NoError(t, err)
+			assert.True(t, got.Equal(tt.wantTime))
+			if tt.wantZone != nil {
+				assert.Equal(t, tt.wantZone.String(), got.Location().String())
 			}
 		})
 	}
 
-	if _, err := parseDate(""); err != nil {
-		t.Errorf("parseDate(empty) should return zero time with nil error, got %v", err)
+	_, err := parseDate("")
+	assert.NoError(t, err)
+
+	_, err = parseDate("not a date")
+	assert.Error(t, err)
+}
+
+func TestDefaultBackupDir(t *testing.T) {
+	// Happy path: returns a non-empty absolute path rooted in the home directory.
+	dir, err := DefaultBackupDir()
+	if err != nil {
+		// os.UserHomeDir can fail in restricted environments (containers with no
+		// HOME and no passwd entry). Skip rather than fail so CI stays green.
+		t.Skipf("DefaultBackupDir error (no HOME?): %v", err)
 	}
-	if _, err := parseDate("not a date"); err == nil {
-		t.Error("parseDate should reject garbage input")
+	assert.NotEmpty(t, dir)
+	assert.True(t, filepath.IsAbs(dir), "expected absolute path")
+	assert.Contains(t, dir, "mcp-telegram")
+
+	// Platform-specific suffix check.
+	switch runtime.GOOS {
+	case "darwin":
+		assert.Contains(t, dir, filepath.Join("Library", "Application Support"))
+	case "windows":
+		// Either APPDATA or HomeDir\AppData\Roaming should appear.
+	default:
+		// Linux: either XDG_DATA_HOME or ~/.local/share
+		if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+			assert.True(t, strings.HasPrefix(dir, xdg), "expected path under %q, got %q", xdg, dir)
+		} else {
+			assert.Contains(t, dir, filepath.Join(".local", "share"))
+		}
 	}
 }

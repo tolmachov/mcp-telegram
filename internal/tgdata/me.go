@@ -28,6 +28,9 @@ func GetCurrentUser(ctx context.Context, client *tg.Client) (*UserInfo, error) {
 			break
 		}
 	}
+	if info.ID == 0 {
+		return nil, fmt.Errorf("current user response did not include a self user record")
+	}
 
 	info.Bio = user.FullUser.About
 

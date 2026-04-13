@@ -99,8 +99,8 @@ func handleFindAndReply(_ context.Context, request *mcp.GetPromptRequest) (*mcp.
 	b.WriteString(reply)
 	b.WriteString("\n\nSteps:\n")
 	b.WriteString("1. Resolve the chat ID via ResolveUsername (if @username) or SearchChats (if title).\n")
-	b.WriteString("2. Use GetMessages to fetch recent messages (start with limit=50). If you don't find a match, paginate with offset_id.\n")
-	b.WriteString("3. Pick the message that best matches the query. If ambiguous, show me the top 3 candidates with their IDs and ask which one.\n")
+	b.WriteString("2. Use SearchMessages to find matching messages in that chat. If you need more results, paginate with offset_id; if you need surrounding conversation, use GetMessageContext on the best candidate.\n")
+	b.WriteString("3. Pick the message that best matches the query. If ambiguous, show me the top 3 candidates with their opaque message handles and ask which one.\n")
 	b.WriteString("4. Once confirmed, use SendMessage with mode=\"draft\" and reply_to_message_id set to the message's opaque handle, and show me the draft.\n")
 	b.WriteString("5. ONLY after I explicitly approve, call SendMessage with mode=\"send\" (the default) and the same reply_to_message_id. Never send without confirmation.")
 	return promptUser(b.String()), nil

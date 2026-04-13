@@ -44,8 +44,11 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 			room = 0
 		}
 		if room > 0 {
-			n, _ := l.w.Write(p[:room])
+			n, err := l.w.Write(p[:room])
 			l.wrote += int64(n)
+			if err != nil {
+				return n, err
+			}
 		}
 		return int(room), errMediaTooLarge
 	}
@@ -59,7 +62,7 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 // progress to MCP clients when the total size is unknown up front.
 type progressWriter struct {
 	w           io.Writer
-	written     int64
+	written     atomic.Int64 // total bytes written; atomic for consistency with lastReport
 	lastReport  atomic.Int64 // unix nanos of last report
 	minInterval time.Duration
 	report      func(written int64)
@@ -71,12 +74,12 @@ func newProgressWriter(w io.Writer, minInterval time.Duration, report func(writt
 
 func (pw *progressWriter) Write(p []byte) (int, error) {
 	n, err := pw.w.Write(p)
-	pw.written += int64(n)
+	written := pw.written.Add(int64(n))
 	now := time.Now().UnixNano()
 	last := pw.lastReport.Load()
 	if last == 0 || time.Duration(now-last) >= pw.minInterval {
 		if pw.lastReport.CompareAndSwap(last, now) && pw.report != nil {
-			pw.report(pw.written)
+			pw.report(written)
 		}
 	}
 	return n, err
@@ -103,7 +106,7 @@ type GetMediaInput struct {
 func (h *MediaGetHandler) Register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "GetMedia",
-		Description: "Download a photo from Telegram using a media resource URI (telegram://media/...) returned by GetMessages. Returns the image as base64-encoded data.",
+		Description: "Download a photo from Telegram using a media resource URI (telegram://media/...) returned by GetMessages. Returns MCP image content plus a short text status message.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
 	}, h.handle)
 }

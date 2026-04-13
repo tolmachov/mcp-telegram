@@ -24,8 +24,8 @@ func NewMeGetHandler(client *tg.Client) *MeGetHandler {
 type GetMeInput struct{}
 
 // Register adds the tool to the MCP server using the typed mcp.AddTool helper.
-// The output is the existing tgdata.UserInfo struct so the StructuredContent
-// payload matches the JSON shape clients already see today.
+// The SDK serialises the tgdata.UserInfo return value as both text and
+// structured output automatically.
 func (h *MeGetHandler) Register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "GetMe",

@@ -1,6 +1,13 @@
 package messages
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/gotd/td/tg"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 func TestExtractSubstring(t *testing.T) {
 	tests := []struct {
@@ -162,10 +169,68 @@ func TestExtractSubstring(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := extractSubstring(tt.input, tt.offset, tt.length)
-			if got != tt.want {
-				t.Errorf("extractSubstring(%q, %d, %d) = %q, want %q",
-					tt.input, tt.offset, tt.length, got, tt.want)
-			}
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestProcessHistoryNotModified verifies that MessagesMessagesNotModified is
+// treated as an empty (exhausted) page rather than an error. Callers rely on
+// this to terminate FetchAll pagination without failing.
+func TestProcessHistoryNotModified(t *testing.T) {
+	p := NewProvider(nil)
+	result, err := p.processHistory(&tg.MessagesMessagesNotModified{}, &tg.InputPeerEmpty{})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Empty(t, result.Messages)
+	assert.False(t, result.HasMore)
+}
+
+// TestExtractMessagesDropsZeroID verifies that messages with ID <= 0 are
+// silently dropped. Telegram guarantees positive IDs, but a zero-ID message
+// would cause FormatRegularRef to panic at the tool boundary.
+func TestExtractMessagesDropsZeroID(t *testing.T) {
+	p := NewProvider(nil)
+	msgs := []tg.MessageClass{
+		&tg.Message{ID: 0, Message: "zero"},
+		&tg.Message{ID: 1, Message: "valid"},
+		&tg.Message{ID: -1, Message: "negative"},
+	}
+	got := p.extractMessages(msgs, nil, nil, &tg.InputPeerEmpty{})
+	require.Len(t, got, 1)
+	assert.Equal(t, 1, got[0].ID)
+}
+
+func TestHistoryOffsetDate(t *testing.T) {
+	maxDate := time.Date(2026, 4, 10, 15, 0, 0, 0, time.UTC)
+	offsetDate := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name string
+		opts FetchOptions
+		want time.Time
+	}{
+		{
+			name: "zero values",
+			opts: FetchOptions{},
+			want: time.Time{},
+		},
+		{
+			name: "max date preserved exactly",
+			opts: FetchOptions{MaxDate: maxDate},
+			want: maxDate,
+		},
+		{
+			name: "offset date takes precedence",
+			opts: FetchOptions{MaxDate: maxDate, OffsetDate: offsetDate},
+			want: offsetDate,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := historyOffsetDate(tt.opts)
+			assert.True(t, got.Equal(tt.want))
 		})
 	}
 }

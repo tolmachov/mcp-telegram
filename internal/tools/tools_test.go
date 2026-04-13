@@ -1,7 +1,12 @@
 package tools
 
 import (
+	"context"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Note: progress-token extraction is now SDK-provided
@@ -10,11 +15,107 @@ import (
 // our sendProgress wrapper is implicit via the per-tool handler tests once
 // in-memory transport-based integration tests are added.
 
+// TestMcpLogSlogFallback verifies that mcpLog handles nil sessions by
+// falling back to slog for error and warning levels, and stays silent for
+// lower levels. This test verifies the function doesn't panic and behaves correctly.
+func TestMcpLogSlogFallback(t *testing.T) {
+	ctx := context.Background()
+
+	// Test that nil session + error doesn't panic and logs via slog
+	mcpLog(ctx, nil, logLevelError, "test-logger", map[string]any{"k": "v"})
+
+	// Test that nil session + warning doesn't panic and logs via slog
+	mcpLog(ctx, nil, logLevelWarning, "test-warn", map[string]any{"k": "v"})
+
+	// Test that nil session + info doesn't panic (lower level, no output expected)
+	mcpLog(ctx, nil, logLevelInfo, "test-info", map[string]any{"k": "v"})
+
+	// Test that nil session + debug doesn't panic (lower level, no output expected)
+	mcpLog(ctx, nil, logLevelDebug, "test-debug", map[string]any{"k": "v"})
+}
+
+// TestRootsFromClientNilSession verifies that rootsFromClient handles nil
+// sessions gracefully without panicking.
+func TestRootsFromClientNilSession(t *testing.T) {
+	paths := rootsFromClient(context.Background(), nil)
+	assert.Nil(t, paths)
+}
+
+func TestFileURIToPath(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "posix path",
+			raw:  "file:///tmp/project",
+			want: "/tmp/project",
+		},
+		{
+			name: "percent decoded",
+			raw:  "file:///tmp/My%20Project",
+			want: "/tmp/My Project",
+		},
+		{
+			name:    "non-file scheme rejected",
+			raw:     "https://example.com",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := fileURIToPath(tt.raw)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestClampWindow(t *testing.T) {
+	tests := []struct {
+		name string
+		n    int
+		want int
+	}{
+		{"negative returns zero", -1, 0},
+		{"large negative returns zero", -100, 0},
+		{"zero returns default", 0, defaultContextWindow},
+		{"above max clamps to max", maxContextWindow + 1, maxContextWindow},
+		{"equal to max passes through", maxContextWindow, maxContextWindow},
+		{"within range passes through", 10, 10},
+		{"one passes through", 1, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, clampWindow(tt.n))
+		})
+	}
+}
+
+// TestRefetchTruncatedTextHintOffset verifies that the offset_id embedded in
+// the hint is msgID+1 (not msgID), because messages.getHistory returns messages
+// with id < offset_id and we need to land exactly on the target message.
+func TestRefetchTruncatedTextHintOffset(t *testing.T) {
+	const msgID = 42
+	hint := refetchTruncatedTextHint(3000, maxMessageTextRunes, msgID)
+	wantHandle := FormatRegularRef(msgID + 1)
+	assert.Contains(t, hint, wantHandle)
+	// Also confirm the original rune count appears in the hint.
+	assert.Contains(t, hint, "3000")
+}
+
 func TestClampLimit(t *testing.T) {
 	tests := []struct {
-		name              string
-		limit, def, max   int
-		want              int
+		name            string
+		limit, def, max int
+		want            int
 	}{
 		{"zero uses default", 0, 50, 100, 50},
 		{"negative uses default", -5, 50, 100, 50},
@@ -25,9 +126,7 @@ func TestClampLimit(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := clampLimit(tt.limit, tt.def, tt.max); got != tt.want {
-				t.Errorf("clampLimit(%d, %d, %d) = %d, want %d", tt.limit, tt.def, tt.max, got, tt.want)
-			}
+			assert.Equal(t, tt.want, clampLimit(tt.limit, tt.def, tt.max))
 		})
 	}
 }
@@ -116,9 +215,24 @@ func TestTruncateRunes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := truncateRunes(tt.input, tt.n)
-			if result != tt.expected {
-				t.Errorf("truncateRunes(%q, %d) = %q, want %q", tt.input, tt.n, result, tt.expected)
-			}
+			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+// TestConfirmDestructiveNilSession verifies that a nil session returns an error
+// (fail-closed) rather than silently declining with a misleading return value.
+func TestConfirmDestructiveNilSession(t *testing.T) {
+	confirmed, err := confirmDestructive(context.Background(), nil, "delete this?")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no MCP session")
+	assert.False(t, confirmed)
+}
+
+// TestConfirmDestructiveNilRequest verifies that a nil request also fails closed.
+func TestConfirmDestructiveNilRequest(t *testing.T) {
+	confirmed, err := confirmDestructive(context.Background(), &mcp.CallToolRequest{}, "delete this?")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no MCP session")
+	assert.False(t, confirmed)
 }

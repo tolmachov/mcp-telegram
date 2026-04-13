@@ -1,8 +1,11 @@
 package tools
 
 import (
-	"strings"
+	"fmt"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseMessageRef_Valid(t *testing.T) {
@@ -20,16 +23,9 @@ func TestParseMessageRef_Valid(t *testing.T) {
 	}
 	for _, tc := range cases {
 		got, err := ParseMessageRef(tc.in)
-		if err != nil {
-			t.Errorf("ParseMessageRef(%q) unexpected error: %v", tc.in, err)
-			continue
-		}
-		if got.ID != tc.wantID {
-			t.Errorf("ParseMessageRef(%q).ID = %d, want %d", tc.in, got.ID, tc.wantID)
-		}
-		if got.Scheduled != tc.wantSched {
-			t.Errorf("ParseMessageRef(%q).Scheduled = %v, want %v", tc.in, got.Scheduled, tc.wantSched)
-		}
+		require.NoError(t, err)
+		assert.Equal(t, tc.wantID, got.ID)
+		assert.Equal(t, tc.wantSched, got.Scheduled)
 	}
 }
 
@@ -57,13 +53,8 @@ func TestParseMessageRef_Invalid(t *testing.T) {
 	}
 	for _, tc := range cases {
 		_, err := ParseMessageRef(tc.in)
-		if err == nil {
-			t.Errorf("ParseMessageRef(%q) expected error, got nil", tc.in)
-			continue
-		}
-		if !strings.Contains(err.Error(), tc.wantErrPart) {
-			t.Errorf("ParseMessageRef(%q) error = %q, want substring %q", tc.in, err.Error(), tc.wantErrPart)
-		}
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), tc.wantErrPart)
 	}
 }
 
@@ -78,9 +69,7 @@ func TestMessageRef_Format(t *testing.T) {
 		{MessageRef{ID: 42, Scheduled: true}, "s:42"},
 	}
 	for _, tc := range cases {
-		if got := tc.ref.Format(); got != tc.want {
-			t.Errorf("MessageRef{%d, %v}.Format() = %q, want %q", tc.ref.ID, tc.ref.Scheduled, got, tc.want)
-		}
+		assert.Equal(t, tc.want, tc.ref.Format())
 	}
 }
 
@@ -89,13 +78,8 @@ func TestMessageRef_RoundTrip(t *testing.T) {
 	inputs := []string{"1", "42", "999", "1000000", "s:1", "s:42", "s:1000000"}
 	for _, in := range inputs {
 		ref, err := ParseMessageRef(in)
-		if err != nil {
-			t.Errorf("ParseMessageRef(%q) unexpected error: %v", in, err)
-			continue
-		}
-		if out := ref.Format(); out != in {
-			t.Errorf("round-trip %q: Format after Parse = %q, want %q", in, out, in)
-		}
+		require.NoError(t, err)
+		assert.Equal(t, in, ref.Format())
 	}
 }
 
@@ -114,6 +98,32 @@ func TestFormatScheduledRef(t *testing.T) {
 	}
 	if got := FormatScheduledRef(1); got != "s:1" {
 		t.Errorf("FormatScheduledRef(1) = %q, want %q", got, "s:1")
+	}
+}
+
+func TestFormatRegularRefPanicsOnNonPositive(t *testing.T) {
+	for _, id := range []int{0, -1, -100} {
+		t.Run(fmt.Sprintf("id=%d", id), func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("FormatRegularRef(%d) expected panic, got none", id)
+				}
+			}()
+			FormatRegularRef(id)
+		})
+	}
+}
+
+func TestFormatScheduledRefPanicsOnNonPositive(t *testing.T) {
+	for _, id := range []int{0, -1, -100} {
+		t.Run(fmt.Sprintf("id=%d", id), func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("FormatScheduledRef(%d) expected panic, got none", id)
+				}
+			}()
+			FormatScheduledRef(id)
+		})
 	}
 }
 

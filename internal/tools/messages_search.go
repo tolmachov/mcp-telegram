@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -36,8 +37,8 @@ type SearchMessagesInput struct {
 	Query        string `json:"query" jsonschema:"Substring to search for. Telegram's server-side search does token/prefix matching\\, not arbitrary regex."`
 	Limit        int    `json:"limit,omitempty" jsonschema:"Maximum number of results to return (default 50\\, max 100)."`
 	OffsetID     string `json:"offset_id,omitempty" jsonschema:"Opaque message handle to paginate from (copy next_offset_id from a previous response). Only regular-message handles are accepted."`
-	FromDate     string `json:"from_date,omitempty" jsonschema:"RFC3339 lower bound (inclusive). Wired to Telegram's native min_date."`
-	ToDate       string `json:"to_date,omitempty" jsonschema:"RFC3339 upper bound (inclusive). Wired to Telegram's native max_date."`
+	FromDate     string `json:"from_date,omitempty" jsonschema:"RFC3339 lower bound (inclusive). Wired to Telegram's native min_date (inclusive)."`
+	ToDate       string `json:"to_date,omitempty" jsonschema:"RFC3339 exclusive upper bound. Wired to Telegram's native max_date (strictly less-than). To include a full day\\, pass midnight of the following day\\, e.g. 2026-04-11T00:00:00Z to include all of 2026-04-10."`
 	FromSenderID int64  `json:"from_sender_id,omitempty" jsonschema:"Numeric peer ID of a sender to filter by (e.g. from ResolveUsername or GetChatInfo). Only returns messages authored by this user/channel."`
 	MediaType    string `json:"media_type,omitempty" jsonschema:"Optional message-type filter. One of: photos\\, videos\\, documents\\, links\\, voice\\, music\\, gif\\, round_video\\, round_voice. Leave empty for plain text search."`
 	TopMsgID     string `json:"top_msg_id,omitempty" jsonschema:"Opaque regular-message handle of a forum topic or reply thread root. When set\\, results are restricted to that thread."`
@@ -80,7 +81,7 @@ func (h *MessagesSearchHandler) Register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "SearchMessages",
 		Description: "Search messages by substring within a specific chat via Telegram's server-side messages.search. Returns up to `limit` messages (default 50, max 100) sorted newest-first. " +
-			"Supports pagination via `offset_id` (copy `next_offset_id` from a previous response), date range via `from_date` / `to_date` (RFC3339, inclusive), sender filtering via `from_sender_id`, and media-type filtering via `media_type`. " +
+			"Supports pagination via `offset_id` (copy `next_offset_id` from a previous response), date range via `from_date` / `to_date` (RFC3339; `to_date` is exclusive — pass midnight of the next day to include a full day), sender filtering via `from_sender_id`, and media-type filtering via `media_type`. " +
 			"For cross-chat search use SearchMessagesGlobal. For chat discovery by title use SearchChats.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
 	}, h.handle)
@@ -132,7 +133,7 @@ func (h *MessagesSearchHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	if in.ToDate != "" {
 		t, err := time.Parse(time.RFC3339, in.ToDate)
 		if err != nil {
-			return errResult(fmt.Sprintf("invalid to_date %q: %v. Expected RFC3339 format, e.g. \"2026-04-09T23:59:59Z\".", in.ToDate, err)), nil, nil
+			return errResult(fmt.Sprintf("invalid to_date %q: %v. Expected RFC3339 format, e.g. \"2026-04-10T00:00:00Z\" to include all of 2026-04-09.", in.ToDate, err)), nil, nil
 		}
 		opts.MaxDate = t
 	}
@@ -152,6 +153,11 @@ func (h *MessagesSearchHandler) handle(ctx context.Context, req *mcp.CallToolReq
 
 	result, err := h.provider.Search(ctx, in.ChatID, opts)
 	if err != nil {
+		mcpLog(ctx, req.Session, logLevelWarning, "SearchMessages", map[string]any{
+			"action":  "provider_search_failed",
+			"chat_id": in.ChatID,
+			"error":   err.Error(),
+		})
 		return errResult(fmt.Sprintf("Failed to search messages: %v", err)), nil, nil
 	}
 
@@ -166,9 +172,9 @@ func (h *MessagesSearchHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	truncated := 0
 	for _, m := range result.Messages {
 		dto := toMessageDTO(m, false)
-		if runeLen(dto.Text) > maxMessageTextRunes {
+		if utf8.RuneCountInString(dto.Text) > maxMessageTextRunes {
 			dto.Text = truncateRunes(dto.Text, maxMessageTextRunes) +
-				refetchTruncatedTextHint(runeLen(m.Text), maxMessageTextRunes, m.ID)
+				refetchTruncatedTextHint(utf8.RuneCountInString(m.Text), maxMessageTextRunes, m.ID)
 			truncated++
 		}
 		out.Messages = append(out.Messages, dto)
