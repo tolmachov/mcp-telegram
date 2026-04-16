@@ -6,7 +6,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -48,23 +47,23 @@ type SearchMessagesInput struct {
 // corresponding tg.MessagesFilterClass constructor. Keys MUST stay in
 // sync with the jsonschema description on SearchMessagesInput.MediaType.
 var mediaFilterMap = map[string]func() tg.MessagesFilterClass{
-	"photos":       func() tg.MessagesFilterClass { return &tg.InputMessagesFilterPhotos{} },
-	"videos":       func() tg.MessagesFilterClass { return &tg.InputMessagesFilterVideo{} },
-	"documents":    func() tg.MessagesFilterClass { return &tg.InputMessagesFilterDocument{} },
-	"links":        func() tg.MessagesFilterClass { return &tg.InputMessagesFilterURL{} },
-	"voice":        func() tg.MessagesFilterClass { return &tg.InputMessagesFilterVoice{} },
-	"music":        func() tg.MessagesFilterClass { return &tg.InputMessagesFilterMusic{} },
-	"gif":          func() tg.MessagesFilterClass { return &tg.InputMessagesFilterGif{} },
-	"round_video":  func() tg.MessagesFilterClass { return &tg.InputMessagesFilterRoundVideo{} },
-	"round_voice":  func() tg.MessagesFilterClass { return &tg.InputMessagesFilterRoundVoice{} },
+	"photos":      func() tg.MessagesFilterClass { return &tg.InputMessagesFilterPhotos{} },
+	"videos":      func() tg.MessagesFilterClass { return &tg.InputMessagesFilterVideo{} },
+	"documents":   func() tg.MessagesFilterClass { return &tg.InputMessagesFilterDocument{} },
+	"links":       func() tg.MessagesFilterClass { return &tg.InputMessagesFilterURL{} },
+	"voice":       func() tg.MessagesFilterClass { return &tg.InputMessagesFilterVoice{} },
+	"music":       func() tg.MessagesFilterClass { return &tg.InputMessagesFilterMusic{} },
+	"gif":         func() tg.MessagesFilterClass { return &tg.InputMessagesFilterGif{} },
+	"round_video": func() tg.MessagesFilterClass { return &tg.InputMessagesFilterRoundVideo{} },
+	"round_voice": func() tg.MessagesFilterClass { return &tg.InputMessagesFilterRoundVoice{} },
 }
 
 // searchMessagesOutput mirrors getMessagesOutput but is declared separately
 // so schema generation doesn't alias the two tools. The per-message DTO
 // shape is identical (both use messageDTO) so downstream tools
 // (EditMessage, DeleteMessage, GetMessageContext) can consume either.
-// The envelope differs: this one adds Query, NextOffsetID, PaginationHint,
-// and TruncatedCount for search-specific pagination.
+// The envelope differs: this one adds Query, NextOffsetID, and PaginationHint
+// for search-specific pagination.
 type searchMessagesOutput struct {
 	ChatID         int64        `json:"chat_id"`
 	Query          string       `json:"query"`
@@ -72,7 +71,6 @@ type searchMessagesOutput struct {
 	Count          int          `json:"count"`
 	HasMore        bool         `json:"has_more"`
 	NextOffsetID   string       `json:"next_offset_id,omitempty"`
-	TruncatedCount int          `json:"truncated_count,omitempty"`
 	PaginationHint string       `json:"pagination_hint,omitempty"`
 }
 
@@ -169,17 +167,9 @@ func (h *MessagesSearchHandler) handle(ctx context.Context, req *mcp.CallToolReq
 		HasMore:  result.HasMore,
 	}
 
-	truncated := 0
 	for _, m := range result.Messages {
-		dto := toMessageDTO(m, false)
-		if utf8.RuneCountInString(dto.Text) > maxMessageTextRunes {
-			dto.Text = truncateRunes(dto.Text, maxMessageTextRunes) +
-				refetchTruncatedTextHint(utf8.RuneCountInString(m.Text), maxMessageTextRunes, m.ID)
-			truncated++
-		}
-		out.Messages = append(out.Messages, dto)
+		out.Messages = append(out.Messages, toMessageDTO(m, false))
 	}
-	out.TruncatedCount = truncated
 
 	if result.HasMore && result.NextID > 0 {
 		out.NextOffsetID = FormatRegularRef(result.NextID)

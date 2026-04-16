@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -84,12 +83,7 @@ func (h *MessageContextGetHandler) handle(ctx context.Context, req *mcp.CallTool
 		Messages: make([]messageDTO, 0, len(result.Messages)),
 	}
 	for _, m := range result.Messages {
-		dto := toMessageDTO(m, false)
-		if utf8.RuneCountInString(dto.Text) > maxMessageTextRunes {
-			dto.Text = truncateRunes(dto.Text, maxMessageTextRunes) +
-				refetchTruncatedTextHint(utf8.RuneCountInString(m.Text), maxMessageTextRunes, m.ID)
-		}
-		out.Messages = append(out.Messages, dto)
+		out.Messages = append(out.Messages, toMessageDTO(m, false))
 	}
 	out.Count = len(out.Messages)
 	return nil, out, nil

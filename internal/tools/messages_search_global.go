@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -49,12 +48,11 @@ type globalMessageDTO struct {
 
 // searchMessagesGlobalOutput is the response shape for SearchMessagesGlobal.
 type searchMessagesGlobalOutput struct {
-	Query          string             `json:"query"`
-	Messages       []globalMessageDTO `json:"messages"`
-	Count          int                `json:"count"`
-	HasMore        bool               `json:"has_more"`
-	NextCursor     string             `json:"next_cursor,omitempty"`
-	TruncatedCount int                `json:"truncated_count,omitempty"`
+	Query      string             `json:"query"`
+	Messages   []globalMessageDTO `json:"messages"`
+	Count      int                `json:"count"`
+	HasMore    bool               `json:"has_more"`
+	NextCursor string             `json:"next_cursor,omitempty"`
 	// SkippedCount is non-zero when the raw page contained items that
 	// couldn't be rendered as regular messages (service messages, empty
 	// slots, or unknown peer classes). Surfaced so a page of, say, 50
@@ -132,21 +130,13 @@ func (h *MessagesSearchGlobalHandler) handle(ctx context.Context, req *mcp.CallT
 		SkippedCount: result.SkippedCount,
 	}
 
-	truncated := 0
 	for _, gm := range result.Messages {
-		dto := toMessageDTO(gm.Message, false)
-		if utf8.RuneCountInString(dto.Text) > maxMessageTextRunes {
-			dto.Text = truncateRunes(dto.Text, maxMessageTextRunes) +
-				refetchTruncatedTextHintCrossChat(utf8.RuneCountInString(gm.Message.Text), maxMessageTextRunes, gm.ChatID, gm.ID)
-			truncated++
-		}
 		out.Messages = append(out.Messages, globalMessageDTO{
-			messageDTO: dto,
+			messageDTO: toMessageDTO(gm.Message, false),
 			ChatID:     gm.ChatID,
 			ChatTitle:  gm.ChatTitle,
 		})
 	}
-	out.TruncatedCount = truncated
 
 	if result.HasMore && result.NextCursor != nil {
 		out.NextCursor = FormatGlobalSearchCursor(*result.NextCursor)

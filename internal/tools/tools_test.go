@@ -99,18 +99,6 @@ func TestClampWindow(t *testing.T) {
 	}
 }
 
-// TestRefetchTruncatedTextHintOffset verifies that the offset_id embedded in
-// the hint is msgID+1 (not msgID), because messages.getHistory returns messages
-// with id < offset_id and we need to land exactly on the target message.
-func TestRefetchTruncatedTextHintOffset(t *testing.T) {
-	const msgID = 42
-	hint := refetchTruncatedTextHint(3000, maxMessageTextRunes, msgID)
-	wantHandle := FormatRegularRef(msgID + 1)
-	assert.Contains(t, hint, wantHandle)
-	// Also confirm the original rune count appears in the hint.
-	assert.Contains(t, hint, "3000")
-}
-
 func TestClampLimit(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -127,95 +115,6 @@ func TestClampLimit(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, clampLimit(tt.limit, tt.def, tt.max))
-		})
-	}
-}
-
-func TestTruncateRunes(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		n        int
-		expected string
-	}{
-		{
-			name:     "empty string",
-			input:    "",
-			n:        10,
-			expected: "",
-		},
-		{
-			name:     "shorter than limit",
-			input:    "hello",
-			n:        10,
-			expected: "hello",
-		},
-		{
-			name:     "exact length",
-			input:    "hello",
-			n:        5,
-			expected: "hello",
-		},
-		{
-			name:     "longer than limit",
-			input:    "hello world",
-			n:        5,
-			expected: "hello...",
-		},
-		{
-			name:     "cyrillic shorter",
-			input:    "привет",
-			n:        10,
-			expected: "привет",
-		},
-		{
-			name:     "cyrillic exact",
-			input:    "привет",
-			n:        6,
-			expected: "привет",
-		},
-		{
-			name:     "cyrillic truncate",
-			input:    "привет мир",
-			n:        6,
-			expected: "привет...",
-		},
-		{
-			name:     "emoji truncate",
-			input:    "hello 🌍🌎🌏 world",
-			n:        8,
-			expected: "hello 🌍🌎...",
-		},
-		{
-			name:     "mixed unicode",
-			input:    "hello привет 世界",
-			n:        10,
-			expected: "hello прив...",
-		},
-		{
-			name:     "zero limit",
-			input:    "hello",
-			n:        0,
-			expected: "...",
-		},
-		{
-			name:     "limit one",
-			input:    "hello",
-			n:        1,
-			expected: "h...",
-		},
-		{
-			name:     "chinese characters",
-			input:    "你好世界",
-			n:        2,
-			expected: "你好...",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := truncateRunes(tt.input, tt.n)
-			assert.Equal(t, tt.expected, result)
 		})
 	}
 }

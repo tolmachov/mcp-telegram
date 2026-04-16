@@ -4,21 +4,11 @@ import (
 	"context"
 	"fmt"
 	"time"
-	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
 )
-
-// maxMessageTextRunes is the per-message text cap in GetMessages responses.
-// Messages longer than this are truncated with an explicit marker so the model
-// can decide whether to refetch the full text via GetMessages with limit=1 +
-// offset_id pointing at the truncated message.
-//
-// Per MCP tool-design guidance: "Truncate huge payloads and say so" — never
-// return megabytes of unfiltered API response in a tool result.
-const maxMessageTextRunes = 2000
 
 // MessagesGetHandler handles the GetMessages tool.
 type MessagesGetHandler struct {
@@ -65,15 +55,14 @@ type messageDTO struct {
 // ScheduledMessages field keeps regular-message pagination semantics intact
 // while still letting a single tool call surface the full chat picture.
 type getMessagesOutput struct {
-	ChatID               int64        `json:"chat_id"`
-	Messages             []messageDTO `json:"messages"`
-	ScheduledMessages    []messageDTO `json:"scheduled_messages,omitempty"`
-	Count                int          `json:"count"`
-	HasMore              bool         `json:"has_more"`
-	NextOffsetID         string       `json:"next_offset_id,omitempty"`
-	TruncatedCount       int          `json:"truncated_count,omitempty"`
-	PaginationHint       string       `json:"pagination_hint,omitempty"`
-	ScheduledFetchError  string       `json:"scheduled_fetch_error,omitempty"` // non-empty when include_scheduled fetch failed
+	ChatID              int64        `json:"chat_id"`
+	Messages            []messageDTO `json:"messages"`
+	ScheduledMessages   []messageDTO `json:"scheduled_messages,omitempty"`
+	Count               int          `json:"count"`
+	HasMore             bool         `json:"has_more"`
+	NextOffsetID        string       `json:"next_offset_id,omitempty"`
+	PaginationHint      string       `json:"pagination_hint,omitempty"`
+	ScheduledFetchError string       `json:"scheduled_fetch_error,omitempty"` // non-empty when include_scheduled fetch failed
 }
 
 // Register adds the tool to the MCP server.
@@ -146,19 +135,9 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		HasMore:  result.HasMore,
 	}
 
-	// Convert messages, truncating over-long texts inline. The truncation
-	// marker tells the model exactly how to recover the full text if needed.
-	truncated := 0
 	for _, m := range result.Messages {
-		dto := toMessageDTO(m, false)
-		if utf8.RuneCountInString(dto.Text) > maxMessageTextRunes {
-			dto.Text = truncateRunes(dto.Text, maxMessageTextRunes) +
-				refetchTruncatedTextHint(utf8.RuneCountInString(m.Text), maxMessageTextRunes, m.ID)
-			truncated++
-		}
-		out.Messages = append(out.Messages, dto)
+		out.Messages = append(out.Messages, toMessageDTO(m, false))
 	}
-	out.TruncatedCount = truncated
 
 	if result.HasMore && result.NextID > 0 {
 		out.NextOffsetID = FormatRegularRef(result.NextID)
