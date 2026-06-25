@@ -15,9 +15,9 @@ func newUpdatesWith(update tg.UpdateClass) *tg.Updates {
 
 func TestExtractSentMessageID(t *testing.T) {
 	tests := []struct {
-		name    string
-		updates tg.UpdatesClass
-		wantID  int
+		name     string
+		updates  tg.UpdatesClass
+		wantID   int
 		wantDate int
 	}{
 		{

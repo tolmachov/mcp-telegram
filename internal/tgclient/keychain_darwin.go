@@ -5,89 +5,46 @@ package tgclient
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/gotd/td/session"
-	"github.com/keybase/go-keychain"
+
+	"github.com/tolmachov/mcp-telegram/internal/secret"
 )
 
-const (
-	keychainService = "mcp-telegram"
-	keychainAccount = "telegram-session"
-)
+// sessionVault is the narrow slice of *secret.Vault that SessionStorage
+// actually needs. Declaring it here (rather than taking *secret.Vault
+// directly) lets tests substitute an in-memory fake without depending on
+// the Keychain — the concrete *secret.Vault satisfies it structurally.
+type sessionVault interface {
+	SessionLoad() ([]byte, error)
+	SessionStore(data []byte) error
+	SessionDelete() error
+}
 
-// SessionStorage implements session.Storage using macOS Keychain.
-type SessionStorage struct{}
+// SessionStorage implements session.Storage over the shared macOS Keychain
+// vault. The session bytes live in the same keychain item as the config blob,
+// so reading/writing the session never triggers a separate password prompt.
+type SessionStorage struct {
+	vault sessionVault
+}
 
-// NewSessionStorage creates a new SessionStorage.
+// NewSessionStorage returns a session.Storage bound to the shared vault.
 func NewSessionStorage() (*SessionStorage, error) {
-	return &SessionStorage{}, nil
+	return &SessionStorage{vault: secret.Shared()}, nil
 }
 
-// LoadSession loads session data from Keychain.
 func (s *SessionStorage) LoadSession(_ context.Context) ([]byte, error) {
-	query := keychain.NewItem()
-	query.SetSecClass(keychain.SecClassGenericPassword)
-	query.SetService(keychainService)
-	query.SetAccount(keychainAccount)
-	query.SetMatchLimit(keychain.MatchLimitOne)
-	query.SetReturnData(true)
-
-	results, err := keychain.QueryItem(query)
-	if errors.Is(err, keychain.ErrorItemNotFound) {
+	data, err := s.vault.SessionLoad()
+	if errors.Is(err, secret.ErrNotFound) {
 		return nil, session.ErrNotFound
 	}
-	if err != nil {
-		return nil, fmt.Errorf("querying keychain: %w", err)
-	}
-
-	if len(results) == 0 {
-		return nil, session.ErrNotFound
-	}
-
-	return results[0].Data, nil
+	return data, err
 }
 
-// StoreSession stores session data in Keychain.
 func (s *SessionStorage) StoreSession(_ context.Context, data []byte) error {
-	// First, try to delete existing item
-	deleteItem := keychain.NewItem()
-	deleteItem.SetSecClass(keychain.SecClassGenericPassword)
-	deleteItem.SetService(keychainService)
-	deleteItem.SetAccount(keychainAccount)
-	if err := keychain.DeleteItem(deleteItem); err != nil && !errors.Is(err, keychain.ErrorItemNotFound) {
-		return fmt.Errorf("removing existing keychain item: %w", err)
-	}
-
-	// Add new item
-	item := keychain.NewItem()
-	item.SetSecClass(keychain.SecClassGenericPassword)
-	item.SetService(keychainService)
-	item.SetAccount(keychainAccount)
-	item.SetLabel("Telegram MCP Session")
-	item.SetData(data)
-	item.SetSynchronizable(keychain.SynchronizableNo)
-	item.SetAccessible(keychain.AccessibleWhenUnlocked)
-
-	if err := keychain.AddItem(item); err != nil {
-		return fmt.Errorf("adding keychain item: %w", err)
-	}
-	return nil
+	return s.vault.SessionStore(data)
 }
 
-// DeleteSession removes session data from Keychain.
 func (s *SessionStorage) DeleteSession() error {
-	item := keychain.NewItem()
-	item.SetSecClass(keychain.SecClassGenericPassword)
-	item.SetService(keychainService)
-	item.SetAccount(keychainAccount)
-
-	err := keychain.DeleteItem(item)
-	if errors.Is(err, keychain.ErrorItemNotFound) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("deleting keychain item: %w", err)
-	}
-	return nil
+	return s.vault.SessionDelete()
 }

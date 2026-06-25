@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gotd/td/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/gotd/td/session"
 )
 
 func TestResolveSessionPathUsesXDGStateHome(t *testing.T) {

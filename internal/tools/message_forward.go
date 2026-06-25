@@ -86,11 +86,11 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	})
 	if err != nil {
 		mcpLog(ctx, req.Session, logLevelWarning, "ForwardMessage", map[string]any{
-			"action":   "forward_failed",
-			"from_id":  in.FromChatID,
-			"to_id":    in.ToChatID,
-			"msg_id":   ref.ID,
-			"error":    err.Error(),
+			"action":  "forward_failed",
+			"from_id": in.FromChatID,
+			"to_id":   in.ToChatID,
+			"msg_id":  ref.ID,
+			"error":   err.Error(),
 		})
 		return errResult(fmt.Sprintf("Failed to forward message: %v", err)), nil, nil
 	}

@@ -157,7 +157,7 @@ func TestResolveMessageLinkPrivateForumTopicID(t *testing.T) {
 	assert.Equal(t, FormatRegularRef(11), out.TopicMessageID, "TopicMessageID should be opaque handle for topic root")
 	assert.Equal(t, 11, out.TopicID)
 	assert.Equal(t, FormatRegularRef(42), out.MessageID)
-	assert.Equal(t, -(tgclient.ChannelIDPrefix+int64(1234567890)), out.ChatID)
+	assert.Equal(t, -(tgclient.ChannelIDPrefix + int64(1234567890)), out.ChatID)
 }
 
 // TestResolveMessageLinkNoTopicIDWhenNonForum verifies that TopicMessageID is
@@ -240,4 +240,3 @@ func TestChatIDFromResolved(t *testing.T) {
 		})
 	}
 }
-

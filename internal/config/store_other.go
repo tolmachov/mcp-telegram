@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/tolmachov/mcp-telegram/internal/xdg"
 )
@@ -155,10 +156,13 @@ func (s *fileStore) List() ([]string, error) {
 		return nil, err
 	}
 
-	var keys []string
+	keys := make([]string, 0, len(m))
 	for key := range m {
 		keys = append(keys, key)
 	}
+	// Sort for stable output, matching the darwin vault's ConfigList so the
+	// `config list` command behaves identically across platforms.
+	sort.Strings(keys)
 
 	return keys, nil
 }

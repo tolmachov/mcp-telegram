@@ -146,7 +146,7 @@ func TestReverseEmptyAndSingle(t *testing.T) {
 func TestFormatBatchForSummaryIncludesTextMessages(t *testing.T) {
 	msgs := []Message{
 		{ID: 1, Date: time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC), SenderID: 42, Text: "hello"},
-		{ID: 2, Date: time.Date(2026, 4, 10, 9, 1, 0, 0, time.UTC), SenderID: 99, Text: ""},     // no text — skipped
+		{ID: 2, Date: time.Date(2026, 4, 10, 9, 1, 0, 0, time.UTC), SenderID: 99, Text: ""}, // no text — skipped
 		{ID: 3, Date: time.Date(2026, 4, 10, 9, 2, 0, 0, time.UTC), SenderID: 42, Text: "world"},
 	}
 	out := FormatBatchForSummary(msgs)

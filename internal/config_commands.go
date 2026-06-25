@@ -3,7 +3,6 @@ package internal
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/urfave/cli/v3"
 
@@ -16,9 +15,8 @@ func configSetAction(_ context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("usage: config set <key> <value>")
 	}
 
-	key := strings.ToUpper(args.Get(0))
-
-	if err := config.ValidateKey(key); err != nil {
+	key, err := config.ResolveKey(args.Get(0))
+	if err != nil {
 		return err
 	}
 
@@ -30,7 +28,7 @@ func configSetAction(_ context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("storing config value: %w", err)
 	}
 
-	_, _ = fmt.Fprintf(cmd.Root().ErrWriter, "Stored %s securely\n", key)
+	_, _ = fmt.Fprintf(cmd.Root().ErrWriter, "Stored %s securely\n", config.AliasFor(key))
 
 	return nil
 }
@@ -52,7 +50,7 @@ func configListAction(_ context.Context, cmd *cli.Command) error {
 	}
 
 	for _, k := range keys {
-		_, _ = fmt.Fprintf(cmd.Root().Writer, "%s = ****\n", k)
+		_, _ = fmt.Fprintf(cmd.Root().Writer, "%s = ****\n", config.AliasFor(k))
 	}
 
 	return nil
@@ -64,9 +62,8 @@ func configDeleteAction(_ context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("usage: config delete <key>")
 	}
 
-	key := strings.ToUpper(args.Get(0))
-
-	if err := config.ValidateKey(key); err != nil {
+	key, err := config.ResolveKey(args.Get(0))
+	if err != nil {
 		return err
 	}
 
@@ -78,7 +75,7 @@ func configDeleteAction(_ context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("deleting config value: %w", err)
 	}
 
-	_, _ = fmt.Fprintf(cmd.Root().ErrWriter, "Deleted %s\n", key)
+	_, _ = fmt.Fprintf(cmd.Root().ErrWriter, "Deleted %s\n", config.AliasFor(key))
 
 	return nil
 }

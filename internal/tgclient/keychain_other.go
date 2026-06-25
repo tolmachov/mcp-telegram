@@ -45,7 +45,10 @@ func resolveSessionPath() (string, error) {
 	return filepath.Join(stateDir, "session.json"), nil
 }
 
-// LoadSession loads session data from file.
+// LoadSession reads the persisted session, treating "file missing" and
+// "file present but empty" as the same condition (session.ErrNotFound).
+// An empty file would otherwise look like "logged in with no session",
+// which triggers a silent re-auth and, under load, a FLOOD_WAIT.
 func (s *SessionStorage) LoadSession(_ context.Context) ([]byte, error) {
 	data, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -107,7 +110,9 @@ func (s *SessionStorage) StoreSession(_ context.Context, data []byte) error {
 	return nil
 }
 
-// DeleteSession removes session file.
+// DeleteSession is idempotent: a missing file is success, since logout must
+// succeed even if the session was never written (e.g. repeated logout calls
+// from a stuck UI).
 func (s *SessionStorage) DeleteSession() error {
 	err := os.Remove(s.path)
 	if errors.Is(err, os.ErrNotExist) {

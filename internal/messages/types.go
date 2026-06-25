@@ -68,7 +68,7 @@ type FetchOptions struct {
 	// BackupMessages does this automatically via normalizeInclusiveUpperDate.
 	// GetMessages / SearchMessages accept a full RFC3339 timestamp, so
 	// pass midnight of the next day if the intent is to include a whole day.
-	MaxDate time.Time
+	MaxDate    time.Time
 	UnreadOnly bool
 	MaxCount   int // Stop after collecting this many messages. 0 means no limit.
 }
@@ -94,8 +94,8 @@ type SearchOptions struct {
 	Limit        int
 	OffsetID     int
 	MinDate      time.Time
-	MaxDate      time.Time // Exclusive upper bound mapped to messages.search's max_date parameter (strictly-less-than).
-	FromSenderID int64     // 0 = any sender
+	MaxDate      time.Time              // Exclusive upper bound mapped to messages.search's max_date parameter (strictly-less-than).
+	FromSenderID int64                  // 0 = any sender
 	TopMsgID     int                    // 0 = whole chat (not a forum thread)
 	Filter       tg.MessagesFilterClass // nil → InputMessagesFilterEmpty
 }

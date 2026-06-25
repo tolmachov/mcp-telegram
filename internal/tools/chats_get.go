@@ -31,8 +31,8 @@ func NewChatsGetHandler(client *tg.Client) *ChatsGetHandler {
 
 // GetChatsInput is the input for the GetChats tool.
 type GetChatsInput struct {
-	Limit  int    `json:"limit,omitempty" jsonschema:"description=Maximum number of chats per page (1-500; default 100)"`
-	Cursor string `json:"cursor,omitempty" jsonschema:"description=Opaque pagination cursor from a previous GetChats response. Omit to load fresh data."`
+	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum number of chats per page (1-500; default 100)"`
+	Cursor string `json:"cursor,omitempty" jsonschema:"Opaque pagination cursor from a previous GetChats response. Omit to load fresh data."`
 }
 
 // getChatsOutput is the structured output for the GetChats tool.

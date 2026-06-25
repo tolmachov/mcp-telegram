@@ -50,8 +50,8 @@ make
 Store credentials (macOS Keychain; plaintext JSON at `~/.local/state/mcp-telegram/config.json` with `0600` perms on Linux/Windows):
 
 ```bash
-mcp-telegram config set TELEGRAM_API_ID 123456789
-mcp-telegram config set TELEGRAM_API_HASH abcd1234efgh5678
+mcp-telegram config set api-id 123456789
+mcp-telegram config set api-hash abcd1234efgh5678
 ```
 
 Or use a `.env` file:
@@ -125,7 +125,7 @@ them manually.
 | `ResolveUsername` | Resolve @username to user/chat info |
 | `SetChatMute` | Mute or unmute chat notifications (`muted` bool + optional `duration_seconds`) |
 | `SummarizeChat` | AI-powered chat summarization via sampling / Gemini / Ollama / Anthropic |
-| `GetMedia` | Download photo media from a message resource URI; returns MCP image content |
+| `GetMedia` | Download photo media from a media resource URI; returns MCP image content |
 
 ## Available Resources
 
@@ -205,17 +205,19 @@ mcp-telegram login --phone +1234567890
 mcp-telegram logout
 
 # Securely store config values (macOS Keychain / file on Linux)
-mcp-telegram config set TELEGRAM_API_ID 123456789
-mcp-telegram config set TELEGRAM_API_HASH abcd1234
+mcp-telegram config set api-id 123456789
+mcp-telegram config set api-hash abcd1234
 
 # List stored keys
 mcp-telegram config list
 
 # Delete a stored value
-mcp-telegram config delete TELEGRAM_API_ID
+mcp-telegram config delete api-id
 ```
 
-Allowed keys: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`.
+Allowed keys: `api-id`, `api-hash`, `anthropic`, `gemini`.
+
+Credentials resolve in this priority order (higher wins): CLI flags (`--api-id`, `--api-hash`) → environment variables (including `.env`) → secure store values set via `config set`. This lets you keep stable values in the keychain and override per-run from the command line without editing the store.
 
 ## Configuration Options
 
@@ -236,7 +238,7 @@ Allowed keys: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `ANTHROPIC_API_KEY`, `GEMI
 
 ## Destructive Actions
 
-Tools like `DeleteMessage` request user confirmation via [MCP elicitation](https://modelcontextprotocol.io/docs/concepts/elicitation) before proceeding. If your MCP client does not support elicitation, the server relies on the LLM's instructions to confirm verbally before executing destructive operations.
+Tools like `DeleteMessage` request user confirmation via [MCP elicitation](https://modelcontextprotocol.io/docs/concepts/elicitation) before proceeding. If your MCP client does not support elicitation, the server proceeds automatically without a confirmation dialog.
 
 ## Session Storage
 

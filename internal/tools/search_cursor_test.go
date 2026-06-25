@@ -41,7 +41,7 @@ func TestParseGlobalSearchCursorErrors(t *testing.T) {
 		{"empty", "", "empty"},
 		{"whitespace", " " + valid, "whitespace"},
 		{"not base64", "!!!not-base64!!!", "base64url"},
-		{"bad json", "bm90LWpzb24", "JSON"},                                                  // "not-json"
+		{"bad json", "bm90LWpzb24", "JSON"}, // "not-json"
 		{"unknown kind", FormatGlobalSearchCursor(messages.GlobalSearchCursor{PeerKind: "bot", PeerID: 1, MsgID: 1}), "peer kind"},
 		// Use PeerKind "chat" for the id tests: basic chats have no access_hash
 		// requirement, so we can isolate the peer_id / msg_id invariants cleanly.
@@ -109,11 +109,11 @@ func TestParseGlobalSearchCursorVersionCompat(t *testing.T) {
 		// future minor-compat bump added an optional key) must still
 		// decode, not fail with "unknown field".
 		input := encodeRawCursor(t, map[string]any{
-			"v":             1,
-			"k":             "user",
-			"i":             1,
-			"h":             2,
-			"m":             1,
+			"v":               1,
+			"k":               "user",
+			"i":               1,
+			"h":               2,
+			"m":               1,
 			"future_optional": "ignored",
 		})
 		_, err := ParseGlobalSearchCursor(input)

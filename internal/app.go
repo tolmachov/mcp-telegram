@@ -47,12 +47,16 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					flags.PinnedRefreshSecsFlag(),
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
+					// Credential validation is intentionally NOT performed here.
+					// Server.Run handles missing/invalid credentials by writing
+					// a JSON-RPC error on the initialize request, which is what
+					// MCP hosts like Claude Desktop render to the user. Exiting
+					// the process here would just look like "Server disconnected".
+					// login/logout still pre-flight-validate because they are
+					// interactive commands without an MCP peer to report to.
 					cfg := &tgclient.Config{
 						APIID:   cmd.Int(flags.APIID),
 						APIHash: cmd.String(flags.APIHash),
-					}
-					if cfg.APIID == 0 || cfg.APIHash == "" {
-						return fmt.Errorf("%s and %s are required (set via env, flags, or 'config set')", flags.EnvTelegramAPIID, flags.EnvTelegramAPIHash)
 					}
 					allowedPaths := cmd.StringSlice(flags.AllowedPaths)
 					summarizeCfg := summarize.Config{
@@ -129,7 +133,7 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 				Commands: []*cli.Command{
 					{
 						Name:      "set",
-						Usage:     fmt.Sprintf("Store a config value securely (e.g., %s, %s)", flags.EnvTelegramAPIID, flags.EnvAnthropicAPIKey),
+						Usage:     "Store a config value securely (keys: api-id, api-hash, anthropic, gemini)",
 						ArgsUsage: "<key> <value>",
 						Action:    configSetAction,
 					},

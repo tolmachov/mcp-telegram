@@ -47,21 +47,24 @@ const DefaultPinnedRefreshSeconds = 30
 // to keep base64-encoded responses inside MCP context-window economics.
 const DefaultMediaMaxBytes = 50 * 1024 * 1024
 
+// APIIDFlag defines --api-id. It is intentionally NOT marked Required so that
+// `mcp-telegram run` can still start the MCP stdio transport when credentials
+// are absent and surface a JSON-RPC init error through the protocol.
+// `login`/`logout` re-check for a non-zero value in their Action closures.
 func APIIDFlag() *cli.IntFlag {
 	return &cli.IntFlag{
-		Name:     APIID,
-		Usage:    "Telegram API ID",
-		Sources:  cli.EnvVars(EnvTelegramAPIID),
-		Required: true,
+		Name:    APIID,
+		Usage:   "Telegram API ID (optional for 'run'; required for 'login'/'logout')",
+		Sources: cli.EnvVars(EnvTelegramAPIID),
 	}
 }
 
+// APIHashFlag defines --api-hash. See APIIDFlag for why Required is omitted.
 func APIHashFlag() *cli.StringFlag {
 	return &cli.StringFlag{
-		Name:     APIHash,
-		Usage:    "Telegram API Hash",
-		Sources:  cli.EnvVars(EnvTelegramAPIHash),
-		Required: true,
+		Name:    APIHash,
+		Usage:   "Telegram API Hash (optional for 'run'; required for 'login'/'logout')",
+		Sources: cli.EnvVars(EnvTelegramAPIHash),
 	}
 }
 

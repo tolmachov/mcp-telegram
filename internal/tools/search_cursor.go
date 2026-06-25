@@ -20,12 +20,12 @@ import (
 // shapes is how future schema changes stay backwards-compatible without
 // invalidating every in-flight pagination.
 type cursorEnvelope struct {
-	Version int    `json:"v"`
-	Rate    int    `json:"r"`
+	Version int               `json:"v"`
+	Rate    int               `json:"r"`
 	Kind    messages.PeerKind `json:"k"`
-	ID      int64  `json:"i"`
-	Hash    int64  `json:"h,omitempty"`
-	Msg     int    `json:"m"`
+	ID      int64             `json:"i"`
+	Hash    int64             `json:"h,omitempty"`
+	Msg     int               `json:"m"`
 }
 
 // cursorVersion is the current envelope schema version.
