@@ -14,6 +14,7 @@ import (
 	"github.com/gotd/td/telegram"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/tolmachov/mcp-telegram/internal/completion"
 	"github.com/tolmachov/mcp-telegram/internal/messages"
 	"github.com/tolmachov/mcp-telegram/internal/prompts"
 	"github.com/tolmachov/mcp-telegram/internal/resources"
@@ -169,6 +170,9 @@ func (s *Server) runHappy(ctx context.Context, client *telegram.Client) error {
 		&mcp.ServerOptions{
 			Instructions: happyInstructions,
 			Logger:       s.logger,
+			// Suggest chat titles/usernames/ids for prompt arguments and the
+			// chat resource template as the user types.
+			CompletionHandler: completion.Handler(client.API()),
 		},
 	)
 
