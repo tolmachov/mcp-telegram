@@ -9,8 +9,6 @@ import (
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // MessageLinkResolveHandler handles the ResolveMessageLink tool. It turns a
@@ -103,10 +101,10 @@ func (h *MessageLinkResolveHandler) handle(ctx context.Context, _ *mcp.CallToolR
 		out.Username = parsed.Username
 	} else {
 		// Private channel form: t.me/c/<internal>/<id>. The URL's "c" segment
-		// is the raw channel ID without the -100 prefix; the rest of the
-		// toolbox expects the user-facing signed form. We don't hit the API
-		// here — ChatInfoGet can enrich on demand if the caller needs metadata.
-		out.ChatID = -(tgclient.ChannelIDPrefix + parsed.ChannelRaw)
+		// is already the bare MTProto channel ID the toolbox uses. We don't hit
+		// the API here — ChatInfoGet can enrich on demand if the caller needs
+		// metadata.
+		out.ChatID = parsed.ChannelRaw
 		out.Hint = "Private channel link — chat_title omitted (no API call). Call GetChatInfo with chat_id if you need the title/members."
 	}
 
@@ -305,16 +303,15 @@ func validateUsername(s string) error {
 	return nil
 }
 
-// chatIDFromResolved extracts the user-facing chat ID and display title from
-// a ContactsResolveUsername response, converting channel/supergroup IDs to
-// the -100-prefixed signed form used elsewhere in the toolbox.
+// chatIDFromResolved extracts the bare MTProto chat ID and display title from
+// a ContactsResolveUsername response.
 func chatIDFromResolved(r *tg.ContactsResolvedPeer) (int64, string, bool) {
 	for _, c := range r.Chats {
 		switch chat := c.(type) {
 		case *tg.Chat:
 			return chat.ID, chat.Title, true
 		case *tg.Channel:
-			return -(tgclient.ChannelIDPrefix + chat.ID), chat.Title, true
+			return chat.ID, chat.Title, true
 		}
 	}
 	for _, u := range r.Users {

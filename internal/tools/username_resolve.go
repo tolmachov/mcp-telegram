@@ -7,8 +7,6 @@ import (
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // UsernameResolveHandler handles the ResolveUsername tool.
@@ -114,7 +112,7 @@ func (h *UsernameResolveHandler) handle(ctx context.Context, _ *mcp.CallToolRequ
 			}
 			out.Entities = append(out.Entities, ResolveUsernameEntity{
 				Kind:              kind,
-				ID:                -(tgclient.ChannelIDPrefix + c.ID),
+				ID:                c.ID,
 				Username:          c.Username,
 				Title:             c.Title,
 				ParticipantsCount: c.ParticipantsCount,

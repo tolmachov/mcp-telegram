@@ -221,9 +221,9 @@ type GlobalSearchResult struct {
 }
 
 // GlobalMessage is a Message with explicit chat attribution.
-// ChatID is in user-facing format: positive for users and basic chats,
-// negative -100-prefixed for channels/supergroups — callers can feed it
-// directly into GetMessages, SearchMessages, etc.
+// ChatID is a bare MTProto ID (the positive number the official clients show)
+// for every peer type — callers can feed it directly into GetMessages,
+// SearchMessages, etc.
 type GlobalMessage struct {
 	Message
 	ChatID    int64

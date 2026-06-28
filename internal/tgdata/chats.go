@@ -82,8 +82,8 @@ func (em entityMaps) dialogToChatInfo(dialog *tg.Dialog, now time.Time) (ChatInf
 		}
 		info.Name = chat.Title
 	case *tg.PeerChannel:
-		// Convert to user-facing format with -100 prefix
-		info.ID = -tgclient.ChannelIDPrefix - peer.ChannelID
+		// Bare MTProto channel ID — the positive number the official clients show.
+		info.ID = peer.ChannelID
 		info.Type = ChatTypeChannel
 		channel, ok := em.channels[peer.ChannelID]
 		if !ok {

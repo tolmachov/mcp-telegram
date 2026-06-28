@@ -24,8 +24,7 @@ func newTestMessage(id int, peer tg.PeerClass, fromID tg.PeerClass, text string)
 }
 
 // TestProcessGlobalHistoryPeerKinds covers the three valid peer kinds and
-// asserts the user-facing ChatID is built correctly (positive for users and
-// basic chats, -100 prefixed for channels).
+// asserts the ChatID is the bare MTProto id (positive for every peer type).
 func TestProcessGlobalHistoryPeerKinds(t *testing.T) {
 	p := &Provider{}
 
@@ -65,7 +64,7 @@ func TestProcessGlobalHistoryPeerKinds(t *testing.T) {
 			name:         "PeerChannel broadcast",
 			peer:         &tg.PeerChannel{ChannelID: 600},
 			fromID:       &tg.PeerUser{UserID: 42},
-			wantChatID:   -1_000_000_000_000 - 600,
+			wantChatID:   600,
 			wantChatName: "BroadcastChan",
 			wantSender:   "Alice",
 		},

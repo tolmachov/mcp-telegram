@@ -8,8 +8,6 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 func TestParseTMeLink(t *testing.T) {
@@ -157,7 +155,7 @@ func TestResolveMessageLinkPrivateForumTopicID(t *testing.T) {
 	assert.Equal(t, FormatRegularRef(11), out.TopicMessageID, "TopicMessageID should be opaque handle for topic root")
 	assert.Equal(t, 11, out.TopicID)
 	assert.Equal(t, FormatRegularRef(42), out.MessageID)
-	assert.Equal(t, -(tgclient.ChannelIDPrefix + int64(1234567890)), out.ChatID)
+	assert.Equal(t, int64(1234567890), out.ChatID)
 }
 
 // TestResolveMessageLinkNoTopicIDWhenNonForum verifies that TopicMessageID is
@@ -176,8 +174,8 @@ func TestResolveMessageLinkNoTopicIDWhenNonForum(t *testing.T) {
 	assert.Equal(t, FormatRegularRef(42), out.MessageID)
 }
 
-// TestChatIDFromResolved verifies that channel IDs are converted to the
-// -100-prefixed user-facing form and that Chat / User IDs pass through as-is.
+// TestChatIDFromResolved verifies that channel, chat and user IDs all pass
+// through as bare MTProto IDs.
 func TestChatIDFromResolved(t *testing.T) {
 	const rawChannelID int64 = 1234567890
 
@@ -189,13 +187,13 @@ func TestChatIDFromResolved(t *testing.T) {
 		wantFound bool
 	}{
 		{
-			name: "channel gets -100 prefix",
+			name: "channel ID passes through unchanged",
 			resolved: &tg.ContactsResolvedPeer{
 				Chats: []tg.ChatClass{
 					&tg.Channel{ID: rawChannelID, Title: "Test Channel"},
 				},
 			},
-			wantID:    -(tgclient.ChannelIDPrefix + rawChannelID),
+			wantID:    rawChannelID,
 			wantTitle: "Test Channel",
 			wantFound: true,
 		},

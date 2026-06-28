@@ -7,8 +7,6 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // TestOffsetPeerPhantomChat is the regression guard for the bug this file
@@ -56,7 +54,7 @@ func TestDialogToChatInfoSkipsPhantom(t *testing.T) {
 	assert.False(t, ok, "dialog with missing entity should be skipped")
 }
 
-func TestDialogToChatInfoChannelPrefixAndSupergroup(t *testing.T) {
+func TestDialogToChatInfoBareChannelIDAndSupergroup(t *testing.T) {
 	em := newEntityMaps(nil, []tg.ChatClass{
 		&tg.Channel{ID: 555, Title: "Orbit Internal", Megagroup: true},
 	})
@@ -66,5 +64,5 @@ func TestDialogToChatInfoChannelPrefixAndSupergroup(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, ChatTypeSupergroup, info.Type)
 	assert.Equal(t, "Orbit Internal", info.Name)
-	assert.Equal(t, -tgclient.ChannelIDPrefix-int64(555), info.ID)
+	assert.Equal(t, int64(555), info.ID)
 }

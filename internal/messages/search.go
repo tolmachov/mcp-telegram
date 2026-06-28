@@ -63,7 +63,7 @@ func (p *Provider) Search(ctx context.Context, chatID int64, opts SearchOptions)
 		// Telegram, turning what the caller framed as a sender filter into
 		// an un-filtered search. Reject loudly instead.
 		if _, isBasicChat := fromPeer.(*tg.InputPeerChat); isBasicChat {
-			return nil, fmt.Errorf("from_sender_id %d resolves to a legacy basic chat, which cannot be used as a message sender; pass a user ID or a -100-prefixed channel/supergroup ID", opts.FromSenderID)
+			return nil, fmt.Errorf("from_sender_id %d resolves to a legacy basic chat, which cannot be used as a message sender; pass a user ID or a channel/supergroup ID", opts.FromSenderID)
 		}
 		req.SetFromID(fromPeer)
 	}
@@ -183,23 +183,23 @@ func (p *Provider) processGlobalHistory(history tg.MessagesMessagesClass, limit 
 
 	// Three parallel maps for chat lookups:
 	//   - chatTitleMap holds the *display title* keyed by the raw Telegram ID.
-	//   - chatUserFacingID holds the user-facing ID so we can return a value
-	//     the caller can feed back into other tools without having to know the
-	//     internal ID format. Basic chats stay positive; channels use the
-	//     -100-prefixed signed form used everywhere else in the project.
+	//   - chatIDByRaw maps a raw Telegram ID to the bare MTProto ID we return to
+	//     the caller. Bare IDs equal the raw ID for every peer type, so this is
+	//     now effectively an identity map; it is kept as a single seam in case
+	//     the returned ID format ever needs to diverge again.
 	//   - channelByID holds full channel records so access_hash lookups for
 	//     cursor construction are O(1).
 	chatTitleMap := make(map[int64]string, len(chats))
-	chatUserFacingID := make(map[int64]int64, len(chats))
+	chatIDByRaw := make(map[int64]int64, len(chats))
 	channelByID := make(map[int64]*tg.Channel, len(chats))
 	for _, c := range chats {
 		switch chat := c.(type) {
 		case *tg.Chat:
 			chatTitleMap[chat.ID] = chat.Title
-			chatUserFacingID[chat.ID] = chat.ID
+			chatIDByRaw[chat.ID] = chat.ID
 		case *tg.Channel:
 			chatTitleMap[chat.ID] = chat.Title
-			chatUserFacingID[chat.ID] = -tgclient.ChannelIDPrefix - chat.ID
+			chatIDByRaw[chat.ID] = chat.ID
 			channelByID[chat.ID] = chat
 		}
 	}
@@ -226,7 +226,7 @@ func (p *Provider) processGlobalHistory(history tg.MessagesMessagesClass, limit 
 		// peerKind — skip the message rather than emitting zero
 		// attribution to the LLM, which would show up as a chat_id=0
 		// result the caller cannot do anything with.
-		chatID, chatTitle, peerKind, _, _ := extractGlobalChat(msg.PeerID, userMap, chatTitleMap, chatUserFacingID, userByID, channelByID)
+		chatID, chatTitle, peerKind, _, _ := extractGlobalChat(msg.PeerID, userMap, chatTitleMap, chatIDByRaw, userByID, channelByID)
 		if peerKind == "" {
 			slog.Debug("SearchMessagesGlobal: skipping message with unknown peer kind", "msg_id", msg.ID, "peer_type", fmt.Sprintf("%T", msg.PeerID))
 			skipped++
@@ -307,10 +307,11 @@ func (p *Provider) processGlobalHistory(history tg.MessagesMessagesClass, limit 
 // extractGlobalChat returns everything needed to both report a message's
 // chat to the caller and to rebuild an InputPeer for pagination:
 //
-//	chatID         — user-facing id: positive for users and basic chats; negative -100-prefixed for channels
+//	chatID         — bare MTProto id (positive for every peer type)
 //	chatTitle      — display name for UI
 //	peerKind       — "user" | "chat" | "channel" (drives cursor round-trip)
-//	peerRawID      — raw Telegram id (no prefix) for rebuilding InputPeer
+//	peerRawID      — same bare id, named separately because it feeds InputPeer
+//	                 reconstruction for pagination (chatID == peerRawID today)
 //	accessHash     — required for user/channel InputPeer; 0 for basic chat
 //
 // The userByID / channelByID maps are pre-built by the caller so access_hash
@@ -319,7 +320,7 @@ func extractGlobalChat(
 	peer tg.PeerClass,
 	users map[int64]string,
 	chatTitles map[int64]string,
-	chatUserFacingID map[int64]int64,
+	chatIDByRaw map[int64]int64,
 	userByID map[int64]*tg.User,
 	channelByID map[int64]*tg.Channel,
 ) (chatID int64, chatTitle string, peerKind PeerKind, peerRawID int64, accessHash int64) {
@@ -335,7 +336,7 @@ func extractGlobalChat(
 	case *tg.PeerChat:
 		peerKind = PeerKindChat
 		peerRawID = p.ChatID
-		chatID = chatUserFacingID[p.ChatID]
+		chatID = chatIDByRaw[p.ChatID]
 		if chatID == 0 {
 			chatID = p.ChatID
 		}
@@ -343,9 +344,9 @@ func extractGlobalChat(
 	case *tg.PeerChannel:
 		peerKind = PeerKindChannel
 		peerRawID = p.ChannelID
-		chatID = chatUserFacingID[p.ChannelID]
+		chatID = chatIDByRaw[p.ChannelID]
 		if chatID == 0 {
-			chatID = -tgclient.ChannelIDPrefix - p.ChannelID
+			chatID = p.ChannelID
 		}
 		chatTitle = chatTitles[p.ChannelID]
 		if ch, ok := channelByID[p.ChannelID]; ok {
@@ -371,7 +372,7 @@ func lastGlobalCursorAnchor(
 			if msg.ID <= 0 || msg.PeerID == nil {
 				continue
 			}
-			// nil maps for users/chatTitles/chatUserFacingID are safe: only
+			// nil maps for users/chatTitles/chatIDByRaw are safe: only
 			// peerKind, peerRawID, and accessHash are used for cursor
 			// construction. chatID and chatTitle may be partially populated
 			// (users/channels still compute them from the peer directly) but
