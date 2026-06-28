@@ -41,14 +41,15 @@ type GetMessagesInput struct {
 // ("42" for regular, "s:42" for scheduled), so the LLM always works with
 // one consistent ID format across tools.
 type messageDTO struct {
-	ID         string              `json:"id"`
-	ReplyToID  string              `json:"reply_to_id,omitempty"`
-	Date       time.Time           `json:"date"`
-	SenderID   int64               `json:"sender_id,omitempty"`
-	SenderName string              `json:"sender_name,omitempty"`
-	Text       string              `json:"text"`
-	Media      *messages.MediaInfo `json:"media,omitempty"`
-	Entities   []string            `json:"entities,omitempty"`
+	ID         string                  `json:"id"`
+	ReplyToID  string                  `json:"reply_to_id,omitempty"`
+	Date       time.Time               `json:"date"`
+	SenderID   int64                   `json:"sender_id,omitempty"`
+	SenderName string                  `json:"sender_name,omitempty"`
+	Text       string                  `json:"text"`
+	Media      *messages.MediaInfo     `json:"media,omitempty"`
+	Entities   []string                `json:"entities,omitempty"`
+	Reactions  []messages.ReactionInfo `json:"reactions,omitempty"`
 }
 
 // getMessagesOutput is the response shape for GetMessages. The separate
@@ -193,6 +194,7 @@ func toMessageDTO(m messages.Message, scheduled bool) messageDTO {
 		Text:       m.Text,
 		Media:      m.Media,
 		Entities:   m.Entities,
+		Reactions:  m.Reactions,
 	}
 	if m.ReplyToID > 0 {
 		dto.ReplyToID = FormatRegularRef(m.ReplyToID)

@@ -9,6 +9,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestExtractReactions(t *testing.T) {
+	chosen := tg.ReactionCount{Reaction: &tg.ReactionEmoji{Emoticon: "👍"}, Count: 3}
+	chosen.SetChosenOrder(0)
+
+	r := tg.MessageReactions{
+		Results: []tg.ReactionCount{
+			chosen,
+			{Reaction: &tg.ReactionCustomEmoji{DocumentID: 12345}, Count: 2},
+			{Reaction: &tg.ReactionPaid{}, Count: 5},
+			{Reaction: &tg.ReactionEmpty{}, Count: 1}, // skipped
+		},
+	}
+
+	got := extractReactions(r)
+	require.Len(t, got, 3)
+
+	assert.Equal(t, ReactionInfo{Emoji: "👍", Count: 3, Chosen: true}, got[0])
+	assert.Equal(t, ReactionInfo{CustomEmojiID: "12345", Count: 2}, got[1])
+	assert.Equal(t, ReactionInfo{Paid: true, Count: 5}, got[2])
+}
+
+func TestExtractReactionsEmpty(t *testing.T) {
+	assert.Nil(t, extractReactions(tg.MessageReactions{}))
+}
+
 func TestExtractSubstring(t *testing.T) {
 	tests := []struct {
 		name   string

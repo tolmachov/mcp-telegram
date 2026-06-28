@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"strconv"
 	"time"
 
 	"github.com/gotd/td/tg"
@@ -472,6 +473,11 @@ func (p *Provider) extractMessages(messages []tg.MessageClass, users map[int64]s
 			m.Media = extractMediaType(msg.Media)
 		}
 
+		// Extract reactions
+		if reactions, ok := msg.GetReactions(); ok {
+			m.Reactions = extractReactions(reactions)
+		}
+
 		// Extract entities (URLs)
 		// Note: Telegram uses UTF-16 code units for offset/length
 		for _, entity := range msg.Entities {
@@ -539,6 +545,37 @@ func extractSender(peer any, users map[int64]string, chats map[int64]string) (in
 		name = unknownSender
 	}
 	return id, name
+}
+
+// extractReactions converts Telegram's aggregated reaction counts into the
+// compact ReactionInfo slice. ReactionEmpty and unknown variants are skipped.
+func extractReactions(r tg.MessageReactions) []ReactionInfo {
+	if len(r.Results) == 0 {
+		return nil
+	}
+	out := make([]ReactionInfo, 0, len(r.Results))
+	for _, rc := range r.Results {
+		info := ReactionInfo{Count: rc.Count}
+		if _, ok := rc.GetChosenOrder(); ok {
+			info.Chosen = true
+		}
+		switch reaction := rc.Reaction.(type) {
+		case *tg.ReactionEmoji:
+			info.Emoji = reaction.Emoticon
+		case *tg.ReactionCustomEmoji:
+			info.CustomEmojiID = strconv.FormatInt(reaction.DocumentID, 10)
+		case *tg.ReactionPaid:
+			info.Paid = true
+		default:
+			// ReactionEmpty or an unknown variant — nothing to surface.
+			continue
+		}
+		out = append(out, info)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func extractMediaType(media tg.MessageMediaClass) *MediaInfo {

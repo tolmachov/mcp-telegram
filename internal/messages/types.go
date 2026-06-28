@@ -19,15 +19,25 @@ func extractReplyToID(replyTo tg.MessageReplyHeaderClass) int {
 
 // Message represents a Telegram message with parsed metadata.
 type Message struct {
-	ID         int         `json:"id"`
-	Date       time.Time   `json:"date"`
-	SenderID   int64       `json:"sender_id,omitempty"`
-	SenderName string      `json:"sender_name,omitempty"`
-	Text       string      `json:"text"`
-	ReplyToID  int         `json:"reply_to_id,omitempty"`
-	Media      *MediaInfo  `json:"media,omitempty"`
-	Entities   []string    `json:"entities,omitempty"`
-	Raw        *tg.Message `json:"-"` // Original message for advanced use cases
+	ID         int            `json:"id"`
+	Date       time.Time      `json:"date"`
+	SenderID   int64          `json:"sender_id,omitempty"`
+	SenderName string         `json:"sender_name,omitempty"`
+	Text       string         `json:"text"`
+	ReplyToID  int            `json:"reply_to_id,omitempty"`
+	Media      *MediaInfo     `json:"media,omitempty"`
+	Entities   []string       `json:"entities,omitempty"`
+	Reactions  []ReactionInfo `json:"reactions,omitempty"`
+	Raw        *tg.Message    `json:"-"` // Original message for advanced use cases
+}
+
+// ReactionInfo is a single aggregated reaction on a message.
+type ReactionInfo struct {
+	Emoji         string `json:"emoji,omitempty"`           // for ReactionEmoji
+	CustomEmojiID string `json:"custom_emoji_id,omitempty"` // for ReactionCustomEmoji (int64 as string)
+	Paid          bool   `json:"paid,omitempty"`            // for ReactionPaid
+	Count         int    `json:"count"`
+	Chosen        bool   `json:"chosen,omitempty"` // the current user reacted with this
 }
 
 // MediaInfo represents media attached to a message.

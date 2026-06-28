@@ -52,6 +52,12 @@ func FormatBatchForBackup(messages []Message) string {
 			sb.WriteByte(']')
 		}
 
+		if len(msg.Reactions) > 0 {
+			sb.WriteString(" [reactions: ")
+			sb.WriteString(formatReactions(msg.Reactions))
+			sb.WriteByte(']')
+		}
+
 		sb.WriteByte('\n')
 		sb.WriteString(body)
 		sb.WriteByte('\n')
@@ -62,6 +68,27 @@ func FormatBatchForBackup(messages []Message) string {
 	}
 
 	return sb.String()
+}
+
+// formatReactions renders reactions compactly for a backup line, e.g.
+// "👍x3, ❤️x1, custom:123x2, ⭐x5".
+func formatReactions(reactions []ReactionInfo) string {
+	parts := make([]string, 0, len(reactions))
+	for _, r := range reactions {
+		var label string
+		switch {
+		case r.Emoji != "":
+			label = r.Emoji
+		case r.CustomEmojiID != "":
+			label = "custom:" + r.CustomEmojiID
+		case r.Paid:
+			label = "⭐"
+		default:
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%sx%d", label, r.Count))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // backupMessageBody returns the textual payload to persist in a backup. Text
