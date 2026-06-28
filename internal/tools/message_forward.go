@@ -49,7 +49,7 @@ type ForwardMessageResult struct {
 func (h *MessageForwardHandler) Register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "ForwardMessage",
-		Description: "Forward a message from one chat to another. The forwarded message retains the original sender attribution.",
+		Description: "Copy a message from one chat to another, preserving the original sender attribution and any media. Works with any regular message type (text, media, documents); scheduled handles (\"s:...\") are rejected. Both chats must be accessible to you. The copy is a new, independent message visible to all members of the destination chat — it does not carry the original send time. This duplicates content into another chat, so the host may ask for confirmation. To send fresh text instead of copying, use SendMessage.",
 		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},
 	}, h.handle)
 }
@@ -67,6 +67,17 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	}
 	if in.ToChatID == 0 {
 		return errResult("to_chat_id is required. Use SearchChats or GetChats to find the destination chat ID."), nil, nil
+	}
+
+	confirmed, err := confirmDestructive(ctx, req, fmt.Sprintf(
+		"Forward message %s from chat %d to chat %d? This creates a permanent copy visible to everyone in the destination chat.",
+		ref.Format(), in.FromChatID, in.ToChatID,
+	))
+	if err != nil {
+		return errResult(fmt.Sprintf("confirmation failed: %v", err)), nil, nil
+	}
+	if !confirmed {
+		return textResult("Cancelled by user. No message was forwarded."), nil, nil
 	}
 
 	fromPeer, err := tgclient.ResolvePeer(ctx, h.client, in.FromChatID)

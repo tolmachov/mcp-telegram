@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -31,6 +32,30 @@ const (
 // output automatically.
 type Handler interface {
 	Register(s *mcp.Server)
+}
+
+// inputSchemaWithEnums infers the JSON schema for the input type In and overlays
+// enum constraints onto the named properties. The SDK's reflection-based schema
+// generation reads the `jsonschema` struct tag as a plain description only — it
+// has no way to express an enum — so tools with a closed set of allowed string
+// values (e.g. period, media_type) pass the result as mcp.Tool.InputSchema to
+// turn the allowed set into a hard schema constraint the client can validate.
+//
+// It panics on a missing property or an inference error: both are programmer
+// errors fixed at edit time, and Register has no error return.
+func inputSchemaWithEnums[In any](enums map[string][]any) *jsonschema.Schema {
+	schema, err := jsonschema.For[In](nil)
+	if err != nil {
+		panic(fmt.Sprintf("inputSchemaWithEnums: inferring schema for %T: %v", *new(In), err))
+	}
+	for prop, vals := range enums {
+		p, ok := schema.Properties[prop]
+		if !ok {
+			panic(fmt.Sprintf("inputSchemaWithEnums: property %q not found in schema for %T", prop, *new(In)))
+		}
+		p.Enum = vals
+	}
+	return schema
 }
 
 // RegisterTools registers all handlers with the MCP server.

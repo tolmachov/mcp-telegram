@@ -261,6 +261,18 @@ type BackupMessagesInput struct {
 	To       string `json:"to,omitempty" jsonschema:"End date - backup messages until this date (optional). Accepts YYYY-MM-DD or YYYY-MM-DD HH:MM:SS (interpreted as UTC) or RFC3339 with explicit offset for local windows."`
 }
 
+// BackupMessagesResult is the typed output of BackupMessages. It accompanies
+// the human-readable confirmation text so clients can read the saved path and
+// message count as structured data instead of scraping the message. Partial is
+// true when the file holds a partial backup (e.g. the run was cancelled
+// mid-pagination).
+type BackupMessagesResult struct {
+	ChatID       int64  `json:"chat_id"`
+	MessageCount int    `json:"message_count"`
+	Filepath     string `json:"filepath"`
+	Partial      bool   `json:"partial,omitempty"`
+}
+
 // Register adds the tool to the MCP server.
 func (h *MessageBackupHandler) Register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
@@ -483,7 +495,7 @@ func (bp *backupProgress) Send(message string) {
 	sendProgressWithToken(bp.ctx, bp.session, bp.progressToken, progress, float64(total), message)
 }
 
-func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in BackupMessagesInput) (*mcp.CallToolResult, any, error) {
+func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in BackupMessagesInput) (*mcp.CallToolResult, *BackupMessagesResult, error) {
 	if in.ChatID == 0 {
 		return errChatIDRequired(), nil, nil
 	}
@@ -663,15 +675,17 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	}
 	switch {
 	case partialErr == nil:
-		return textResult(fmt.Sprintf("Backup completed!\nMessages saved: %d\nFile: %s", len(result.Messages), absPath)), nil, nil
+		return textResult(fmt.Sprintf("Backup completed!\nMessages saved: %d\nFile: %s", len(result.Messages), absPath)),
+			&BackupMessagesResult{ChatID: in.ChatID, MessageCount: len(result.Messages), Filepath: absPath}, nil
 	case errors.Is(partialErr, context.Canceled):
 		// User-initiated cancel: not an error. Surface as success so the
 		// caller can decide whether to resume, without the LLM treating the
 		// partial file as a failure to retry blindly.
 		return textResult(fmt.Sprintf(
-			"Backup cancelled; partial file saved.\nMessages saved: %d\nFile: %s",
-			len(result.Messages), absPath,
-		)), nil, nil
+				"Backup cancelled; partial file saved.\nMessages saved: %d\nFile: %s",
+				len(result.Messages), absPath,
+			)),
+			&BackupMessagesResult{ChatID: in.ChatID, MessageCount: len(result.Messages), Filepath: absPath, Partial: true}, nil
 	case errors.Is(partialErr, context.DeadlineExceeded):
 		// Context deadline exceeded: surface as a tool error so the caller
 		// knows the backup is incomplete and can retry with a narrower window.

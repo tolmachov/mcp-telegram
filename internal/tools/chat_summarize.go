@@ -52,6 +52,9 @@ func (h *ChatSummarizeHandler) Register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "SummarizeChat",
 		Description: "Summarize messages from a Telegram chat using rolling/incremental summarization with AI. Specify a goal (e.g., 'key decisions', 'action items') and a time period. Uses the configured LLM provider for summarization.",
+		InputSchema: inputSchemaWithEnums[SummarizeChatInput](map[string][]any{
+			"period": {"day", "week", "month"},
+		}),
 		// Note: ReadOnlyHint is intentionally NOT set. The tool calls out
 		// to external LLM providers (sampling, Gemini, Ollama, Anthropic)
 		// which may cache, log, or bill for the content — it is not a

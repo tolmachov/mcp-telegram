@@ -247,6 +247,8 @@ Tools like `DeleteMessage` request user confirmation via [MCP elicitation](https
 
 Config values set via `mcp-telegram config set` (API keys, Telegram credentials) follow the same backend: Keychain on macOS, plaintext JSON on Linux/Windows.
 
+> **Note on the plaintext store (Linux/Windows):** the session file grants full access to your Telegram account. Place it on an encrypted filesystem (LUKS/BitLocker) and do **not** sync `~/.local/state/mcp-telegram` (or `~/.config`) to an unencrypted cloud backup — a leaked `session.json` is equivalent to a leaked login.
+
 ## License
 
 [MIT](LICENSE)

@@ -52,7 +52,7 @@ type markReadResult struct {
 func (h *MessageReadHandler) Register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "MarkAsRead",
-		Description: "Mark all messages in one or more chats as read. Accepts up to 100 chat IDs at once. This cannot be undone.",
+		Description: "Mark all messages in one or more chats as read (clears the unread badge). Accepts up to 100 chat IDs at once. Use GetChats to discover chat IDs. Idempotent — calling it again has the same effect as calling it once.",
 		Annotations: &mcp.ToolAnnotations{
 			IdempotentHint: true,
 			OpenWorldHint:  ptrTrue(),

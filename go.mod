@@ -3,6 +3,7 @@ module github.com/tolmachov/mcp-telegram
 go 1.26.0
 
 require (
+	github.com/google/jsonschema-go v0.4.3
 	github.com/gotd/contrib v0.24.0
 	github.com/gotd/td v0.159.0
 	github.com/joho/godotenv v1.5.1
@@ -32,7 +33,6 @@ require (
 	github.com/go-faster/jx v1.2.0 // indirect
 	github.com/go-faster/xor v1.0.0 // indirect
 	github.com/go-faster/yaml v0.4.6 // indirect
-	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gotd/ige v0.2.2 // indirect
 	github.com/gotd/log v0.1.0 // indirect

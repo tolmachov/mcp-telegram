@@ -81,6 +81,9 @@ func (h *MessagesSearchHandler) Register(s *mcp.Server) {
 		Description: "Search messages by substring within a specific chat via Telegram's server-side messages.search. Returns up to `limit` messages (default 50, max 100) sorted newest-first. " +
 			"Supports pagination via `offset_id` (copy `next_offset_id` from a previous response), date range via `from_date` / `to_date` (RFC3339; `to_date` is exclusive — pass midnight of the next day to include a full day), sender filtering via `from_sender_id`, and media-type filtering via `media_type`. " +
 			"For cross-chat search use SearchMessagesGlobal. For chat discovery by title use SearchChats.",
+		InputSchema: inputSchemaWithEnums[SearchMessagesInput](map[string][]any{
+			"media_type": {"photos", "videos", "documents", "links", "voice", "music", "gif", "round_video", "round_voice"},
+		}),
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
 	}, h.handle)
 }
