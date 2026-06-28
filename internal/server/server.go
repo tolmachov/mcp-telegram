@@ -191,6 +191,8 @@ func (s *Server) runHappy(ctx context.Context, client *telegram.Client) error {
 		tools.NewMessagesSearchHandler(msgProvider),
 		tools.NewMessagesSearchGlobalHandler(msgProvider),
 		tools.NewMessageContextGetHandler(msgProvider),
+		tools.NewGetRepliesHandler(msgProvider),
+		tools.NewGetForumTopicsHandler(msgProvider),
 		tools.NewMessageSendHandler(client.API()),
 		tools.NewMessageReadHandler(client.API()),
 		tools.NewMessageEditHandler(client.API()),

@@ -226,6 +226,80 @@ func TestExtractMessagesDropsZeroID(t *testing.T) {
 	assert.Equal(t, 1, got[0].ID)
 }
 
+// TestApplyMinDateFilter covers the reverse-chronological trim that backs both
+// fetchWithPeer and FetchReplies. The page is newest-first, so the filter walks
+// forward and drops the first message older than minDate and everything after.
+func TestApplyMinDateFilter(t *testing.T) {
+	mkResult := func() *FetchResult {
+		// IDs/dates descend (newest-first), as Telegram history returns them.
+		return &FetchResult{
+			Messages: []Message{
+				{ID: 30, Date: time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC)},
+				{ID: 20, Date: time.Date(2026, 4, 5, 0, 0, 0, 0, time.UTC)},
+				{ID: 10, Date: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)},
+			},
+			Count:   3,
+			HasMore: true,
+			NextID:  10,
+		}
+	}
+
+	t.Run("zero minDate is a no-op", func(t *testing.T) {
+		r := mkResult()
+		applyMinDateFilter(r, time.Time{})
+		assert.Len(t, r.Messages, 3)
+		assert.True(t, r.HasMore)
+		assert.Equal(t, 10, r.NextID)
+	})
+
+	t.Run("empty page is a no-op", func(t *testing.T) {
+		r := &FetchResult{HasMore: true, NextID: 99}
+		applyMinDateFilter(r, time.Date(2026, 4, 5, 0, 0, 0, 0, time.UTC))
+		assert.Empty(t, r.Messages)
+		// No messages to trim, so the flags are left as-is.
+		assert.True(t, r.HasMore)
+	})
+
+	t.Run("all within window leaves page untouched", func(t *testing.T) {
+		r := mkResult()
+		applyMinDateFilter(r, time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC))
+		assert.Len(t, r.Messages, 3)
+		assert.True(t, r.HasMore)
+		assert.Equal(t, 10, r.NextID)
+	})
+
+	t.Run("partial trim recomputes count, clears HasMore, repoints NextID", func(t *testing.T) {
+		r := mkResult()
+		// Cutoff between ID 20 (Apr 5, kept) and ID 10 (Apr 1, dropped).
+		applyMinDateFilter(r, time.Date(2026, 4, 3, 0, 0, 0, 0, time.UTC))
+		require.Len(t, r.Messages, 2)
+		assert.Equal(t, 30, r.Messages[0].ID)
+		assert.Equal(t, 20, r.Messages[1].ID)
+		assert.Equal(t, 2, r.Count)
+		assert.False(t, r.HasMore)
+		assert.Equal(t, 20, r.NextID) // repointed to the new last message
+	})
+
+	t.Run("minDate is inclusive (on-boundary kept)", func(t *testing.T) {
+		r := mkResult()
+		applyMinDateFilter(r, time.Date(2026, 4, 5, 0, 0, 0, 0, time.UTC))
+		// ID 20 is exactly Apr 5 → kept (Before is strict); ID 10 dropped.
+		require.Len(t, r.Messages, 2)
+		assert.Equal(t, 20, r.Messages[1].ID)
+		assert.False(t, r.HasMore)
+		assert.Equal(t, 20, r.NextID)
+	})
+
+	t.Run("first message already older yields empty exhausted page", func(t *testing.T) {
+		r := mkResult()
+		applyMinDateFilter(r, time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC))
+		assert.Empty(t, r.Messages)
+		assert.Equal(t, 0, r.Count)
+		assert.False(t, r.HasMore)
+		assert.Equal(t, 0, r.NextID)
+	})
+}
+
 func TestHistoryOffsetDate(t *testing.T) {
 	maxDate := time.Date(2026, 4, 10, 15, 0, 0, 0, time.UTC)
 	offsetDate := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)

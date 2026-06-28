@@ -115,29 +115,37 @@ func (p *Provider) fetchWithPeer(ctx context.Context, peer tg.InputPeerClass, op
 		return nil, err
 	}
 
-	// Apply MinDate post-filter. History is reverse-chronological, so we walk
-	// from the newest forward and stop at the first message older than
-	// MinDate — everything from that point on is outside the window.
-	if !opts.MinDate.IsZero() && len(result.Messages) > 0 {
-		cutoff := len(result.Messages)
-		for i, m := range result.Messages {
-			if m.Date.Before(opts.MinDate) {
-				cutoff = i
-				break
-			}
-		}
-		if cutoff < len(result.Messages) {
-			result.Messages = result.Messages[:cutoff]
-			result.Count = len(result.Messages)
-			result.HasMore = false
-			result.NextID = 0
-			if len(result.Messages) > 0 {
-				result.NextID = result.Messages[len(result.Messages)-1].ID
-			}
-		}
-	}
+	applyMinDateFilter(result, opts.MinDate)
 
 	return result, nil
+}
+
+// applyMinDateFilter trims a reverse-chronological page to messages on or
+// after minDate. History comes back newest-first, so we walk forward and stop
+// at the first message older than minDate — everything from that point on is
+// outside the window. When the page is trimmed, HasMore is cleared (the window
+// is exhausted) and NextID is re-pointed at the new last message. A zero
+// minDate or empty page is a no-op.
+func applyMinDateFilter(result *FetchResult, minDate time.Time) {
+	if minDate.IsZero() || len(result.Messages) == 0 {
+		return
+	}
+	cutoff := len(result.Messages)
+	for i, m := range result.Messages {
+		if m.Date.Before(minDate) {
+			cutoff = i
+			break
+		}
+	}
+	if cutoff < len(result.Messages) {
+		result.Messages = result.Messages[:cutoff]
+		result.Count = len(result.Messages)
+		result.HasMore = false
+		result.NextID = 0
+		if len(result.Messages) > 0 {
+			result.NextID = result.Messages[len(result.Messages)-1].ID
+		}
+	}
 }
 
 // historyOffsetDate returns the exact timestamp to pass to Telegram's
@@ -478,6 +486,11 @@ func (p *Provider) extractMessages(messages []tg.MessageClass, users map[int64]s
 			m.Reactions = extractReactions(reactions)
 		}
 
+		// Extract reply/comment thread metadata (count, linked discussion group)
+		if replies, ok := msg.GetReplies(); ok {
+			m.Replies = extractReplies(replies)
+		}
+
 		// Extract entities (URLs)
 		// Note: Telegram uses UTF-16 code units for offset/length
 		for _, entity := range msg.Entities {
@@ -576,6 +589,24 @@ func extractReactions(r tg.MessageReactions) []ReactionInfo {
 		return nil
 	}
 	return out
+}
+
+// extractReplies converts Telegram's MessageReplies into the compact
+// RepliesInfo. Comments reports whether this is a channel-post comment section
+// (true) or a plain group/topic reply thread (false). ChannelID and MaxID are
+// optional flag fields, surfaced only when present.
+func extractReplies(r tg.MessageReplies) *RepliesInfo {
+	info := &RepliesInfo{
+		Count:      r.Replies,
+		IsComments: r.Comments,
+	}
+	if id, ok := r.GetChannelID(); ok {
+		info.ChannelID = id
+	}
+	if maxID, ok := r.GetMaxID(); ok {
+		info.MaxID = maxID
+	}
+	return info
 }
 
 func extractMediaType(media tg.MessageMediaClass) *MediaInfo {

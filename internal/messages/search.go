@@ -253,6 +253,9 @@ func (p *Provider) processGlobalHistory(history tg.MessagesMessagesClass, limit 
 		if msg.Media != nil {
 			m.Media = extractMediaType(msg.Media)
 		}
+		if replies, ok := msg.GetReplies(); ok {
+			m.Replies = extractReplies(replies)
+		}
 		for _, entity := range msg.Entities {
 			if url, ok := entity.(*tg.MessageEntityURL); ok {
 				if extracted := extractSubstring(msg.Message, url.Offset, url.Length); extracted != "" {

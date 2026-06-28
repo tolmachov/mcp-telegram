@@ -50,6 +50,7 @@ type messageDTO struct {
 	Media      *messages.MediaInfo     `json:"media,omitempty"`
 	Entities   []string                `json:"entities,omitempty"`
 	Reactions  []messages.ReactionInfo `json:"reactions,omitempty"`
+	Replies    *messages.RepliesInfo   `json:"replies,omitempty"`
 }
 
 // getMessagesOutput is the response shape for GetMessages. The separate
@@ -195,6 +196,7 @@ func toMessageDTO(m messages.Message, scheduled bool) messageDTO {
 		Media:      m.Media,
 		Entities:   m.Entities,
 		Reactions:  m.Reactions,
+		Replies:    m.Replies,
 	}
 	if m.ReplyToID > 0 {
 		dto.ReplyToID = FormatRegularRef(m.ReplyToID)

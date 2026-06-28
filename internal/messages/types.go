@@ -28,7 +28,20 @@ type Message struct {
 	Media      *MediaInfo     `json:"media,omitempty"`
 	Entities   []string       `json:"entities,omitempty"`
 	Reactions  []ReactionInfo `json:"reactions,omitempty"`
+	Replies    *RepliesInfo   `json:"replies,omitempty"`
 	Raw        *tg.Message    `json:"-"` // Original message for advanced use cases
+}
+
+// RepliesInfo summarizes the discussion thread attached to a message: the
+// comment section under a channel post, or the reply thread of a group
+// message / forum-topic root. It's derived from tg.Message.Replies and tells
+// the caller that a thread exists and how big it is, so it can decide whether
+// to fetch the actual messages via GetReplies.
+type RepliesInfo struct {
+	Count      int   `json:"count"`                 // total replies/comments in the thread
+	IsComments bool  `json:"is_comments,omitempty"` // true = comments under a channel post (vs a plain group thread)
+	ChannelID  int64 `json:"channel_id,omitempty"`  // linked discussion supergroup, when comments live in a separate chat
+	MaxID      int   `json:"max_id,omitempty"`      // ID of the latest message in the thread
 }
 
 // ReactionInfo is a single aggregated reaction on a message.
