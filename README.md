@@ -18,7 +18,7 @@
 
 ## Features
 
-- **Chat Management**: List, search, mute/unmute chats
+- **Chat Management**: List, search, mute/unmute chats, organize into folders
 - **Messages**: Read, search, inspect context, send, draft, schedule, link-resolve, and backup messages
 - **AI Summarization**: Summarize chat conversations using multiple LLM providers
 - **Secure**: Session stored in macOS Keychain (file-based storage on Linux/Windows)
@@ -129,6 +129,11 @@ them manually.
 | `SetChatMute` | Mute or unmute chat notifications (`muted` bool + optional `duration_seconds`) |
 | `SummarizeChat` | AI-powered chat summarization via sampling / Gemini / Ollama / Anthropic |
 | `GetMedia` | Download photo media from a media resource URI; returns MCP image content |
+| `GetFolders` | List chat folders (dialog filters) with their ID, title, flags, and included/excluded/pinned chat IDs |
+| `CreateFolder` | Create a folder from a title plus chats and/or category flags (e.g. `include_groups`) |
+| `DeleteFolder` | Delete a folder by ID; chats are untouched (asks for confirmation) |
+| `AddChatsToFolder` | Add chats/groups/channels to a folder by ID (@username or numeric ID) |
+| `RemoveChatsFromFolder` | Remove chats/groups/channels from a folder by ID |
 
 ## Available Resources
 

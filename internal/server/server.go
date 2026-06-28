@@ -205,6 +205,11 @@ func (s *Server) runHappy(ctx context.Context, client *telegram.Client) error {
 		tools.NewChatMuteHandler(client.API()),
 		tools.NewChatSummarizeHandler(msgProvider, s.summarizeCfg),
 		tools.NewMediaGetHandler(client.API(), s.mediaMaxBytes),
+		tools.NewGetFoldersHandler(client.API()),
+		tools.NewCreateFolderHandler(client.API()),
+		tools.NewDeleteFolderHandler(client.API()),
+		tools.NewAddChatsToFolderHandler(client.API()),
+		tools.NewRemoveChatsFromFolderHandler(client.API()),
 	})
 
 	resources.RegisterResources(mcpServer, []resources.ResourceHandler{
