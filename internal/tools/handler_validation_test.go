@@ -285,6 +285,34 @@ func TestMessageForwardHandlerValidation(t *testing.T) {
 	}
 }
 
+// TestJoinChatHandlerValidation covers the input-validation layer of
+// JoinChatHandler.handle. Client is nil — safe because the empty-chat case
+// returns before any Telegram API call.
+func TestJoinChatHandlerValidation(t *testing.T) {
+	h := &JoinChatHandler{}
+	ctx := context.Background()
+
+	errRes, _, err := h.handle(ctx, nil, JoinChatInput{Chat: "  "})
+	require.NoError(t, err)
+	require.NotNil(t, errRes)
+	require.True(t, errRes.IsError)
+	assert.Contains(t, toolResultText(errRes), "chat is required")
+}
+
+// TestLeaveChatHandlerValidation covers the input-validation layer of
+// LeaveChatHandler.handle. The empty-chat case returns before the destructive
+// confirmation, so a nil client/session is safe.
+func TestLeaveChatHandlerValidation(t *testing.T) {
+	h := &LeaveChatHandler{}
+	ctx := context.Background()
+
+	errRes, _, err := h.handle(ctx, nil, LeaveChatInput{Chat: ""})
+	require.NoError(t, err)
+	require.NotNil(t, errRes)
+	require.True(t, errRes.IsError)
+	assert.Contains(t, toolResultText(errRes), "chat is required")
+}
+
 // TestMessageContextGetHandlerValidation covers the validation paths of
 // MessageContextGetHandler.handle. Provider is nil — safe because every case
 // returns before a provider call.

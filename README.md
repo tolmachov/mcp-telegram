@@ -100,7 +100,7 @@ Set environment variables in your `.env` file or pass them via `--env`.
 
 ## Available Tools
 
-19 tools exposed to MCP clients. Messages are identified by opaque string
+22 tools exposed to MCP clients. Messages are identified by opaque string
 handles (`"42"` for regular, `"s:42"` for scheduled) — copy them back
 verbatim from tool outputs to follow-up calls, never parse or construct
 them manually.
@@ -119,6 +119,9 @@ them manually.
 | `EditMessage` | Edit a message; for scheduled handles, `schedule_at` reschedules delivery in the same call |
 | `DeleteMessage` | Delete a message; `"s:<id>"` handles cancel pending scheduled messages |
 | `ForwardMessage` | Forward a delivered message (scheduled handles are rejected) |
+| `SetReaction` | Set or clear your emoji reactions on a message (empty list clears) |
+| `JoinChat` | Join a channel/group/supergroup by @username, numeric ID, or invite link (`t.me/+hash`) |
+| `LeaveChat` | Leave a channel/group/supergroup by @username or numeric ID (asks for confirmation) |
 | `ResolveMessageLink` | Parse `t.me` / `tg://` message links into `chat_id`, `message_id`, and `topic_message_id` for forum links |
 | `MarkAsRead` | Mark one or more chats as read |
 | `BackupMessages` | Export messages to a text file (idempotent; overwrites target) |
