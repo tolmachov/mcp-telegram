@@ -200,6 +200,46 @@ func TestMessageDeleteHandlerValidation(t *testing.T) {
 	}
 }
 
+// TestSetReactionHandlerValidation covers the input-validation layer of
+// MessageReactionHandler.handle. Client is nil — safe because every test case
+// returns before any Telegram API call.
+func TestSetReactionHandlerValidation(t *testing.T) {
+	h := &MessageReactionHandler{}
+	ctx := context.Background()
+
+	cases := []struct {
+		name        string
+		in          SetReactionInput
+		wantErrPart string
+	}{
+		{
+			name:        "zero chat_id",
+			in:          SetReactionInput{MessageID: "42", Emojis: []string{"👍"}},
+			wantErrPart: "chat_id is required",
+		},
+		{
+			name:        "invalid message_id",
+			in:          SetReactionInput{ChatID: 1, MessageID: "abc"},
+			wantErrPart: "invalid message_id",
+		},
+		{
+			name:        "scheduled handle rejected",
+			in:          SetReactionInput{ChatID: 1, MessageID: "s:42", Emojis: []string{"👍"}},
+			wantErrPart: "cannot react to a scheduled message",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			errRes, _, err := h.handle(ctx, nil, tc.in)
+			require.NoError(t, err)
+			require.NotNil(t, errRes)
+			require.True(t, errRes.IsError)
+			assert.Contains(t, toolResultText(errRes), tc.wantErrPart)
+		})
+	}
+}
+
 // TestMessageForwardHandlerValidation covers the input-validation layer of
 // MessageForwardHandler.handle. Client is nil — safe because every test case
 // returns before any Telegram API call.
