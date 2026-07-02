@@ -9,9 +9,11 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/completion"
@@ -58,6 +60,7 @@ type Options struct {
 	MediaMaxBytes  int
 	TGRateLimitRPS int           // 0 → use messages.DefaultRateLimitRPS
 	PinnedRefresh  time.Duration // 0 → disable pinned-chat background watcher
+	Variant        string        // "" → expose all SEP-2053 variants; else pin one (full|compact|research)
 	Stdin          io.Reader
 	Stdout         io.Writer
 	ErrOut         io.Writer
@@ -72,6 +75,7 @@ type Server struct {
 	mediaMaxBytes  int
 	tgRateLimitRPS int
 	pinnedRefresh  time.Duration
+	variant        string
 	stdin          io.Reader
 	stdout         io.Writer
 	errOut         io.Writer
@@ -87,6 +91,9 @@ type Server struct {
 func New(opts Options) (*Server, error) {
 	if opts.Config == nil {
 		return nil, fmt.Errorf("server.New: Options.Config is required")
+	}
+	if !validVariant(opts.Variant) {
+		return nil, fmt.Errorf("server.New: unknown variant %q; expected one of: %s (or empty for all)", opts.Variant, strings.Join(variantIDs(), ", "))
 	}
 	if opts.Stdin == nil {
 		opts.Stdin = os.Stdin
@@ -110,6 +117,7 @@ func New(opts Options) (*Server, error) {
 		mediaMaxBytes:  opts.MediaMaxBytes,
 		tgRateLimitRPS: opts.TGRateLimitRPS,
 		pinnedRefresh:  opts.PinnedRefresh,
+		variant:        opts.Variant,
 		stdin:          opts.Stdin,
 		stdout:         opts.Stdout,
 		errOut:         opts.ErrOut,
@@ -182,16 +190,14 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) runHappy(ctx context.Context, client *telegram.Client) error {
-	mcpServer := mcp.NewServer(
-		&mcp.Implementation{Name: "mcp-telegram", Version: s.version},
-		&mcp.ServerOptions{
-			Instructions: happyInstructions,
-			Logger:       s.logger,
-			// Suggest chat titles/usernames/ids for prompt arguments and the
-			// chat resource template as the user types.
-			CompletionHandler: completion.Handler(client.API()),
-		},
-	)
+	impl := &mcp.Implementation{Name: "mcp-telegram", Version: s.version}
+	serverOpts := &mcp.ServerOptions{
+		Instructions: happyInstructions,
+		Logger:       s.logger,
+		// Suggest chat titles/usernames/ids for prompt arguments and the
+		// chat resource template as the user types.
+		CompletionHandler: completion.Handler(client.API()),
+	}
 
 	// The RPS ceiling is configurable (0 → messages.DefaultRateLimitRPS) so
 	// operators can loosen it when tools bottleneck on the shared limiter.
@@ -203,73 +209,136 @@ func (s *Server) runHappy(ctx context.Context, client *telegram.Client) error {
 	// reuses an already-loaded listing instead of re-paginating every dialog.
 	chatsCache := tools.NewChatsCache(client.API())
 
-	tools.RegisterTools(mcpServer, []tools.Handler{
-		tools.NewMeGetHandler(client.API()),
-		tools.NewChatsGetHandler(chatsCache),
-		tools.NewChatsSearchHandler(client.API(), chatsCache),
-		tools.NewChatInfoGetHandler(client.API()),
-		tools.NewMessagesGetHandler(msgProvider),
-		tools.NewMessagesSearchHandler(msgProvider),
-		tools.NewMessagesSearchGlobalHandler(msgProvider),
-		tools.NewMessageContextGetHandler(msgProvider),
-		tools.NewGetRepliesHandler(msgProvider),
-		tools.NewGetForumTopicsHandler(msgProvider),
-		tools.NewMessageSendHandler(client.API()),
-		tools.NewMessageReadHandler(client.API()),
-		tools.NewMessageEditHandler(client.API()),
-		tools.NewMessageDeleteHandler(client.API()),
-		tools.NewMessageForwardHandler(client.API()),
-		tools.NewSetReactionHandler(client.API()),
-		tools.NewJoinChatHandler(client.API()),
-		tools.NewLeaveChatHandler(client.API()),
-		tools.NewUsernameResolveHandler(client.API()),
-		tools.NewMessageLinkResolveHandler(client.API()),
-		tools.NewMessageBackupHandler(client.API(), msgProvider, s.allowedPaths),
-		tools.NewChatMuteHandler(client.API()),
-		tools.NewChatSummarizeHandler(msgProvider, s.summarizeCfg),
-		tools.NewMediaGetHandler(client.API(), s.mediaMaxBytes),
-		tools.NewGetFoldersHandler(client.API()),
-		tools.NewCreateFolderHandler(client.API()),
-		tools.NewDeleteFolderHandler(client.API()),
-		tools.NewAddChatsToFolderHandler(client.API()),
-		tools.NewRemoveChatsFromFolderHandler(client.API()),
-	})
+	fullHandlers, researchHandlers := s.buildHandlers(client.API(), msgProvider, chatsCache)
 
-	resources.RegisterResources(mcpServer, []resources.ResourceHandler{
-		resources.NewMeHandler(client.API()),
-		resources.NewChatsHandler(client.API()),
-	})
-	resources.RegisterChatTemplate(mcpServer, client.API())
+	// Resources, chat template, and prompts are read-only and identical across
+	// variants, so register them on every inner server through one closure.
+	wire := func(srv *mcp.Server) {
+		resources.RegisterResources(srv, []resources.ResourceHandler{
+			resources.NewMeHandler(client.API()),
+			resources.NewChatsHandler(client.API()),
+		})
+		resources.RegisterChatTemplate(srv, client.API())
+		prompts.Register(srv)
+	}
 
-	prompts.Register(mcpServer)
-
-	// The SDK has no BeforeListResources hook, so the pinned-chat set is
-	// refreshed by a 30s poller. list_changed only fires when the set
-	// actually changes, so the ticker is safe to run on a short interval.
-	pinnedProvider := resources.NewPinnedChatsProvider(client.API(), msgProvider, mcpServer, s.logger)
-	pinnedDone := pinnedProvider.WatchInBackground(ctx, s.pinnedRefresh)
-
-	runErr := mcpServer.Run(ctx, &mcp.IOTransport{
+	transport := &mcp.IOTransport{
 		Reader: io.NopCloser(s.stdin),
 		Writer: nopWriteCloser{s.stdout},
-	})
+	}
+
+	// pinnedServers are the inner servers the pinned-chat watcher mirrors its
+	// resource set onto; run is the serve loop. With no --variant override we
+	// expose every variant via the SEP-2053 proxy and mirror pinned resources
+	// onto all of them (one poller). With an override we expose just that
+	// variant as a plain server.
+	var pinnedServers []*mcp.Server
+	var run func() error
+	if s.variant == "" {
+		vs, inners := buildVariantsServer(impl, serverOpts, fullHandlers, researchHandlers, wire, s.logger)
+		pinnedServers = inners
+		run = func() error { return vs.Run(ctx, transport) }
+		// The variants proxy cannot forward async resources/list_changed
+		// notifications (they fire from the watcher goroutine on a background
+		// context with no front session to redirect to — a documented library
+		// limitation). Pinned resources are still exposed on every variant and
+		// refreshed by the poller, so clients see the updated set on their next
+		// resources/list; only proactive change-notifications are unavailable.
+		// Pin a single --variant to restore live notifications.
+		s.logger.Info("multi-variant mode: pinned-chat resources are exposed on every variant and refreshed by one poller, but live resources/list_changed notifications are not delivered through the variants proxy; pin a single --variant for live updates")
+	} else {
+		d, ok := defForVariant(s.variant)
+		if !ok {
+			// Unreachable: New rejects unknown non-empty variants, and Server is
+			// only constructible through New. Fail loudly rather than silently
+			// falling back to the zero-value mode if that invariant is ever broken.
+			return fmt.Errorf("runHappy: variant %q not found in table (should have been rejected by New)", s.variant)
+		}
+		srv := newInnerForMode(impl, serverOpts, fullHandlers, researchHandlers, d.mode, wire, s.logger)
+		pinnedServers = []*mcp.Server{srv}
+		run = func() error { return srv.Run(ctx, transport) }
+	}
+
+	// The SDK has no BeforeListResources hook, so the pinned-chat set is
+	// refreshed by a periodic poller (default 30s, --pinned-refresh-seconds).
+	// list_changed only fires when the set actually changes, so the ticker is
+	// safe to run on a short interval. The watcher runs on watchCtx, a child of
+	// ctx we cancel as soon as run() returns: the MCP host normally shuts us down
+	// by closing stdin, which unblocks run() *without* canceling ctx, so without
+	// this the watcher would never see Done() and every clean disconnect would
+	// hit the 5s abandon timeout below.
+	watchCtx, cancelWatch := context.WithCancel(ctx)
+	pinnedProvider := resources.NewPinnedChatsProvider(client.API(), msgProvider, s.logger, pinnedServers...)
+	pinnedDone := pinnedProvider.WatchInBackground(watchCtx, s.pinnedRefresh)
+
+	runErr := run()
+	cancelWatch()
 
 	// Wait for the pinned-chat watcher to exit before returning, so its
 	// goroutine cannot race with server teardown while mid-way through
-	// AddResource/RemoveResources. WatchInBackground closes pinnedDone on
-	// parent-ctx cancellation; the timeout guards against a wedged provider
-	// holding up shutdown indefinitely.
+	// AddResource/RemoveResources. cancelWatch above stops it deterministically;
+	// the timeout only guards against a genuinely wedged provider (e.g. blocked
+	// in a Telegram call) holding up shutdown indefinitely. If it ever fires we
+	// are abandoning a live goroutine that will then touch a torn-down server —
+	// a real correctness hazard, so it logs at Error, not Warn.
 	if pinnedDone != nil {
 		select {
 		case <-pinnedDone:
 		case <-time.After(5 * time.Second):
-			s.logger.Warn("pinned-chat watcher did not exit in 5s; abandoning", "pinned_refresh", s.pinnedRefresh)
+			s.logger.Error("pinned-chat watcher did not exit in 5s; abandoning", "pinned_refresh", s.pinnedRefresh)
 		}
 	}
 	if runErr != nil {
 		return fmt.Errorf("running MCP server: %w", runErr)
 	}
 	return nil
+}
+
+// buildHandlers constructs every tool handler once and returns the full set and
+// the read-only research subset. The same handler instances are shared: they
+// carry no per-server state, so registering one on several inner servers is
+// safe. research holds tools that only read Telegram (search, fetch, summarize,
+// export); the remaining 13 mutate state (send, edit, delete, forward, react,
+// mark-as-read, join/leave, mute, and the four folder edits) and are excluded
+// from the research variant.
+func (s *Server) buildHandlers(api *tg.Client, msgProvider *messages.Provider, chatsCache *tools.ChatsCache) (full, research []tools.Handler) {
+	research = []tools.Handler{
+		tools.NewMeGetHandler(api),
+		tools.NewChatsGetHandler(chatsCache),
+		tools.NewChatsSearchHandler(api, chatsCache),
+		tools.NewChatInfoGetHandler(api),
+		tools.NewMessagesGetHandler(msgProvider),
+		tools.NewMessagesSearchHandler(msgProvider),
+		tools.NewMessagesSearchGlobalHandler(msgProvider),
+		tools.NewMessageContextGetHandler(msgProvider),
+		tools.NewGetRepliesHandler(msgProvider),
+		tools.NewGetForumTopicsHandler(msgProvider),
+		tools.NewUsernameResolveHandler(api),
+		tools.NewMessageLinkResolveHandler(api),
+		tools.NewMessageBackupHandler(api, msgProvider, s.allowedPaths),
+		tools.NewChatSummarizeHandler(msgProvider, s.summarizeCfg),
+		tools.NewMediaGetHandler(api, s.mediaMaxBytes),
+		tools.NewGetFoldersHandler(api),
+	}
+	mutating := []tools.Handler{
+		tools.NewMessageSendHandler(api),
+		tools.NewMessageReadHandler(api),
+		tools.NewMessageEditHandler(api),
+		tools.NewMessageDeleteHandler(api),
+		tools.NewMessageForwardHandler(api),
+		tools.NewSetReactionHandler(api),
+		tools.NewJoinChatHandler(api),
+		tools.NewLeaveChatHandler(api),
+		tools.NewChatMuteHandler(api),
+		tools.NewCreateFolderHandler(api),
+		tools.NewDeleteFolderHandler(api),
+		tools.NewAddChatsToFolderHandler(api),
+		tools.NewRemoveChatsFromFolderHandler(api),
+	}
+	full = make([]tools.Handler, 0, len(research)+len(mutating))
+	full = append(full, research...)
+	full = append(full, mutating...)
+	return full, research
 }
 
 // replyInitError reads newline-delimited JSON-RPC frames from stdin until it

@@ -63,6 +63,7 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					flags.TGRateLimitRPSFlag(),
 					flags.PinnedRefreshSecsFlag(),
 					flags.FloodWaitMaxSecsFlag(),
+					flags.VariantFlag(),
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					// Credential validation is intentionally NOT performed here.
@@ -107,6 +108,7 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 						MediaMaxBytes:  cmd.Int(flags.MediaMaxBytes),
 						TGRateLimitRPS: cmd.Int(flags.TGRateLimitRPS),
 						PinnedRefresh:  time.Duration(cmd.Int(flags.PinnedRefreshSecs)) * time.Second,
+						Variant:        cmd.String(flags.Variant),
 						Stdin:          cmd.Root().Reader,
 						Stdout:         cmd.Root().Writer,
 						ErrOut:         cmd.Root().ErrWriter,

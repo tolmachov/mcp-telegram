@@ -34,6 +34,7 @@ const (
 	TGRateLimitRPS       = "tg-rate-limit-rps"
 	PinnedRefreshSecs    = "pinned-refresh-seconds"
 	FloodWaitMaxSecs     = "flood-wait-max-seconds"
+	Variant              = "variant"
 )
 
 // DefaultPinnedRefreshSeconds is the default polling interval for the
@@ -180,5 +181,18 @@ func FloodWaitMaxSecsFlag() *cli.IntFlag {
 		Value:   int(tgclient.DefaultFloodWaitMaxWait / time.Second),
 		Usage:   "Maximum seconds to wait out a Telegram FLOOD_WAIT before failing fast with a retry-after hint. Keep it below your MCP client's tool-call timeout (Claude Desktop cancels at ~240s) — waiting longer just makes the client time out instead. Raise only for headless/automation runs with no such timeout.",
 		Sources: cli.EnvVars("TELEGRAM_FLOOD_WAIT_MAX_SECONDS"),
+	}
+}
+
+// VariantFlag selects a single SEP-2053 server variant to expose. Empty (the
+// default) exposes all variants and lets the client pick via hints; clients
+// that don't support variants get the full set. Set it to pin one variant for
+// a client that can't negotiate (e.g. --variant research for a read-only bot).
+// The value is validated in server.New.
+func VariantFlag() *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:    Variant,
+		Usage:   "Expose only one server variant: 'full' (all tools), 'compact' (all tools, short descriptions), or 'research' (read-only subset). Empty exposes all three and lets the client choose.",
+		Sources: cli.EnvVars("TELEGRAM_VARIANT"),
 	}
 }

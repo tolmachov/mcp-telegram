@@ -137,6 +137,37 @@ them manually.
 | `AddChatsToFolder` | Add chats/groups/channels to a folder by ID (@username or numeric ID) |
 | `RemoveChatsFromFolder` | Remove chats/groups/channels from a folder by ID |
 
+## Server Variants
+
+The server implements [experimental server variants](https://github.com/modelcontextprotocol/experimental-ext-variants)
+(SEP-2053): one server that offers several selectable capability sets. A client
+sends hints during `initialize`, the server ranks the variants, and the client
+picks one. Clients that don't understand the extension transparently get the
+`full` variant, so nothing changes for them.
+
+| Variant | Status | Tools | For |
+|---------|--------|-------|-----|
+| `full` | stable (default) | all 29, full descriptions | interactive research + administration with a human |
+| `compact` | stable | all 29, descriptions trimmed to the first sentence (~50% smaller) | autonomous agents on a tight context budget |
+| `research` | experimental | 16 Telegram read-only tools, descriptions trimmed like `compact` (search, fetch, summarize, export to a local file — no send/edit/delete/forward/react, mark-as-read, join/leave, mute, or folder edits) | read-heavy context-loading agents |
+
+Pin a single variant with `--variant` (or `TELEGRAM_VARIANT`) for clients that
+can't negotiate — e.g. `--variant research` exposes only the read-only subset:
+
+```bash
+mcp-telegram run --variant research
+```
+
+Leave it unset to expose all three and let the client choose.
+
+> **Note on pinned-chat resources.** In multi-variant mode (no `--variant`),
+> pinned-chat resources are exposed on every variant and kept fresh by a single
+> poller, but proactive `resources/list_changed` notifications are **not**
+> delivered — the variants proxy can't forward the background watcher's
+> notifications (an upstream library limitation). Clients pick up pin changes on
+> their next `resources/list`. Pin a single `--variant` to restore live
+> notifications.
+
 ## Available Resources
 
 | URI | Description |
@@ -146,7 +177,7 @@ them manually.
 | `telegram://chats/{id}/info` | Detailed info for any chat ID via resource template |
 | `telegram://chats/{id}/messages` | Last 100 messages from a pinned chat (dynamic resource, only for currently pinned chats) |
 
-Pinned chat resources are created dynamically for each pinned chat and refreshed in the background; clients will receive `resources/list_changed` when the set changes.
+Pinned chat resources are created dynamically for each pinned chat and refreshed in the background; clients receive `resources/list_changed` when the set changes (except in multi-variant mode — see the note under [Server Variants](#server-variants)).
 
 ## Available Prompts
 
