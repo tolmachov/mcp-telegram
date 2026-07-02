@@ -204,11 +204,75 @@ func TestExtractSubstring(t *testing.T) {
 // this to terminate FetchAll pagination without failing.
 func TestProcessHistoryNotModified(t *testing.T) {
 	p := NewProvider(nil)
-	result, err := p.processHistory(&tg.MessagesMessagesNotModified{}, &tg.InputPeerEmpty{})
+	result, err := p.processHistory(&tg.MessagesMessagesNotModified{}, &tg.InputPeerEmpty{}, 50)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.Empty(t, result.Messages)
 	assert.False(t, result.HasMore)
+}
+
+// TestProcessHistoryHasMore pins the page-fullness HasMore logic — the fix for
+// the old `len < Count` bug that reported HasMore=true on the final page of any
+// non-trivial chat (Count is the whole-history size, not the remaining count).
+func TestProcessHistoryHasMore(t *testing.T) {
+	p := NewProvider(nil)
+	peer := &tg.InputPeerEmpty{}
+
+	msgs := func(n int) []tg.MessageClass {
+		out := make([]tg.MessageClass, n)
+		for i := range out {
+			out[i] = &tg.Message{ID: i + 1, Message: "m"}
+		}
+		return out
+	}
+
+	t.Run("slice shorter than limit is the last page", func(t *testing.T) {
+		// The exact regression: a full chat of 1000 messages, last page of 37.
+		hist := &tg.MessagesMessagesSlice{Count: 1000, Messages: msgs(37)}
+		res, err := p.processHistory(hist, peer, 50)
+		require.NoError(t, err)
+		assert.False(t, res.HasMore, "a page shorter than the limit must end pagination")
+		assert.Equal(t, 37, res.Count)
+	})
+
+	t.Run("full slice signals more", func(t *testing.T) {
+		hist := &tg.MessagesMessagesSlice{Count: 1000, Messages: msgs(50)}
+		res, err := p.processHistory(hist, peer, 50)
+		require.NoError(t, err)
+		assert.True(t, res.HasMore, "a page filled to the limit implies more may follow")
+		assert.Equal(t, 50, res.NextID)
+	})
+
+	t.Run("complete MessagesMessages never has more", func(t *testing.T) {
+		// Telegram returns the non-slice type only when the whole history fits,
+		// so HasMore must be false even when the page equals the limit.
+		hist := &tg.MessagesMessages{Messages: msgs(50)}
+		res, err := p.processHistory(hist, peer, 50)
+		require.NoError(t, err)
+		assert.False(t, res.HasMore)
+	})
+
+	t.Run("channel messages gate on the limit too", func(t *testing.T) {
+		hist := &tg.MessagesChannelMessages{Count: 1000, Messages: msgs(10)}
+		res, err := p.processHistory(hist, peer, 50)
+		require.NoError(t, err)
+		assert.False(t, res.HasMore)
+	})
+
+	t.Run("full page of dropped messages does not report more", func(t *testing.T) {
+		// A page filled to the limit but entirely non-renderable (zero-ID
+		// messages here) yields zero results; the len>0 guard keeps HasMore
+		// false so callers don't chase an empty next page.
+		zero := []tg.MessageClass{
+			&tg.Message{ID: 0},
+			&tg.Message{ID: 0},
+		}
+		hist := &tg.MessagesMessagesSlice{Count: 1000, Messages: zero}
+		res, err := p.processHistory(hist, peer, 2)
+		require.NoError(t, err)
+		assert.Empty(t, res.Messages)
+		assert.False(t, res.HasMore)
+	})
 }
 
 // TestExtractMessagesDropsZeroID verifies that messages with ID <= 0 are

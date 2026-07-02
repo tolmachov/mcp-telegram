@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
 	"github.com/urfave/cli/v3"
@@ -12,12 +13,28 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/server"
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
+	"github.com/tolmachov/mcp-telegram/internal/tools"
 )
 
 // Version contains semantic version number of application.
 var Version = "dev"
 
 const serviceName = "mcp-telegram"
+
+// requireCredentials builds a Telegram Config from the shared api-id/api-hash
+// flags and fails if either is unset. login and logout both call it: unlike
+// `run`, they are interactive and must report missing credentials directly
+// instead of deferring to a JSON-RPC init error.
+func requireCredentials(cmd *cli.Command) (*tgclient.Config, error) {
+	cfg := &tgclient.Config{
+		APIID:   cmd.Int(flags.APIID),
+		APIHash: cmd.String(flags.APIHash),
+	}
+	if cfg.APIID == 0 || cfg.APIHash == "" {
+		return nil, fmt.Errorf("%s and %s are required (set via env, flags, or 'config set')", flags.EnvTelegramAPIID, flags.EnvTelegramAPIHash)
+	}
+	return cfg, nil
+}
 
 // New creates a new instance of application.
 func New(in io.Reader, out, errOut io.Writer) *cli.Command {
@@ -45,6 +62,7 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					flags.MediaMaxBytesFlag(),
 					flags.TGRateLimitRPSFlag(),
 					flags.PinnedRefreshSecsFlag(),
+					flags.FloodWaitMaxSecsFlag(),
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					// Credential validation is intentionally NOT performed here.
@@ -55,10 +73,24 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					// login/logout still pre-flight-validate because they are
 					// interactive commands without an MCP peer to report to.
 					cfg := &tgclient.Config{
-						APIID:   cmd.Int(flags.APIID),
-						APIHash: cmd.String(flags.APIHash),
+						APIID:            cmd.Int(flags.APIID),
+						APIHash:          cmd.String(flags.APIHash),
+						FloodWaitMaxWait: time.Duration(cmd.Int(flags.FloodWaitMaxSecs)) * time.Second,
 					}
 					allowedPaths := cmd.StringSlice(flags.AllowedPaths)
+					if len(allowedPaths) == 0 {
+						// No flag/env value: fall back to the OS backup directory,
+						// computed here (lazily) rather than at flag construction so
+						// help/version never touch the filesystem. If it can't be
+						// determined, leave the list empty — BackupMessages then
+						// reports "no allowed paths configured" with guidance.
+						if d, err := tools.DefaultBackupDir(); err == nil {
+							allowedPaths = []string{d}
+						} else {
+							slog.Warn("could not determine default backup directory; "+
+								"BackupMessages will require --allowed-paths", "err", err)
+						}
+					}
 					summarizeCfg := summarize.Config{
 						Provider:        summarize.ProviderName(cmd.String(flags.SummarizeProvider)),
 						Model:           cmd.String(flags.SummarizeModel),
@@ -95,18 +127,14 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					flags.PhoneFlag(),
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
-					phone := cmd.String(flags.Phone)
-					if phone == "" {
-						return fmt.Errorf("phone number is required")
+					// Phone is enforced by PhoneFlag(Required); credentials are
+					// pre-flight-validated here because login is interactive and
+					// has no MCP peer to report an init error to.
+					cfg, err := requireCredentials(cmd)
+					if err != nil {
+						return err
 					}
-					cfg := &tgclient.Config{
-						APIID:   cmd.Int(flags.APIID),
-						APIHash: cmd.String(flags.APIHash),
-					}
-					if cfg.APIID == 0 || cfg.APIHash == "" {
-						return fmt.Errorf("%s and %s are required (set via env, flags, or 'config set')", flags.EnvTelegramAPIID, flags.EnvTelegramAPIHash)
-					}
-					return tgclient.Login(ctx, cfg, phone)
+					return tgclient.Login(ctx, cfg, cmd.String(flags.Phone))
 				},
 			},
 			{
@@ -117,12 +145,9 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					flags.APIHashFlag(),
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
-					cfg := &tgclient.Config{
-						APIID:   cmd.Int(flags.APIID),
-						APIHash: cmd.String(flags.APIHash),
-					}
-					if cfg.APIID == 0 || cfg.APIHash == "" {
-						return fmt.Errorf("%s and %s are required (set via env, flags, or 'config set')", flags.EnvTelegramAPIID, flags.EnvTelegramAPIHash)
+					cfg, err := requireCredentials(cmd)
+					if err != nil {
+						return err
 					}
 					return tgclient.Logout(ctx, cfg)
 				},

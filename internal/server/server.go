@@ -36,6 +36,8 @@ const happyInstructions = "Use SearchChats or GetChats to find chat IDs before c
 // Surfaced as a JSON-RPC error on initialize so hosts render a connection
 // error — the alternative (a silently-green server with no tools) is the
 // failure mode this whole ceremony exists to avoid.
+//
+//nolint:gosec // G101: this is a user-facing help string naming the env vars, not a credential.
 const missingCredentialsMessage = "mcp-telegram is not configured: TELEGRAM_API_ID and TELEGRAM_API_HASH are required. Set them via environment variables, a .env file, CLI flags (--api-id / --api-hash), or `mcp-telegram config set api-id <id>` / `mcp-telegram config set api-hash <hash>`. You can obtain an API ID/Hash from https://my.telegram.org."
 
 const notLoggedInMessage = "mcp-telegram is not logged in to Telegram. Run `mcp-telegram login --phone <+countrycode…>` in a terminal to authenticate, then restart this MCP server."
@@ -127,10 +129,25 @@ func (s *Server) Run(ctx context.Context) error {
 		return s.replyInitError(ctx, missingCredentialsMessage)
 	}
 
+	// Surface flood waits to the logs in a way that makes the absorbed-vs-surfaced
+	// decision visible: waits under the configured max are slept out and retried;
+	// longer ones fail fast rather than blocking past the MCP client's tool-call
+	// timeout. Write tools then render that failure as a retry-after error (via
+	// floodWaitResult); read tools surface the raw wrapped error.
+	floodMaxWait := s.tgConfig.EffectiveFloodWaitMaxWait()
 	onFloodWait := func(_ context.Context, d time.Duration) {
-		s.logger.Warn("telegram flood-wait",
+		if d > floodMaxWait {
+			s.logger.Warn("telegram flood-wait exceeds max; failing fast",
+				"wait_seconds", d.Seconds(),
+				"max_wait_seconds", floodMaxWait.Seconds(),
+				"reason", "Telegram rate limit longer than the configured auto-wait; the call fails fast (write tools render a retry-after error) instead of blocking past the client timeout",
+			)
+			return
+		}
+		s.logger.Warn("telegram flood-wait; waiting it out",
 			"wait_seconds", d.Seconds(),
-			"reason", "Telegram rate limit; the request will retry automatically",
+			"max_wait_seconds", floodMaxWait.Seconds(),
+			"reason", "Telegram rate limit; the request will retry automatically after the wait",
 		)
 	}
 
@@ -182,10 +199,14 @@ func (s *Server) runHappy(ctx context.Context, client *telegram.Client) error {
 	// waiter wrapper reports via onFloodWait.
 	msgProvider := messages.NewProviderWithRate(client.API(), s.tgRateLimitRPS)
 
+	// One chat-list snapshot shared by GetChats and SearchChats so a search
+	// reuses an already-loaded listing instead of re-paginating every dialog.
+	chatsCache := tools.NewChatsCache(client.API())
+
 	tools.RegisterTools(mcpServer, []tools.Handler{
 		tools.NewMeGetHandler(client.API()),
-		tools.NewChatsGetHandler(client.API()),
-		tools.NewChatsSearchHandler(client.API()),
+		tools.NewChatsGetHandler(chatsCache),
+		tools.NewChatsSearchHandler(client.API(), chatsCache),
 		tools.NewChatInfoGetHandler(client.API()),
 		tools.NewMessagesGetHandler(msgProvider),
 		tools.NewMessagesSearchHandler(msgProvider),
@@ -245,7 +266,10 @@ func (s *Server) runHappy(ctx context.Context, client *telegram.Client) error {
 			s.logger.Warn("pinned-chat watcher did not exit in 5s; abandoning", "pinned_refresh", s.pinnedRefresh)
 		}
 	}
-	return runErr
+	if runErr != nil {
+		return fmt.Errorf("running MCP server: %w", runErr)
+	}
+	return nil
 }
 
 // replyInitError reads newline-delimited JSON-RPC frames from stdin until it

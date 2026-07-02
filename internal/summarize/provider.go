@@ -1,8 +1,13 @@
 package summarize
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
 )
 
 // Provider is an interface for LLM providers that can summarize text.
@@ -80,4 +85,58 @@ func errBodySnippet(body []byte) string {
 		return string(body)
 	}
 	return fmt.Sprintf("%s... (truncated %d bytes)", body[:errBodySnippetMax], len(body)-errBodySnippetMax)
+}
+
+// httpMaxResponseBytes bounds how much of a provider response body we read into
+// memory. Provider APIs occasionally return large HTML error pages; the limit
+// keeps a pathological response from bloating memory.
+const httpMaxResponseBytes = 10 << 20
+
+// postJSON marshals reqBody as JSON, POSTs it to url with Content-Type plus the
+// given headers, and unmarshals a 200 response into respBody. It is the shared
+// HTTP pipeline for the direct-LLM providers (anthropic/gemini/ollama), so
+// timeout-independent behaviour (status handling, body limits, error snippets)
+// lives in one place. providerName tags errors for attribution. A non-200
+// status becomes an error carrying a bounded snippet of the body; the
+// provider-specific inline-error check (some APIs report errors with HTTP 200)
+// stays in the caller, which inspects respBody after this returns nil.
+func postJSON(ctx context.Context, client *http.Client, providerName, url string, headers map[string]string, reqBody, respBody any) error {
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("marshaling request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("sending request: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Debug("summarize: response body close failed", "provider", providerName, "err", err)
+		}
+	}()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, httpMaxResponseBytes))
+	if err != nil {
+		return fmt.Errorf("reading response (status %d): %w", resp.StatusCode, err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s returned status %d: %s", providerName, resp.StatusCode, errBodySnippet(raw))
+	}
+
+	if err := json.Unmarshal(raw, respBody); err != nil {
+		return fmt.Errorf("unmarshaling response: %w", err)
+	}
+
+	return nil
 }

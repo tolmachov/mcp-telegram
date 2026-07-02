@@ -168,6 +168,23 @@ func TestResolvePeer(t *testing.T) {
 		assert.Contains(t, err.Error(), "ResolveUsername")
 	})
 
+	t.Run("CHAT_ID_INVALID from the basic-chat probe falls through to the friendly error", func(t *testing.T) {
+		// A bare channel/supergroup id with no known access_hash: channels
+		// falls through (CHANNEL_INVALID) and messages.getChats then rejects it
+		// with CHAT_ID_INVALID. That must not leak as a terminal error — the
+		// caller should get the actionable "resolve by @username" hint instead.
+		client := tg.NewClient(fakeInvoker{
+			chats: func([]int64) (tg.MessagesChatsClass, error) {
+				return nil, tgerr.New(400, "CHAT_ID_INVALID")
+			},
+		})
+
+		_, err := ResolvePeer(ctx, client, 1906423222)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ResolveUsername")
+		assert.NotContains(t, err.Error(), "CHAT_ID_INVALID", "raw MTProto code must not leak")
+	})
+
 	t.Run("known user without access_hash fails loudly and aborts the sweep", func(t *testing.T) {
 		client := tg.NewClient(fakeInvoker{
 			users: func([]tg.InputUserClass) ([]tg.UserClass, error) {

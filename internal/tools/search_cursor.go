@@ -1,11 +1,6 @@
 package tools
 
 import (
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"strings"
-
 	"github.com/tolmachov/mcp-telegram/internal/messages"
 )
 
@@ -28,29 +23,24 @@ type cursorEnvelope struct {
 	Msg     int               `json:"m"`
 }
 
-// cursorVersion is the current envelope schema version.
-const cursorVersion = 1
+func (e cursorEnvelope) cursorVersion() int { return e.Version }
+
+// cursorSchemaVersion is the current envelope schema version.
+const cursorSchemaVersion = 1
 
 // FormatGlobalSearchCursor renders a cursor as an opaque base64 string.
 // Invariant: ParseGlobalSearchCursor(FormatGlobalSearchCursor(c)) round-trips
 // exactly for every cursor returned by the provider.
 func FormatGlobalSearchCursor(c messages.GlobalSearchCursor) string {
 	env := cursorEnvelope{
-		Version: cursorVersion,
+		Version: cursorSchemaVersion,
 		Rate:    c.Rate,
 		Kind:    c.PeerKind,
 		ID:      c.PeerID,
 		Hash:    c.AccessHash,
 		Msg:     c.MsgID,
 	}
-	payload, err := json.Marshal(env)
-	if err != nil {
-		// cursorEnvelope is a fixed struct of ints and strings; json.Marshal
-		// of it cannot fail. If this ever triggers, something is very wrong
-		// and silently returning an empty cursor would mask the bug.
-		panic(fmt.Sprintf("marshaling cursor envelope: %v", err))
-	}
-	return base64.RawURLEncoding.EncodeToString(payload)
+	return encodeCursor(env)
 }
 
 // ParseGlobalSearchCursor decodes an opaque cursor string produced by a
@@ -60,36 +50,9 @@ func FormatGlobalSearchCursor(c messages.GlobalSearchCursor) string {
 // Together they ensure the LLM gets a descriptive error instead of a silent
 // bad-pagination loop.
 func ParseGlobalSearchCursor(s string) (*messages.GlobalSearchCursor, error) {
-	if s == "" {
-		return nil, fmt.Errorf("cursor is empty")
-	}
-	if s != strings.TrimSpace(s) {
-		return nil, fmt.Errorf("cursor contains whitespace")
-	}
-
-	raw, err := base64.RawURLEncoding.DecodeString(s)
+	env, err := decodeCursor[cursorEnvelope](s, cursorSchemaVersion)
 	if err != nil {
-		return nil, fmt.Errorf("cursor is not valid base64url: %w", err)
-	}
-
-	// We intentionally do NOT call dec.DisallowUnknownFields(): the Version
-	// field IS the schema-compat mechanism. Forward-compat is broken if the
-	// decoder rejects any unknown key before we get a chance to check the
-	// version — a future v2 cursor with a new field would otherwise fail
-	// with a generic JSON error instead of the helpful "newer than
-	// supported" hint below.
-	var env cursorEnvelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("cursor payload is not valid JSON: %w", err)
-	}
-
-	// Accept cursors at or below the current version. Future schema changes
-	// bump cursorVersion; older cursors remain parseable until an explicit
-	// migration removes them. Cursors claiming a higher version than we
-	// know about come from a newer server we cannot interpret — tell the
-	// caller to restart pagination rather than guessing.
-	if env.Version > cursorVersion {
-		return nil, fmt.Errorf("cursor version %d is newer than supported (%d); restart pagination without the offset_cursor", env.Version, cursorVersion)
+		return nil, err
 	}
 
 	// Delegate validation and construction to NewGlobalSearchCursor so the

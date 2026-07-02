@@ -1,0 +1,12 @@
+# Keep the build context small and free of secrets/artifacts.
+.git
+.github
+.gocache
+mcp-telegram
+*.txt
+.env
+.env.*
+!.env.example
+research/
+*.md
+!README.md

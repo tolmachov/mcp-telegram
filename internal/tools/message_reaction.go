@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -105,7 +104,7 @@ func (h *MessageReactionHandler) handle(ctx context.Context, req *mcp.CallToolRe
 			"message_id": in.MessageID,
 			"error":      err.Error(),
 		})
-		return errResult(fmt.Sprintf("Failed to set reaction: %v", err)), nil, nil
+		return telegramErrResult("set reaction", err), nil, nil
 	}
 
 	return nil, &SetReactionResult{

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/gotd/td/tgerr"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -161,6 +162,7 @@ func mcpLog(ctx context.Context, ss *mcp.ServerSession, level mcp.LoggingLevel, 
 func cryptoRandInt64() int64 {
 	var b [8]byte
 	_, _ = rand.Read(b[:]) // crypto/rand.Read never errors on supported platforms
+	//nolint:gosec // G115: intentional full-width uint64→int64 reinterpretation for a random id; every bit pattern is a valid id.
 	return int64(binary.LittleEndian.Uint64(b[:]))
 }
 
@@ -209,6 +211,58 @@ func errCannotOnScheduled(verb string) *mcp.CallToolResult {
 		"cannot %s a scheduled message: it has not been sent yet and only exists in Telegram's schedule queue. Wait until it is delivered, or cancel it via DeleteMessage and create a new regular message.",
 		verb,
 	))
+}
+
+// floodWaitResult detects a Telegram FLOOD_WAIT — including the form the
+// flood-wait middleware wraps when the wait exceeds its configured max
+// (tgerr.AsFloodWait unwraps the chain) — and renders a deterministic,
+// actionable error telling the caller exactly how long to wait. Returns
+// (nil, false) when err is not a flood wait. The action verb fits "Telegram
+// rate-limited this <action>", e.g. "join".
+//
+// FLOOD_WAIT here is an account-level limit (cumulative actions over a window,
+// not request rate), so a local rate limiter cannot prevent it — the only
+// remedy is to wait the reported duration and space the calls out, which the
+// message states so the model stops retry-spamming.
+func floodWaitResult(action string, err error) (*mcp.CallToolResult, bool) {
+	msg, ok := floodWaitMessage(action, err)
+	if !ok {
+		return nil, false
+	}
+	return errResult(msg), true
+}
+
+// floodWaitMessage returns the deterministic retry-after guidance for a
+// FLOOD_WAIT error, or ok=false when err is not a flood wait. Split out from
+// floodWaitResult so batch handlers (e.g. MarkAsRead) can embed the same text in
+// an aggregated result instead of a standalone error.
+func floodWaitMessage(action string, err error) (string, bool) {
+	d, ok := tgerr.AsFloodWait(err)
+	if !ok {
+		return "", false
+	}
+	d = d.Round(time.Second)
+	return fmt.Sprintf(
+		"Telegram rate-limited this %s: wait %s (%d seconds) before retrying. This is an account-level flood limit (cumulative actions, not request rate), so spacing out %s calls is the only way to avoid it — do not retry immediately.",
+		action, d, int(d/time.Second), action,
+	), true
+}
+
+// telegramErrResult renders a failed Telegram API call as a tool error,
+// preferring the deterministic FLOOD_WAIT message (floodWaitResult) when the
+// failure is a rate limit and falling back to a plain "Failed to <action>"
+// otherwise. Single-call write tools (SendMessage, ForwardMessage, SetReaction,
+// EditMessage, …) route their API errors through this so a FLOOD_WAIT never
+// reaches the model as a bare "rpc error 420" that invites an immediate retry.
+// Batch tools like MarkAsRead instead call floodWaitMessage directly so they can
+// stop the batch early and still emit a structured result. The action verb fits
+// both "Telegram rate-limited this <action>" and "Failed to <action>", e.g.
+// "send message".
+func telegramErrResult(action string, err error) *mcp.CallToolResult {
+	if res, ok := floodWaitResult(action, err); ok {
+		return res
+	}
+	return errResult(fmt.Sprintf("Failed to %s: %v", action, err))
 }
 
 // errResolvePeer wraps a peer-resolution failure with an actionable hint.
@@ -279,7 +333,7 @@ func confirmDestructive(ctx context.Context, req *mcp.CallToolRequest, message s
 			"action": "elicit_failed",
 			"error":  err.Error(),
 		})
-		return false, err
+		return false, fmt.Errorf("eliciting confirmation: %w", err)
 	}
 	if result.Action != "accept" {
 		return false, nil
@@ -347,14 +401,14 @@ func rootsFromClient(ctx context.Context, ss *mcp.ServerSession) []string {
 func fileURIToPath(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("parsing file uri %q: %w", raw, err)
 	}
 	if u.Scheme != "file" {
 		return "", fmt.Errorf("unsupported uri scheme %q", u.Scheme)
 	}
 	p, err := url.PathUnescape(u.Path)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("unescaping file uri path %q: %w", u.Path, err)
 	}
 	// Windows file URIs carry drive letters in the path with a leading slash.
 	// Preserve UNC hosts and strip the synthetic leading slash only for drive

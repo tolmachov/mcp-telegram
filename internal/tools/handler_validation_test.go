@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -82,7 +81,7 @@ func TestMessageSendHandlerValidation(t *testing.T) {
 }
 
 func TestChatsSearchHandlerWhitespaceValidation(t *testing.T) {
-	h := NewChatsSearchHandler(nil)
+	h := NewChatsSearchHandler(nil, nil)
 	ctx := context.Background()
 
 	errRes, out, err := h.handle(ctx, nil, SearchChatsInput{Query: "   "})
@@ -447,66 +446,19 @@ func TestMarkAsReadHandlerValidation(t *testing.T) {
 }
 
 // TestBackupMessagesDateInversionValidation checks that BackupMessages rejects
-// an inverted date window before making any Telegram API call. The to-date
-// normalisation that adds 24h to bare dates must not hide the inversion.
+// an inverted date window before making any Telegram API call. to_date is
+// exclusive, so an equal or earlier to_date yields an empty window.
 func TestBackupMessagesDateInversionValidation(t *testing.T) {
 	h := NewMessageBackupHandler(nil, nil, nil)
 	ctx := context.Background()
 
-	// from=2026-04-11 (00:00 UTC) is after normalised to=2026-04-09 (+24h → 2026-04-10 00:00 UTC).
 	errRes, _, err := h.handle(ctx, nil, BackupMessagesInput{
-		ChatID: 1,
-		From:   "2026-04-11",
-		To:     "2026-04-09",
+		ChatID:   1,
+		FromDate: "2026-04-11",
+		ToDate:   "2026-04-09",
 	})
 	require.NoError(t, err)
 	require.NotNil(t, errRes)
 	require.True(t, errRes.IsError)
-	assert.Contains(t, toolResultText(errRes), "after")
-}
-
-func TestNormalizeInclusiveUpperDate(t *testing.T) {
-	dayStart := time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC)
-	exact := time.Date(2026, 4, 10, 15, 30, 0, 0, time.UTC)
-
-	tests := []struct {
-		name   string
-		raw    string
-		parsed time.Time
-		want   time.Time
-	}{
-		{
-			name:   "date only advances to midnight next day",
-			raw:    "2026-04-10",
-			parsed: dayStart,
-			want:   dayStart.Add(24 * time.Hour),
-		},
-		{
-			name:   "date-time stays exact",
-			raw:    "2026-04-10 15:30:00",
-			parsed: exact,
-			want:   exact,
-		},
-		{
-			name:   "rfc3339 stays exact",
-			raw:    "2026-04-10T15:30:00Z",
-			parsed: exact,
-			want:   exact,
-		},
-		{
-			// The zero-time early-return path guards against callers passing an
-			// unset time; advancing a zero time would produce a nonsense value.
-			name:   "zero time is passed through unchanged",
-			raw:    "2026-04-10",
-			parsed: time.Time{},
-			want:   time.Time{},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := normalizeInclusiveUpperDate(tt.raw, tt.parsed)
-			assert.Equal(t, tt.want, got)
-		})
-	}
+	assert.Contains(t, toolResultText(errRes), "empty")
 }

@@ -36,6 +36,12 @@ linters:
         - .WithMessage(
         - .WithMessagef(
         - .WithStack(
+        # Returning ctx.Err() verbatim is idiomatic — callers match it with
+        # errors.Is(err, context.Canceled/DeadlineExceeded), and wrapping would
+        # only obscure that. Likewise a bare io.Writer.Write error inside a
+        # custom writer carries no useful extra context.
+        - .Err(
+        - .Write(
       ignore-package-globs:
         - github.com/tolmachov/mcp-telegram/*
 
@@ -45,6 +51,21 @@ linters:
 
     misspell:
       locale: US
+      # The codebase is written in British English, and "cancelled" is also the
+      # literal MCP protocol method name (notifications/cancelled). Whitelist
+      # those spellings so misspell still catches genuine typos.
+      ignore-rules:
+        - behaviour
+        - cancelled
+        - honours
+        - marshalled
+        - marshalling
+        - minimise
+        - recognised
+        - sanitise
+        - serialises
+        - serialising
+        - unrecognised
 
 issues:
   max-issues-per-linter: 0

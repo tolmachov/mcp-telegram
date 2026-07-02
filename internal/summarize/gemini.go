@@ -1,12 +1,8 @@
 package summarize
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -81,41 +77,12 @@ func (p *GeminiProvider) Summarize(ctx context.Context, prompt string) (string, 
 		},
 	}
 
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("marshaling request: %w", err)
-	}
-
 	url := fmt.Sprintf(geminiAPIURLFormat, p.model)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("creating request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-goog-api-key", p.apiKey)
-
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("sending request: %w", err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			slog.Debug("gemini: response body close failed", "err", err)
-		}
-	}()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
-	if err != nil {
-		return "", fmt.Errorf("reading response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("gemini returned status %d: %s", resp.StatusCode, errBodySnippet(respBody))
-	}
-
 	var geminiResp geminiResponse
-	if err := json.Unmarshal(respBody, &geminiResp); err != nil {
-		return "", fmt.Errorf("unmarshaling response: %w", err)
+	if err := postJSON(ctx, p.client, "gemini", url, map[string]string{
+		"x-goog-api-key": p.apiKey,
+	}, reqBody, &geminiResp); err != nil {
+		return "", err
 	}
 
 	if geminiResp.Error != nil {

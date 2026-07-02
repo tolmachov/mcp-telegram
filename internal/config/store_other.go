@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -65,51 +64,8 @@ func (s *fileStore) save(m map[string]string) error {
 	if err != nil {
 		return fmt.Errorf("encoding config: %w", err)
 	}
-
-	// Write-then-rename makes the update atomic: a crash (or SIGKILL) in
-	// the middle of the write leaves either the old file fully intact or
-	// the new one fully written — never a truncated mix. The temp file
-	// lives in the same directory so os.Rename is a single inode op on
-	// POSIX (no cross-device copy).
-	dir := filepath.Dir(s.path)
-	tmp, err := os.CreateTemp(dir, ".config.*.json.tmp")
-	if err != nil {
-		return fmt.Errorf("creating temp config file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	// Best-effort cleanup if any subsequent step fails — the successful
-	// Rename path below re-names this file so the cleanup becomes a no-op.
-	defer func() {
-		// os.ErrNotExist is expected on the success path (rename consumed the file).
-		if err := os.Remove(tmpPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			slog.Debug("cleanup of temp config file failed", "path", tmpPath, "err", err)
-		}
-	}()
-
-	if err := tmp.Chmod(0o600); err != nil {
-		if cerr := tmp.Close(); cerr != nil {
-			slog.Debug("closing temp config file after chmod failure", "error", cerr)
-		}
-		return fmt.Errorf("setting temp config file permissions: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		if cerr := tmp.Close(); cerr != nil {
-			slog.Debug("closing temp config file after write failure", "error", cerr)
-		}
-		return fmt.Errorf("writing temp config file: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		if cerr := tmp.Close(); cerr != nil {
-			slog.Debug("closing temp config file after sync failure", "error", cerr)
-		}
-		return fmt.Errorf("syncing temp config file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("closing temp config file: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, s.path); err != nil {
-		return fmt.Errorf("renaming temp config file into place: %w", err)
+	if err := xdg.WriteFileAtomic(s.path, data, 0o600, ".config.*.json.tmp"); err != nil {
+		return fmt.Errorf("saving config: %w", err)
 	}
 	return nil
 }

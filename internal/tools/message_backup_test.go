@@ -86,7 +86,7 @@ func TestSanitizeFilename(t *testing.T) {
 func TestIsPathAllowed(t *testing.T) {
 	tmpDir := t.TempDir()
 	allowedDir := filepath.Join(tmpDir, "allowed")
-	err := os.MkdirAll(allowedDir, 0o755)
+	err := os.MkdirAll(allowedDir, 0o750)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -170,7 +170,7 @@ func TestIsPathAllowedSymlinkEscapes(t *testing.T) {
 	allowed := filepath.Join(root, "allowed")
 	outside := filepath.Join(root, "outside")
 	for _, d := range []string{allowed, outside} {
-		err := os.MkdirAll(d, 0o755)
+		err := os.MkdirAll(d, 0o750)
 		require.NoError(t, err)
 	}
 
@@ -207,6 +207,46 @@ func TestIsPathAllowedSymlinkEscapes(t *testing.T) {
 	// Case e: target equals the allowlist root (rel == ".").
 	err = isPathAllowed(allowed, []string{allowed})
 	assert.NoError(t, err)
+}
+
+// TestIsPathAllowedFailsClosedOnUnreadableAncestor pins the documented security
+// decision in resolveSymlinks: an EACCES while resolving an ancestor must
+// propagate as an error (fail closed), never silently reattach the unresolved
+// tail. A regression that "fixed" the spurious permission error by falling
+// through would reopen the symlink-behind-a-locked-dir bypass, and this test —
+// on both the target side and the allowlist side — would catch it.
+func TestIsPathAllowedFailsClosedOnUnreadableAncestor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission-bit semantics differ on Windows; sandbox is Unix-first")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses permission bits, so EACCES can't be provoked")
+	}
+
+	root := t.TempDir()
+	allowed := filepath.Join(root, "allowed")
+	locked := filepath.Join(allowed, "locked")
+	require.NoError(t, os.MkdirAll(locked, 0o750))
+	// Drop all permissions on `locked` so traversing into it yields EACCES.
+	require.NoError(t, os.Chmod(locked, 0o000))
+	// Restore search/exec bits so t.TempDir's recursive cleanup can descend.
+	// 0o750 (>0600) is required for a directory; safe here in test scaffolding.
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o750) }) //nolint:gosec // G302: directory needs exec bit
+
+	// Target side: the target lives behind the unreadable directory, so
+	// resolving it must error rather than pass the sandbox check.
+	target := filepath.Join(locked, "sub", "file.txt")
+	err := isPathAllowed(target, []string{allowed})
+	require.Error(t, err, "target behind an unreadable ancestor must not be allowed")
+	assert.Contains(t, err.Error(), "resolving target path")
+
+	// Allowlist side: an allowlist entry behind the unreadable directory must
+	// be skipped (not treated as a sandbox root), and with every entry skipped
+	// the caller gets the real "unresolvable" configuration error.
+	validTarget := filepath.Join(allowed, "ok.txt")
+	err = isPathAllowed(validTarget, []string{filepath.Join(locked, "subroot")})
+	require.Error(t, err, "unresolvable allowlist entry must not widen the sandbox")
+	assert.Contains(t, err.Error(), "unresolvable")
 }
 
 // TestParseDateTimezones pins the UTC-default semantics introduced with the

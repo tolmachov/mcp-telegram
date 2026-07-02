@@ -17,11 +17,14 @@ import (
 // ChatsSearchHandler handles the SearchChats tool.
 type ChatsSearchHandler struct {
 	client *tg.Client
+	cache  *ChatsCache
 }
 
-// NewChatsSearchHandler creates a new ChatsSearchHandler.
-func NewChatsSearchHandler(client *tg.Client) *ChatsSearchHandler {
-	return &ChatsSearchHandler{client: client}
+// NewChatsSearchHandler creates a new ChatsSearchHandler. It shares the chat
+// snapshot held by cache with GetChats, so a local search reuses an already
+// loaded listing instead of re-paginating every dialog.
+func NewChatsSearchHandler(client *tg.Client, cache *ChatsCache) *ChatsSearchHandler {
+	return &ChatsSearchHandler{client: client, cache: cache}
 }
 
 // SearchChatsInput is the input for the SearchChats tool.
@@ -30,10 +33,14 @@ type SearchChatsInput struct {
 	Limit int    `json:"limit,omitempty" jsonschema:"Maximum number of results to return (default: 10\\, max: 50)"`
 }
 
-// SearchResult represents a single search result with a match score.
+// SearchResult represents a single search result with a match distance.
+// Results are already sorted best-first; Distance is exposed for transparency.
 type SearchResult struct {
 	tgdata.ChatInfo
-	Score int `json:"score"` // Lower is a better match (Levenshtein distance)
+	// Distance is an edit-distance-style score where LOWER means a better
+	// match (0 is exact). Named "distance" rather than "score" so the model
+	// doesn't assume higher is better and re-rank against the intended order.
+	Distance int `json:"distance"`
 }
 
 // SearchResultsList represents the search results.
@@ -61,20 +68,24 @@ func (h *ChatsSearchHandler) handle(ctx context.Context, req *mcp.CallToolReques
 
 	limit := clampLimit(in.Limit, 10, 50)
 
-	// Get all user's chats for local fuzzy search first.
+	// Get all user's chats for local fuzzy search first. Reuse the shared
+	// snapshot (loading it once if cold) rather than re-listing every dialog.
 	onProgress := func(current int, message string) {
 		sendProgress(ctx, req, float64(current), 0, message)
 	}
-	chatsList, err := tgdata.GetChats(ctx, h.client, onProgress)
+	chats, _, truncated, err := h.cache.load(ctx, onProgress, false)
 	if err != nil {
 		return errResult(fmt.Sprintf("Failed to get chats: %v", err)), nil, nil
 	}
 
 	// Perform local fuzzy search first.
-	results := h.fuzzySearchLocal(query, chatsList.Chats, limit)
+	results := h.fuzzySearchLocal(query, chats, limit)
 
 	// Only search globally if we have room for more results.
-	var globalSearchWarning string
+	var warnings []string
+	if truncated {
+		warnings = append(warnings, truncatedChatsWarning)
+	}
 	if len(results) < limit {
 		globalResults, err := h.searchGlobal(ctx, query)
 		if err != nil {
@@ -83,7 +94,7 @@ func (h *ChatsSearchHandler) handle(ctx context.Context, req *mcp.CallToolReques
 				"query":  query,
 				"error":  err.Error(),
 			})
-			globalSearchWarning = "Global search failed; results may be incomplete (local matches only)."
+			warnings = append(warnings, "Global search failed; results may be incomplete (local matches only).")
 		} else if len(globalResults) > 0 {
 			results = h.addGlobalResults(query, results, globalResults, limit)
 		}
@@ -93,7 +104,7 @@ func (h *ChatsSearchHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		Query:   query,
 		Results: results,
 		Count:   len(results),
-		Warning: globalSearchWarning,
+		Warning: strings.Join(warnings, " "),
 	}, nil
 }
 
@@ -176,7 +187,7 @@ func (h *ChatsSearchHandler) fuzzySearchLocal(query string, chats []tgdata.ChatI
 				seen[chat.ID] = true
 				results = append(results, SearchResult{
 					ChatInfo: chat,
-					Score:    match.Distance,
+					Distance: match.Distance,
 				})
 			}
 		}
@@ -208,7 +219,7 @@ func (h *ChatsSearchHandler) addGlobalResults(query string, localResults []Searc
 			distance := fuzzy.LevenshteinDistance(queryLower, strings.ToLower(chat.Name))
 			results = append(results, SearchResult{
 				ChatInfo: chat,
-				Score:    distance,
+				Distance: distance,
 			})
 		}
 	}

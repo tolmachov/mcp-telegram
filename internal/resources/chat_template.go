@@ -13,14 +13,16 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
-// chatInfoTemplate parses telegram://chat/{chat_id}/info URIs to extract the
+// chatInfoTemplate parses telegram://chats/{chat_id}/info URIs to extract the
 // chat ID. The official Go SDK does not surface URI template variables to
 // resource handlers (the handler receives only the raw URI), so we re-parse
 // here using the same template library the SDK uses internally for matching.
-var chatInfoTemplate = uritemplate.MustNew("telegram://chat/{chat_id}/info")
+// The path sits under the telegram://chats collection and mirrors the pinned
+// message resources at telegram://chats/{id}/messages.
+var chatInfoTemplate = uritemplate.MustNew("telegram://chats/{chat_id}/info")
 
 // RegisterChatTemplate registers a URI template that exposes any chat as a
-// browsable MCP resource at telegram://chat/{id}/info. Per MCP spec, resource
+// browsable MCP resource at telegram://chats/{id}/info. Per MCP spec, resource
 // templates let one registration serve many URIs — instead of registering one
 // resource per chat, the host can construct any URI matching the template and
 // the server fetches the data on demand.
@@ -61,11 +63,11 @@ func RegisterChatTemplate(s *mcp.Server, client *tg.Client) {
 	})
 }
 
-// parseChatInfoURI extracts the chat_id from a telegram://chat/{chat_id}/info URI.
+// parseChatInfoURI extracts the chat_id from a telegram://chats/{chat_id}/info URI.
 func parseChatInfoURI(uri string) (int64, error) {
 	match := chatInfoTemplate.Match(uri)
 	if match == nil {
-		return 0, fmt.Errorf("uri %q does not match telegram://chat/{chat_id}/info", uri)
+		return 0, fmt.Errorf("uri %q does not match telegram://chats/{chat_id}/info", uri)
 	}
 	chatIDStr := match.Get("chat_id").String()
 	chatID, err := strconv.ParseInt(chatIDStr, 10, 64)

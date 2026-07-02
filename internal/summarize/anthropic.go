@@ -1,12 +1,8 @@
 package summarize
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -75,41 +71,12 @@ func (p *AnthropicProvider) Summarize(ctx context.Context, prompt string) (strin
 		},
 	}
 
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("marshaling request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, anthropicAPIURL, bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("creating request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", p.apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("sending request: %w", err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			slog.Debug("anthropic: response body close failed", "err", err)
-		}
-	}()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
-	if err != nil {
-		return "", fmt.Errorf("reading response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("anthropic returned status %d: %s", resp.StatusCode, errBodySnippet(respBody))
-	}
-
 	var anthropicResp anthropicResponse
-	if err := json.Unmarshal(respBody, &anthropicResp); err != nil {
-		return "", fmt.Errorf("unmarshaling response: %w", err)
+	if err := postJSON(ctx, p.client, "anthropic", anthropicAPIURL, map[string]string{
+		"x-api-key":         p.apiKey,
+		"anthropic-version": "2023-06-01",
+	}, reqBody, &anthropicResp); err != nil {
+		return "", err
 	}
 
 	if anthropicResp.Error != nil {

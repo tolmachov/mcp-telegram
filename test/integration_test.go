@@ -1,5 +1,13 @@
 //go:build integration
 
+// Package test holds the end-to-end integration suite. It is deliberately a
+// cross-implementation interop test: the server under test speaks the official
+// modelcontextprotocol/go-sdk (as production does), while the client driving it
+// is mark3labs/mcp-go. Exercising two independent MCP implementations against
+// each other over a real stdio pipe catches wire-level incompatibilities a
+// same-SDK test would mask — which is why mark3labs/mcp-go remains a dependency
+// even though no production code imports it. Every test skips (rather than
+// fails) when its required TEST_* env var or Telegram credentials are absent.
 package test
 
 import (
@@ -53,7 +61,10 @@ func init() {
 	// the io.Pipe-backed Initialize call hangs forever waiting for a
 	// reader that will never appear.
 	if err := godotenv.Load("../.env"); err != nil && !errors.Is(err, os.ErrNotExist) {
-		panic(fmt.Sprintf("failed to load .env file: %v", err))
+		// Warn instead of panic: a malformed or unreadable .env shouldn't abort
+		// the whole suite when credentials may still arrive via the environment
+		// or the secure store below. Tests skip themselves when config is absent.
+		_, _ = fmt.Fprintf(os.Stderr, "[test init] warning: failed to load .env file: %v\n", err)
 	}
 	store, err := config.NewStore()
 	if err != nil {
@@ -368,7 +379,7 @@ func TestPinnedChatResource(t *testing.T) {
 	resourcesResult, err := c.ListResources(ctx, mcp.ListResourcesRequest{})
 	require.NoError(t, err)
 
-	// Find the first pinned chat resource (telegram://chats/{id})
+	// Find the first pinned chat resource (telegram://chats/{id}/messages)
 	var pinnedURI string
 	for _, resource := range resourcesResult.Resources {
 		if strings.HasPrefix(resource.URI, "telegram://chats/") {
@@ -467,7 +478,7 @@ func TestBackupMessages(t *testing.T) {
 			callRequest.Params.Arguments = map[string]any{
 				"chat_id":  parseChatIDInt(t, chatID),
 				"filepath": tmpFile,
-				"count":    10,
+				"limit":    10,
 			}
 
 			t.Logf("Calling BackupMessages with chat_id=%s, filepath=%s", chatID, tmpFile)
@@ -503,7 +514,7 @@ func TestBackupMessages(t *testing.T) {
 		callRequest.Params.Arguments = map[string]any{
 			"chat_id":  parseChatIDInt(t, chatID),
 			"filepath": forbiddenPath,
-			"count":    10,
+			"limit":    10,
 		}
 
 		t.Logf("Calling BackupMessages with forbidden path: %s", forbiddenPath)
@@ -795,7 +806,7 @@ func TestGetPromptMissingRequiredArg(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Resource template test — telegram://chat/{chat_id}/info
+// Resource template test — telegram://chats/{chat_id}/info
 // ---------------------------------------------------------------------------
 
 func TestGetChatInfoTemplate(t *testing.T) {
@@ -814,16 +825,16 @@ func TestGetChatInfoTemplate(t *testing.T) {
 
 	var found bool
 	for _, tmpl := range tmpls.ResourceTemplates {
-		if strings.Contains(tmpl.URITemplate.Raw(), "telegram://chat/") {
+		if strings.Contains(tmpl.URITemplate.Raw(), "telegram://chats/") {
 			found = true
 			t.Logf("Found chat info template: %s", tmpl.URITemplate.Raw())
 			break
 		}
 	}
-	assert.True(t, found, "expected telegram://chat/{chat_id}/info template to be registered")
+	assert.True(t, found, "expected telegram://chats/{chat_id}/info template to be registered")
 
 	// Then read a concrete URI by substituting the test chat ID.
-	uri := fmt.Sprintf("telegram://chat/%s/info", chatID)
+	uri := fmt.Sprintf("telegram://chats/%s/info", chatID)
 	req := mcp.ReadResourceRequest{}
 	req.Params.URI = uri
 

@@ -18,11 +18,11 @@ func GetChatInfo(ctx context.Context, client *tg.Client, chatID int64) (*ChatFul
 	}
 
 	var info ChatFullInfo
-	info.ID = chatID
 	now := time.Now().Unix()
 
 	switch p := peer.(type) {
 	case *tg.InputPeerUser:
+		info.ID = p.UserID
 		info.Type = ChatTypeUser
 		fullUser, err := client.UsersGetFullUser(ctx, &tg.InputUser{
 			UserID:     p.UserID,
@@ -47,6 +47,7 @@ func GetChatInfo(ctx context.Context, client *tg.Client, chatID int64) (*ChatFul
 		info.Description = fullUser.FullUser.About
 
 	case *tg.InputPeerChat:
+		info.ID = p.ChatID
 		info.Type = ChatTypeGroup
 		fullChat, err := client.MessagesGetFullChat(ctx, p.ChatID)
 		if err != nil {
@@ -58,8 +59,11 @@ func GetChatInfo(ctx context.Context, client *tg.Client, chatID int64) (*ChatFul
 				info.MembersCount = len(participants.Participants)
 			}
 		}
+		// Match by ID: a migrated group returns both the legacy *tg.Chat and the
+		// new *tg.Channel in Chats, so taking the first entry could pick the wrong
+		// title.
 		for _, c := range fullChat.Chats {
-			if chat, ok := c.(*tg.Chat); ok {
+			if chat, ok := c.(*tg.Chat); ok && chat.ID == p.ChatID {
 				info.Name = chat.Title
 				break
 			}
@@ -69,6 +73,7 @@ func GetChatInfo(ctx context.Context, client *tg.Client, chatID int64) (*ChatFul
 		}
 
 	case *tg.InputPeerChannel:
+		info.ID = p.ChannelID
 		info.Type = ChatTypeChannel
 		fullChannel, err := client.ChannelsGetFullChannel(ctx, &tg.InputChannel{
 			ChannelID:  p.ChannelID,
@@ -82,7 +87,7 @@ func GetChatInfo(ctx context.Context, client *tg.Client, chatID int64) (*ChatFul
 			info.MembersCount = full.ParticipantsCount
 		}
 		for _, c := range fullChannel.Chats {
-			if channel, ok := c.(*tg.Channel); ok {
+			if channel, ok := c.(*tg.Channel); ok && channel.ID == p.ChannelID {
 				info.Name = channel.Title
 				info.Username = channel.Username
 				if channel.Megagroup {
@@ -94,6 +99,9 @@ func GetChatInfo(ctx context.Context, client *tg.Client, chatID int64) (*ChatFul
 		if info.Name == "" {
 			return nil, fmt.Errorf("full channel info response did not include channel %d", p.ChannelID)
 		}
+
+	default:
+		return nil, fmt.Errorf("unsupported peer type %T for chat %d", peer, chatID)
 	}
 
 	// Get chat info for unread count, mute status, etc.

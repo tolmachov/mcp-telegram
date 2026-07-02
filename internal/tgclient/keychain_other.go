@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -70,42 +69,8 @@ func (s *SessionStorage) StoreSession(_ context.Context, data []byte) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating session directory: %w", err)
 	}
-
-	tmp, err := os.CreateTemp(dir, ".session.*.json.tmp")
-	if err != nil {
-		return fmt.Errorf("creating temp session file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		// os.ErrNotExist is expected on the success path (rename consumed the file).
-		if err := os.Remove(tmpPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			slog.Debug("cleanup of temp session file failed", "path", tmpPath, "err", err)
-		}
-	}()
-
-	if err := tmp.Chmod(0o600); err != nil {
-		if cerr := tmp.Close(); cerr != nil {
-			slog.Debug("closing temp session file after chmod failure", "error", cerr)
-		}
-		return fmt.Errorf("setting temp session file permissions: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		if cerr := tmp.Close(); cerr != nil {
-			slog.Debug("closing temp session file after write failure", "error", cerr)
-		}
-		return fmt.Errorf("writing temp session file: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		if cerr := tmp.Close(); cerr != nil {
-			slog.Debug("closing temp session file after sync failure", "error", cerr)
-		}
-		return fmt.Errorf("syncing temp session file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("closing temp session file: %w", err)
-	}
-	if err := os.Rename(tmpPath, s.path); err != nil {
-		return fmt.Errorf("renaming temp session file into place: %w", err)
+	if err := xdg.WriteFileAtomic(s.path, data, 0o600, ".session.*.json.tmp"); err != nil {
+		return fmt.Errorf("storing session: %w", err)
 	}
 	return nil
 }

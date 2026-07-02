@@ -47,4 +47,9 @@ type ChatFullInfo struct {
 type ChatsList struct {
 	Chats []ChatInfo `json:"chats"`
 	Count int        `json:"count"`
+	// Truncated is true when dialog pagination stalled before the whole list
+	// was fetched (a phantom-dialog anomaly that fails the cursor-advance
+	// guard). The returned Chats are a prefix of the real listing, so callers
+	// must not treat an absent chat as proof it doesn't exist.
+	Truncated bool `json:"truncated,omitempty"`
 }

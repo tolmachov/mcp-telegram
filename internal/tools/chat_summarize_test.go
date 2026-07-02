@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -10,6 +11,51 @@ import (
 
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
 )
+
+// TestChatSummarizeBuildResult covers the (result, err) → response branching:
+// success, sampling-unsupported, salvaged-partial, and total failure.
+func TestChatSummarizeBuildResult(t *testing.T) {
+	h := &ChatSummarizeHandler{config: summarize.Config{Provider: summarize.ProviderSampling}}
+	in := SummarizeChatInput{ChatID: 7, Goal: "key points", Period: "week"}
+	since := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
+
+	t.Run("success returns full summary", func(t *testing.T) {
+		errRes, out := h.buildResult(in, since, end, "the summary", nil)
+		require.Nil(t, errRes)
+		require.NotNil(t, out)
+		assert.Equal(t, "the summary", out.Summary)
+		assert.False(t, out.Partial)
+		assert.Empty(t, out.Warning)
+		assert.Equal(t, "sampling", out.Provider)
+	})
+
+	t.Run("sampling unsupported surfaces as error", func(t *testing.T) {
+		errRes, out := h.buildResult(in, since, end, "", summarize.ErrSamplingUnsupported)
+		require.Nil(t, out)
+		require.NotNil(t, errRes)
+		assert.True(t, errRes.IsError)
+		assert.Contains(t, toolResultText(errRes), "sampling")
+	})
+
+	t.Run("late failure with partial text is salvaged", func(t *testing.T) {
+		errRes, out := h.buildResult(in, since, end, "batches 1-18", errors.New("batch 19/20: boom"))
+		require.Nil(t, errRes)
+		require.NotNil(t, out)
+		assert.Equal(t, "batches 1-18", out.Summary)
+		assert.True(t, out.Partial)
+		assert.Contains(t, out.Warning, "stopped early")
+		assert.Contains(t, out.Warning, "boom")
+	})
+
+	t.Run("failure with no text is a hard error", func(t *testing.T) {
+		errRes, out := h.buildResult(in, since, end, "   ", errors.New("batch 1/20: boom"))
+		require.Nil(t, out)
+		require.NotNil(t, errRes)
+		assert.True(t, errRes.IsError)
+		assert.Contains(t, toolResultText(errRes), "Summarization failed")
+	})
+}
 
 func TestChatSummarizeHandlerValidation(t *testing.T) {
 	h := &ChatSummarizeHandler{}

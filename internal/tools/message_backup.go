@@ -7,8 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"sync"
 	"time"
 
@@ -26,148 +24,11 @@ const (
 	progressStateStopped
 )
 
-// maxFilenameLength limits the base filename length to ensure compatibility
-// across filesystems (most support 255 bytes, but we keep it conservative).
-const maxFilenameLength = 100
-
 // telegramLaunchDate is the date when Telegram was launched (used as fallback for date range calculations).
 var telegramLaunchDate = time.Date(2013, 8, 14, 0, 0, 0, 0, time.UTC)
 
-// DefaultBackupDir returns the default backup directory based on the OS.
-// Returns an error when os.UserHomeDir fails (e.g. no HOME env var set,
-// no passwd entry on Unix, or equivalent on other platforms), because in
-// that case the resulting path would be relative to the process working
-// directory rather than an absolute user directory.
-func DefaultBackupDir() (string, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("locating home directory: %w", err)
-	}
-
-	switch runtime.GOOS {
-	case "darwin":
-		return filepath.Join(homeDir, "Library", "Application Support", "mcp-telegram", "backups"), nil
-	case "windows":
-		if appData := os.Getenv("APPDATA"); appData != "" {
-			return filepath.Join(appData, "mcp-telegram", "backups"), nil
-		}
-		return filepath.Join(homeDir, "AppData", "Roaming", "mcp-telegram", "backups"), nil
-	default: // linux and others
-		if xdgData := os.Getenv("XDG_DATA_HOME"); xdgData != "" {
-			return filepath.Join(xdgData, "mcp-telegram", "backups"), nil
-		}
-		return filepath.Join(homeDir, ".local", "share", "mcp-telegram", "backups"), nil
-	}
-}
-
-// sanitizeFilename removes or replaces characters that are invalid in filenames.
-func sanitizeFilename(name string) string {
-	invalid := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|", "\n", "\r", "\t"}
-	result := name
-	for _, char := range invalid {
-		result = strings.ReplaceAll(result, char, "_")
-	}
-	result = strings.Trim(result, " .")
-	// Limit length (use runes to avoid splitting multi-byte UTF-8 characters).
-	runes := []rune(result)
-	if len(runes) > maxFilenameLength {
-		result = string(runes[:maxFilenameLength])
-	}
-	if result == "" {
-		result = "backup"
-	}
-	return result
-}
-
-// isPathAllowed checks if the given path is within one of the allowed
-// directories. Both sides of the comparison are resolved through
-// filepath.EvalSymlinks when the target (or parent) already exists on disk,
-// so a symlink placed inside an allowed directory cannot be used to escape
-// the sandbox. For paths that don't exist yet (the common case for a new
-// backup file) we fall back to evaluating the parent directory — callers are
-// expected to sanitise the filename separately via sanitizeFilename.
-func isPathAllowed(targetPath string, allowedPaths []string) error {
-	absTarget, err := filepath.Abs(targetPath)
-	if err != nil {
-		return fmt.Errorf("resolving path: %w", err)
-	}
-	resolvedTarget, err := resolveSymlinks(absTarget)
-	if err != nil {
-		return fmt.Errorf("resolving target path %q: %w", targetPath, err)
-	}
-
-	// Track allowlist entries we had to skip because of unresolvable
-	// ancestors; if every entry gets skipped we want the user to see the
-	// real configuration error instead of a generic "not within allowed
-	// directories" message.
-	var skipReasons []string
-
-	for _, allowed := range allowedPaths {
-		absAllowed, err := filepath.Abs(allowed)
-		if err != nil {
-			skipReasons = append(skipReasons, fmt.Sprintf("%q: %v", allowed, err))
-			continue
-		}
-		resolvedAllowed, err := resolveSymlinks(absAllowed)
-		if err != nil {
-			// If the allowlist entry itself can't be resolved (e.g. EACCES
-			// on an ancestor), skip it rather than silently treating the
-			// unresolved string as the sandbox root. A misconfigured
-			// allowlist shouldn't widen the sandbox.
-			skipReasons = append(skipReasons, fmt.Sprintf("%q: %v", allowed, err))
-			continue
-		}
-
-		rel, err := filepath.Rel(resolvedAllowed, resolvedTarget)
-		if err != nil {
-			continue
-		}
-
-		if rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel)) {
-			return nil
-		}
-	}
-
-	if len(allowedPaths) > 0 && len(skipReasons) == len(allowedPaths) {
-		return fmt.Errorf("path %q is not within allowed directories: all %d allowlist entries are unresolvable (%s). Fix the configuration so the sandbox roots exist and are readable", targetPath, len(skipReasons), strings.Join(skipReasons, "; "))
-	}
-
-	return fmt.Errorf("path %q is not within allowed directories. Configure --allowed-paths or TELEGRAM_ALLOWED_PATHS", targetPath)
-}
-
-// resolveSymlinks returns the fully-resolved absolute path of p. When p
-// itself does not exist (e.g. a backup filename that hasn't been written
-// yet) it walks up to the first existing ancestor, resolves that, and
-// re-attaches the unresolved tail. This keeps "target inside allowed-dir
-// via symlink escape" attacks impossible while still allowing isPathAllowed
-// to be called before the file exists.
-//
-// Non-ENOENT errors from EvalSymlinks (typically EACCES on an ancestor) are
-// propagated as errors so the sandbox check can fail closed — silently
-// reattaching the unresolved tail in that case would let an attacker who
-// can place a symlink behind a permission-denied directory bypass the
-// sandbox.
-func resolveSymlinks(p string) (string, error) {
-	p = filepath.Clean(p)
-	resolved, err := filepath.EvalSymlinks(p)
-	if err == nil {
-		return filepath.Clean(resolved), nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	// Path does not exist yet — walk up to the closest existing ancestor,
-	// resolve that, and join the unresolved tail back on.
-	parent := filepath.Dir(p)
-	if parent == p {
-		return p, nil
-	}
-	resolvedParent, err := resolveSymlinks(parent)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(resolvedParent, filepath.Base(p)), nil
-}
+// (Path-sandbox helpers — DefaultBackupDir, sanitizeFilename, isPathAllowed,
+// resolveSymlinks — live in backup_path.go.)
 
 // getChatName returns the display name of the chat and whether the name was
 // successfully resolved. Falls back to "chat_%d" when the Telegram API call
@@ -253,12 +114,19 @@ func NewMessageBackupHandler(client *tg.Client, provider *messages.Provider, all
 }
 
 // BackupMessagesInput is the input for the BackupMessages tool.
+//
+// The date/limit fields deliberately mirror the rest of the toolbox
+// (from_date / to_date / limit, with an exclusive to_date) so callers don't
+// have to learn a second convention. The only intentional divergence is that
+// the date fields accept a couple of extra shorthand formats on top of RFC3339
+// (see parseDate) — a strict superset, so anything valid elsewhere is valid
+// here.
 type BackupMessagesInput struct {
 	ChatID   int64  `json:"chat_id" jsonschema:"The ID of the chat to backup messages from"`
 	Filepath string `json:"filepath,omitempty" jsonschema:"Path to the file where messages will be saved (optional\\, auto-generated if not provided). If the file already exists\\, it will be overwritten."`
-	Count    int    `json:"count,omitempty" jsonschema:"Maximum number of messages to backup (optional\\, default: 1000 if no filters specified; recommended max: 10000). Larger backups may hit Telegram rate limits and take significantly longer."`
-	From     string `json:"from,omitempty" jsonschema:"Start date - backup messages from this date (optional). Accepts YYYY-MM-DD or YYYY-MM-DD HH:MM:SS (interpreted as UTC) or RFC3339 with explicit offset for local windows."`
-	To       string `json:"to,omitempty" jsonschema:"End date - backup messages until this date (optional). Accepts YYYY-MM-DD or YYYY-MM-DD HH:MM:SS (interpreted as UTC) or RFC3339 with explicit offset for local windows."`
+	Limit    int    `json:"limit,omitempty" jsonschema:"Maximum number of messages to backup (optional\\, default: 1000 if no date filters specified; recommended max: 10000). Larger backups may hit Telegram rate limits and take significantly longer."`
+	FromDate string `json:"from_date,omitempty" jsonschema:"Start of the window (inclusive\\, optional). Accepts YYYY-MM-DD or YYYY-MM-DD HH:MM:SS (interpreted as UTC) or RFC3339 with an explicit offset."`
+	ToDate   string `json:"to_date,omitempty" jsonschema:"End of the window (EXCLUSIVE\\, optional) - messages strictly before this instant. To include a whole day\\, pass the next day's date. Accepts YYYY-MM-DD or YYYY-MM-DD HH:MM:SS (interpreted as UTC) or RFC3339 with an explicit offset."`
 }
 
 // BackupMessagesResult is the typed output of BackupMessages. It accompanies
@@ -277,7 +145,7 @@ type BackupMessagesResult struct {
 func (h *MessageBackupHandler) Register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "BackupMessages",
-		Description: "Backup messages from a chat to a text file. Messages are saved with timestamp, sender name, ID, and reply info. If filepath is not specified, generates automatic filename like 'ChatName-2024-01-15_10-30-00.txt' in default backup directory; otherwise overwrites the target file. All filter parameters are optional — if none specified, backs up last 1000 messages. For reading messages in-chat, use GetMessages instead.",
+		Description: "Backup messages from a chat to a text file. Messages are saved with timestamp, sender name, ID, and reply info. If filepath is not specified, generates automatic filename like 'ChatName-2024-01-15_10-30-00.txt' in default backup directory; otherwise overwrites the target file. Filters are optional — if none specified, backs up the last 1000 messages. Date window uses from_date (inclusive) and to_date (exclusive), matching GetMessages/SearchMessages; to include a whole day, pass the next day's date as to_date. For reading messages in-chat, use GetMessages instead.",
 		Annotations: &mcp.ToolAnnotations{
 			// Not idempotent: auto-named runs include time.Now() in the
 			// filename so each call creates a distinct file. Callers that
@@ -315,23 +183,6 @@ func parseDate(s string) (time.Time, error) {
 		return t, nil
 	}
 	return time.Time{}, fmt.Errorf("invalid date format %q, expected YYYY-MM-DD, YYYY-MM-DD HH:MM:SS (UTC), or RFC3339 with explicit offset", s)
-}
-
-// normalizeInclusiveUpperDate keeps date-only "to" inputs inclusive for the
-// whole day while preserving exact timestamps for RFC3339 / date-time inputs.
-// Telegram's offset_date is strictly-less-than, so we advance to midnight of
-// the next day (00:00:00) to include every message on the given YYYY-MM-DD.
-func normalizeInclusiveUpperDate(raw string, parsed time.Time) time.Time {
-	if parsed.IsZero() {
-		return parsed
-	}
-	if _, err := time.Parse("2006-01-02", raw); err == nil {
-		// parse success means raw is date-only (YYYY-MM-DD); advance by 24h
-		// so the full day is included. The parsed time.Time is discarded —
-		// we only need to know whether the layout matched, not the value.
-		return parsed.Add(24 * time.Hour)
-	}
-	return parsed
 }
 
 // backupProgress handles progress tracking and notifications for message backup.
@@ -501,10 +352,12 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	}
 
 	targetPath := in.Filepath
-	count := in.Count
-	fromStr := in.From
-	toStr := in.To
+	count := in.Limit
+	fromStr := in.FromDate
+	toStr := in.ToDate
 
+	// to_date is exclusive (strictly-less-than), matching every other tool's
+	// date window — no inclusive-day fixup here.
 	fromDate, err := parseDate(fromStr)
 	if err != nil {
 		return errResult(err.Error()), nil, nil
@@ -513,9 +366,8 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	if err != nil {
 		return errResult(err.Error()), nil, nil
 	}
-	toDate = normalizeInclusiveUpperDate(toStr, toDate)
-	if !fromDate.IsZero() && !toDate.IsZero() && fromDate.After(toDate) {
-		return errResult(fmt.Sprintf("from (%s) is after to (%s); the date window is empty.", fromDate.Format(time.RFC3339), toDate.Format(time.RFC3339))), nil, nil
+	if !fromDate.IsZero() && !toDate.IsZero() && !fromDate.Before(toDate) {
+		return errResult(fmt.Sprintf("from_date (%s) is not before to_date (%s); the date window is empty.", fromDate.Format(time.RFC3339), toDate.Format(time.RFC3339))), nil, nil
 	}
 
 	// Default to 1000 messages if no filters specified.

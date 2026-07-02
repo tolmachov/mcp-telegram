@@ -3,6 +3,7 @@ package tgdata
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/gotd/td/tg"
@@ -157,6 +158,7 @@ func peerKeyOf(p tg.PeerClass) peerLookupKey {
 // the whole chat list.
 func GetChats(ctx context.Context, client *tg.Client, onProgress ProgressFunc) (*ChatsList, error) {
 	var chatsList []ChatInfo
+	truncated := false
 
 	startTime := time.Now()
 	chatCount := 0
@@ -166,6 +168,19 @@ func GetChats(ctx context.Context, client *tg.Client, onProgress ProgressFunc) (
 		offsetDate int
 	)
 	var offset tg.InputPeerClass = &tg.InputPeerEmpty{}
+
+	// prevOffset tracks the pagination cursor of the previous iteration. If a
+	// page's last dialog has no top message in the response (a phantom dialog),
+	// offsetID/offsetDate carry over unchanged and offsetPeer may collapse to
+	// InputPeerEmpty — making the next request identical to the current one and
+	// looping forever until FLOOD_WAIT. Bailing when the cursor fails to advance
+	// keeps the listing bounded.
+	type offsetKey struct {
+		id   int
+		date int
+		peer peerLookupKey
+	}
+	var prevOffset offsetKey
 
 	for {
 		resp, err := client.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
@@ -232,11 +247,25 @@ func GetChats(ctx context.Context, client *tg.Client, onProgress ProgressFunc) (
 
 		// Advance the offset to the last dialog of the page.
 		lastPeer := dialogs[len(dialogs)-1].GetPeer()
-		if m, ok := msgByPeer[peerKeyOf(lastPeer)]; ok {
+		lastPeerKey := peerKeyOf(lastPeer)
+		if m, ok := msgByPeer[lastPeerKey]; ok {
 			offsetID = m.GetID()
 			offsetDate = m.GetDate()
 		}
 		offset = offsetPeer(lastPeer, em)
+
+		// Guard against a stalled cursor: if nothing about the offset changed,
+		// the next request would be identical and the loop would never end.
+		// The listing we return here is a prefix of the real one, so flag it as
+		// truncated rather than passing it off as complete.
+		cur := offsetKey{id: offsetID, date: offsetDate, peer: lastPeerKey}
+		if cur == prevOffset {
+			truncated = true
+			slog.Warn("dialog pagination stalled; chat listing is incomplete",
+				"fetched", chatCount, "offset_id", offsetID)
+			break
+		}
+		prevOffset = cur
 	}
 
 	if onProgress != nil {
@@ -244,8 +273,9 @@ func GetChats(ctx context.Context, client *tg.Client, onProgress ProgressFunc) (
 	}
 
 	return &ChatsList{
-		Chats: chatsList,
-		Count: len(chatsList),
+		Chats:     chatsList,
+		Count:     len(chatsList),
+		Truncated: truncated,
 	}, nil
 }
 

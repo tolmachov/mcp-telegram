@@ -86,11 +86,10 @@ type FetchOptions struct {
 	OffsetDate time.Time
 	MinDate    time.Time // Filter: only messages after this date
 	// MaxDate is the exclusive upper bound for Telegram's offset_date
-	// (strictly-less-than). Callers that accept a date-only boundary (e.g.
-	// YYYY-MM-DD) must advance by 24h to include that day's messages —
-	// BackupMessages does this automatically via normalizeInclusiveUpperDate.
-	// GetMessages / SearchMessages accept a full RFC3339 timestamp, so
-	// pass midnight of the next day if the intent is to include a whole day.
+	// (strictly-less-than). Every tool (GetMessages / SearchMessages /
+	// BackupMessages) treats the upper bound as exclusive, so a caller that
+	// accepts a date-only boundary (e.g. YYYY-MM-DD) must pass midnight of the
+	// next day to include that whole day's messages.
 	MaxDate    time.Time
 	UnreadOnly bool
 	MaxCount   int // Stop after collecting this many messages. 0 means no limit.

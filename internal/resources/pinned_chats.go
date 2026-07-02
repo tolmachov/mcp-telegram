@@ -82,7 +82,7 @@ func (p *PinnedChatsProvider) doRefresh(ctx context.Context) error {
 	// chats in a different order is a no-op (no spurious list_changed).
 	newURIs := make([]string, 0, len(chats))
 	for _, chat := range chats {
-		newURIs = append(newURIs, fmt.Sprintf("telegram://chats/%d", chat.ID))
+		newURIs = append(newURIs, fmt.Sprintf("telegram://chats/%d/messages", chat.ID))
 	}
 	sortedNew := append([]string(nil), newURIs...)
 	slices.Sort(sortedNew)
@@ -108,7 +108,7 @@ func (p *PinnedChatsProvider) doRefresh(ctx context.Context) error {
 	// Register the new pinned resources individually. Each closure captures
 	// its own chat for the handler.
 	for _, chat := range chats {
-		uri := fmt.Sprintf("telegram://chats/%d", chat.ID)
+		uri := fmt.Sprintf("telegram://chats/%d/messages", chat.ID)
 		chatCopy := chat
 		p.server.AddResource(&mcp.Resource{
 			URI:         uri,

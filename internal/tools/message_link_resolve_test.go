@@ -174,9 +174,11 @@ func TestResolveMessageLinkNoTopicIDWhenNonForum(t *testing.T) {
 	assert.Equal(t, FormatRegularRef(42), out.MessageID)
 }
 
-// TestChatIDFromResolved verifies that channel, chat and user IDs all pass
-// through as bare MTProto IDs.
-func TestChatIDFromResolved(t *testing.T) {
+// TestResolvedPeerInfo verifies that the canonical resolved peer (r.Peer) is
+// looked up among the response entities and its bare MTProto ID and title are
+// returned. Keying off r.Peer — not "first chat, else first user" — is what
+// keeps every tool agreeing on which entity a @username names.
+func TestResolvedPeerInfo(t *testing.T) {
 	const rawChannelID int64 = 1234567890
 
 	tests := []struct {
@@ -189,6 +191,7 @@ func TestChatIDFromResolved(t *testing.T) {
 		{
 			name: "channel ID passes through unchanged",
 			resolved: &tg.ContactsResolvedPeer{
+				Peer: &tg.PeerChannel{ChannelID: rawChannelID},
 				Chats: []tg.ChatClass{
 					&tg.Channel{ID: rawChannelID, Title: "Test Channel"},
 				},
@@ -200,6 +203,7 @@ func TestChatIDFromResolved(t *testing.T) {
 		{
 			name: "chat ID passes through unchanged",
 			resolved: &tg.ContactsResolvedPeer{
+				Peer: &tg.PeerChat{ChatID: 42},
 				Chats: []tg.ChatClass{
 					&tg.Chat{ID: 42, Title: "Test Chat"},
 				},
@@ -211,12 +215,28 @@ func TestChatIDFromResolved(t *testing.T) {
 		{
 			name: "user ID passes through unchanged",
 			resolved: &tg.ContactsResolvedPeer{
+				Peer: &tg.PeerUser{UserID: 99},
 				Users: []tg.UserClass{
 					&tg.User{ID: 99, FirstName: "Alice", LastName: "Smith"},
 				},
 			},
 			wantID:    99,
 			wantTitle: "Alice Smith",
+			wantFound: true,
+		},
+		{
+			name: "canonical peer wins over an incidental entity",
+			resolved: &tg.ContactsResolvedPeer{
+				// A response may carry a linked discussion group alongside the
+				// named channel; r.Peer disambiguates which one the caller wants.
+				Peer: &tg.PeerChannel{ChannelID: rawChannelID},
+				Chats: []tg.ChatClass{
+					&tg.Chat{ID: 42, Title: "Incidental Group"},
+					&tg.Channel{ID: rawChannelID, Title: "Named Channel"},
+				},
+			},
+			wantID:    rawChannelID,
+			wantTitle: "Named Channel",
 			wantFound: true,
 		},
 		{
@@ -228,7 +248,7 @@ func TestChatIDFromResolved(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			id, title, found := chatIDFromResolved(tt.resolved)
+			id, title, found := resolvedPeerInfo(tt.resolved)
 			assert.Equal(t, tt.wantFound, found)
 			if !tt.wantFound {
 				return

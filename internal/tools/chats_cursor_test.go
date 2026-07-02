@@ -49,8 +49,6 @@ func TestParseChatsCursorInvalid(t *testing.T) {
 		{"whitespace", " abc "},
 		{"not base64", "!!!"},
 		{"not json", base64.RawURLEncoding.EncodeToString([]byte("not json"))},
-		{"version zero", base64.RawURLEncoding.EncodeToString([]byte(`{"v":0,"s":1,"o":0}`))},
-		{"missing version", base64.RawURLEncoding.EncodeToString([]byte(`{"s":1,"o":0}`))},
 		{"future version", base64.RawURLEncoding.EncodeToString([]byte(`{"v":99,"s":1,"o":0}`))},
 		{"negative offset", base64.RawURLEncoding.EncodeToString([]byte(`{"v":1,"s":1,"o":-5}`))},
 	}
@@ -61,6 +59,25 @@ func TestParseChatsCursorInvalid(t *testing.T) {
 				t.Errorf("ParseChatsCursor(%q) expected error, got nil", tt.cursor)
 			}
 		})
+	}
+}
+
+// A pre-versioning cursor (v==0 or absent) is tolerated by the shared codec:
+// it decodes to its session/offset, and a stale session ID is caught by the
+// handler's cache-session check rather than being rejected here. This matches
+// the version policy used by the search and forum-topics cursors.
+func TestParseChatsCursorAcceptsLegacyVersion(t *testing.T) {
+	for _, cursor := range []string{
+		base64.RawURLEncoding.EncodeToString([]byte(`{"v":0,"s":7,"o":3}`)),
+		base64.RawURLEncoding.EncodeToString([]byte(`{"s":7,"o":3}`)),
+	} {
+		sid, off, err := ParseChatsCursor(cursor)
+		if err != nil {
+			t.Fatalf("ParseChatsCursor(%q) unexpected error: %v", cursor, err)
+		}
+		if sid != 7 || off != 3 {
+			t.Errorf("ParseChatsCursor(%q) = (%d, %d), want (7, 3)", cursor, sid, off)
+		}
 	}
 }
 
@@ -98,7 +115,7 @@ func TestPageFrom(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			chats := makeChats(tt.total)
-			out := h.pageFrom(chats, sid, tt.offset, tt.limit)
+			out := h.pageFrom(chats, sid, tt.offset, tt.limit, false)
 
 			if out.Count != tt.wantCount {
 				t.Errorf("Count = %d, want %d", out.Count, tt.wantCount)
@@ -141,9 +158,7 @@ func TestHandleWithCursorErrors(t *testing.T) {
 	chats := makeChats(5)
 	const sid int64 = 99
 
-	h := &ChatsGetHandler{}
-	h.cache = chats
-	h.sessionID = sid
+	h := &ChatsGetHandler{cache: &ChatsCache{chats: chats, sessionID: sid}}
 
 	t.Run("session mismatch", func(t *testing.T) {
 		cursor := FormatChatsCursor(sid+1, 0)
@@ -198,8 +213,8 @@ func TestHandleWithCursorErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("nil cache", func(t *testing.T) {
-		h2 := &ChatsGetHandler{}
+	t.Run("unloaded cache", func(t *testing.T) {
+		h2 := &ChatsGetHandler{cache: &ChatsCache{}}
 		cursor := FormatChatsCursor(0, 0)
 		result, out, _ := h2.handleWithCursor(cursor, 10)
 		if out != nil {

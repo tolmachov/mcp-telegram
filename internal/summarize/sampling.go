@@ -56,7 +56,14 @@ func (p *SamplingProvider) Summarize(ctx context.Context, prompt string) (string
 		return "", fmt.Errorf("requesting sampling: %w", err)
 	}
 
-	return contentText(result.Content), nil
+	text := contentText(result.Content)
+	if text == "" {
+		// Non-text content (image/audio) or an empty reply. Returning ("", nil)
+		// would let the rolling summarizer silently drop the accumulated summary
+		// for this batch; fail loudly so the caller can surface partial work.
+		return "", fmt.Errorf("sampling returned no text content")
+	}
+	return text, nil
 }
 
 // contentText extracts the textual payload from a Content interface, returning

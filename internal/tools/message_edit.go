@@ -107,7 +107,7 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 
 	updates, err := h.client.MessagesEditMessage(ctx, editReq)
 	if err != nil {
-		return errResult(fmt.Sprintf("Failed to edit message: %v", err)), nil, nil
+		return telegramErrResult("edit message", err), nil, nil
 	}
 
 	editedMsgID, date := extractEditedMessageID(updates)

@@ -150,6 +150,16 @@ func resolveChannel(ctx context.Context, client *tg.Client, id int64) (tg.InputP
 func resolveBasicChat(ctx context.Context, client *tg.Client, id int64) (tg.InputPeerClass, error) {
 	chats, err := client.MessagesGetChats(ctx, []int64{id})
 	if err != nil {
+		// CHAT_ID_INVALID / PEER_ID_INVALID mean "not a basic chat" — fall
+		// through (like resolveChannel does for CHANNEL_INVALID) so the caller
+		// emits the friendly generic error pointing at ResolveUsername /
+		// SearchChats instead of leaking the raw MTProto code. This is the
+		// common outcome for a bare channel/supergroup ID with no known
+		// access_hash: it isn't a basic chat, so the actionable answer is
+		// "resolve it by @username", not "CHAT_ID_INVALID".
+		if tgerr.Is(err, "CHAT_ID_INVALID", "PEER_ID_INVALID") {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("resolving basic chat %d: %w", id, err)
 	}
 	msgChats, ok := chats.(*tg.MessagesChats)

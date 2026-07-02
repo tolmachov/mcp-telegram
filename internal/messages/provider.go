@@ -19,6 +19,7 @@ import (
 type Provider struct {
 	client  *tg.Client
 	limiter ratelimit.Limiter
+	peers   *tgclient.PeerCache
 }
 
 // DefaultRateLimitRPS is the default per-provider request rate (requests per
@@ -43,13 +44,14 @@ func NewProviderWithRate(client *tg.Client, rps int) *Provider {
 	return &Provider{
 		client:  client,
 		limiter: ratelimit.New(rps),
+		peers:   tgclient.NewPeerCache(),
 	}
 }
 
 // Fetch retrieves messages from a chat with the given options.
 // It handles pagination internally and returns enriched messages with sender names.
 func (p *Provider) Fetch(ctx context.Context, chatID int64, opts FetchOptions) (*FetchResult, error) {
-	peer, err := tgclient.ResolvePeer(ctx, p.client, chatID)
+	peer, err := p.peers.Resolve(ctx, p.client, chatID)
 	if err != nil {
 		return nil, fmt.Errorf("resolving peer: %w", err)
 	}
@@ -66,10 +68,10 @@ func (p *Provider) Fetch(ctx context.Context, chatID int64, opts FetchOptions) (
 //
 // Date filters:
 //   - opts.MaxDate maps to Telegram's native offset_date (returns messages
-//     strictly older than the cutoff). Callers wanting inclusive day bounds
-//     must adjust before passing (see normalizeInclusiveUpperDate). Ignored
-//     when opts.OffsetDate is already set by the caller (e.g. FetchAll's
-//     pagination loop).
+//     strictly older than the cutoff — an exclusive upper bound). Callers
+//     wanting an inclusive day must advance the cutoff by 24h themselves
+//     (e.g. pass midnight of the next day). Ignored when opts.OffsetDate is
+//     already set by the caller (e.g. FetchAll's pagination loop).
 //   - opts.MinDate has no native equivalent and is applied as a post-filter
 //     here. Because history comes back reverse-chronological, the first
 //     message older than MinDate means we've walked past the window — we
@@ -110,7 +112,7 @@ func (p *Provider) fetchWithPeer(ctx context.Context, peer tg.InputPeerClass, op
 		return nil, fmt.Errorf("getting messages: %w", err)
 	}
 
-	result, err := p.processHistory(history, peer)
+	result, err := p.processHistory(history, peer, opts.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +173,7 @@ func historyOffsetDate(opts FetchOptions) time.Time {
 // newer than a specific ID. When after > 0, the returned slice may be
 // shorter than requested if the anchor is near the end of the chat.
 func (p *Provider) FetchContext(ctx context.Context, chatID int64, anchorID, before, after int) (*FetchResult, error) {
-	peer, err := tgclient.ResolvePeer(ctx, p.client, chatID)
+	peer, err := p.peers.Resolve(ctx, p.client, chatID)
 	if err != nil {
 		return nil, fmt.Errorf("resolving peer: %w", err)
 	}
@@ -199,7 +201,7 @@ func (p *Provider) FetchContext(ctx context.Context, chatID int64, anchorID, bef
 		return nil, fmt.Errorf("getting message context: %w", err)
 	}
 
-	result, err := p.processHistory(history, peer)
+	result, err := p.processHistory(history, peer, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -227,7 +229,7 @@ func (p *Provider) FetchContext(ctx context.Context, chatID int64, anchorID, bef
 // scheduled messages, so callers can render "no pending" without branching
 // on error vs empty.
 func (p *Provider) FetchScheduled(ctx context.Context, chatID int64) (*FetchResult, error) {
-	peer, err := tgclient.ResolvePeer(ctx, p.client, chatID)
+	peer, err := p.peers.Resolve(ctx, p.client, chatID)
 	if err != nil {
 		return nil, fmt.Errorf("resolving peer: %w", err)
 	}
@@ -240,7 +242,9 @@ func (p *Provider) FetchScheduled(ctx context.Context, chatID int64) (*FetchResu
 		return nil, fmt.Errorf("getting scheduled messages: %w", err)
 	}
 
-	result, err := p.processHistory(history, peer)
+	// Scheduled messages are unpaginated; limit=0 leaves HasMore false and it
+	// is cleared explicitly below regardless.
+	result, err := p.processHistory(history, peer, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +267,7 @@ func (p *Provider) FetchScheduled(ctx context.Context, chatID int64) (*FetchResu
 // errors.Is(err, context.Canceled) or errors.Is(err, context.DeadlineExceeded)
 // and still use the partial FetchResult — any other error is a hard failure.
 func (p *Provider) FetchAll(ctx context.Context, chatID int64, opts FetchOptions, onBatch BatchCallback) (*FetchResult, error) {
-	peer, err := tgclient.ResolvePeer(ctx, p.client, chatID)
+	peer, err := p.peers.Resolve(ctx, p.client, chatID)
 	if err != nil {
 		return nil, fmt.Errorf("resolving peer: %w", err)
 	}
@@ -378,7 +382,15 @@ func (p *Provider) fetchAllWithPeer(ctx context.Context, peer tg.InputPeerClass,
 	return result, nil
 }
 
-func (p *Provider) processHistory(history tg.MessagesMessagesClass, peer tg.InputPeerClass) (*FetchResult, error) {
+// processHistory converts a getHistory/search response into a FetchResult.
+// limit is the page size that was requested: HasMore is derived from whether
+// the *raw* page came back full (len(messages) >= limit), not from Telegram's
+// total-history Count. Count is the size of the entire chat history, so the old
+// `len < Count` test reported HasMore=true on the final page of any non-trivial
+// chat, forcing callers into a guaranteed-empty extra request. Gating on the
+// raw page length (before service messages are dropped) avoids that and can't
+// end pagination early on a page padded with service messages.
+func (p *Provider) processHistory(history tg.MessagesMessagesClass, peer tg.InputPeerClass, limit int) (*FetchResult, error) {
 	result := &FetchResult{
 		Users: make(map[int64]string),
 		Chats: make(map[int64]string),
@@ -387,24 +399,24 @@ func (p *Provider) processHistory(history tg.MessagesMessagesClass, peer tg.Inpu
 	var messages []tg.MessageClass
 	var users []tg.UserClass
 	var chats []tg.ChatClass
-	var totalCount int
+	hasMore := false
 
 	switch hist := history.(type) {
 	case *tg.MessagesMessages:
+		// The complete history fit in one response — there is never more to page.
 		messages = hist.Messages
 		users = hist.Users
 		chats = hist.Chats
-		totalCount = len(hist.Messages)
 	case *tg.MessagesMessagesSlice:
 		messages = hist.Messages
 		users = hist.Users
 		chats = hist.Chats
-		totalCount = hist.Count
+		hasMore = limit > 0 && len(hist.Messages) >= limit
 	case *tg.MessagesChannelMessages:
 		messages = hist.Messages
 		users = hist.Users
 		chats = hist.Chats
-		totalCount = hist.Count
+		hasMore = limit > 0 && len(hist.Messages) >= limit
 	case *tg.MessagesMessagesNotModified:
 		// Telegram signals "nothing changed" — return an empty page so callers
 		// behave as if the history is exhausted rather than erroring out.
@@ -431,7 +443,7 @@ func (p *Provider) processHistory(history tg.MessagesMessagesClass, peer tg.Inpu
 	// Extract messages
 	result.Messages = p.extractMessages(messages, result.Users, result.Chats, peer)
 	result.Count = len(result.Messages)
-	result.HasMore = len(result.Messages) > 0 && len(result.Messages) < totalCount
+	result.HasMore = hasMore && len(result.Messages) > 0
 
 	if len(result.Messages) > 0 {
 		result.NextID = result.Messages[len(result.Messages)-1].ID
@@ -448,66 +460,76 @@ func (p *Provider) extractMessages(messages []tg.MessageClass, users map[int64]s
 		if !ok {
 			continue
 		}
-		if msg.ID <= 0 {
-			// Telegram guarantees positive IDs; a zero-ID message would cause
-			// FormatRegularRef/FormatScheduledRef to panic at the tool boundary.
-			slog.Warn("extractMessages: dropping message with non-positive ID; Telegram API contract violation", "msg_id", msg.ID)
-			continue
+		// In private chats the other user's messages have FromID == nil; the
+		// resolved peer is the sender fallback.
+		if m, ok := buildMessage(msg, users, chats, peer); ok {
+			result = append(result, m)
 		}
-
-		m := Message{
-			ID:   msg.ID,
-			Date: time.Unix(int64(msg.Date), 0),
-			Text: msg.Message,
-			Raw:  msg,
-		}
-
-		// Extract sender
-		if msg.FromID != nil {
-			m.SenderID, m.SenderName = extractSender(msg.FromID, users, chats)
-		} else {
-			// In private chats, messages from the other user have FromID == nil
-			// Use the peer (chat partner) as the sender
-			m.SenderID, m.SenderName = extractSender(peer, users, chats)
-		}
-
-		// Extract reply info
-		if msg.ReplyTo != nil {
-			m.ReplyToID = extractReplyToID(msg.ReplyTo)
-		}
-
-		// Extract media type
-		if msg.Media != nil {
-			m.Media = extractMediaType(msg.Media)
-		}
-
-		// Extract reactions
-		if reactions, ok := msg.GetReactions(); ok {
-			m.Reactions = extractReactions(reactions)
-		}
-
-		// Extract reply/comment thread metadata (count, linked discussion group)
-		if replies, ok := msg.GetReplies(); ok {
-			m.Replies = extractReplies(replies)
-		}
-
-		// Extract entities (URLs)
-		// Note: Telegram uses UTF-16 code units for offset/length
-		for _, entity := range msg.Entities {
-			if url, ok := entity.(*tg.MessageEntityURL); ok {
-				if extracted := extractSubstring(msg.Message, url.Offset, url.Length); extracted != "" {
-					m.Entities = append(m.Entities, extracted)
-				}
-			}
-			if textURL, ok := entity.(*tg.MessageEntityTextURL); ok {
-				m.Entities = append(m.Entities, textURL.URL)
-			}
-		}
-
-		result = append(result, m)
 	}
 
 	return result
+}
+
+// buildMessage converts a raw *tg.Message into the enriched domain Message,
+// shared by the single-chat history path (extractMessages) and the cross-chat
+// search path (processGlobalHistory) so both stay in lockstep. senderFallback
+// is the peer treated as the sender when FromID is nil (the DM case): the
+// resolved InputPeer for history, or msg.PeerID for global search.
+//
+// Returns ok=false for non-positive IDs. Telegram guarantees positive IDs, but
+// a zero/negative ID would panic FormatRegularRef/FormatScheduledRef at the
+// tool boundary, so every path that emits Message must drop them here.
+func buildMessage(msg *tg.Message, users, chats map[int64]string, senderFallback any) (Message, bool) {
+	if msg.ID <= 0 {
+		slog.Warn("buildMessage: dropping message with non-positive ID; Telegram API contract violation", "msg_id", msg.ID)
+		return Message{}, false
+	}
+
+	m := Message{
+		ID:   msg.ID,
+		Date: time.Unix(int64(msg.Date), 0),
+		Text: msg.Message,
+		Raw:  msg,
+	}
+
+	if msg.FromID != nil {
+		m.SenderID, m.SenderName = extractSender(msg.FromID, users, chats)
+	} else {
+		m.SenderID, m.SenderName = extractSender(senderFallback, users, chats)
+	}
+	if msg.ReplyTo != nil {
+		m.ReplyToID = extractReplyToID(msg.ReplyTo)
+	}
+	if msg.Media != nil {
+		m.Media = extractMediaType(msg.Media)
+	}
+	if reactions, ok := msg.GetReactions(); ok {
+		m.Reactions = extractReactions(reactions)
+	}
+	if replies, ok := msg.GetReplies(); ok {
+		m.Replies = extractReplies(replies)
+	}
+	m.Entities = extractURLEntities(msg)
+
+	return m, true
+}
+
+// extractURLEntities pulls plain and hidden (text_url) hyperlinks out of a
+// message's entities. Telegram encodes entity offsets/lengths in UTF-16 code
+// units, so plain URLs are sliced with extractSubstring rather than by byte.
+func extractURLEntities(msg *tg.Message) []string {
+	var out []string
+	for _, entity := range msg.Entities {
+		switch e := entity.(type) {
+		case *tg.MessageEntityURL:
+			if extracted := extractSubstring(msg.Message, e.Offset, e.Length); extracted != "" {
+				out = append(out, extracted)
+			}
+		case *tg.MessageEntityTextURL:
+			out = append(out, e.URL)
+		}
+	}
+	return out
 }
 
 func (p *Provider) getReadInboxMaxID(ctx context.Context, peer tg.InputPeerClass) (int, error) {

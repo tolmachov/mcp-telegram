@@ -85,6 +85,9 @@ func (h *MessageSendHandler) Register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "SendMessage",
 		Description: "Send a message to a chat. Modes (mutually exclusive): \"send\" (default) delivers immediately; \"schedule\" stores on Telegram's servers and delivers at schedule_at (RFC3339, must be in future; delays < ~10s are sent immediately); \"draft\" saves locally in the Telegram app without sending. reply_to_message_id (opaque handle) works with any mode for threaded replies. Returns status: sent | scheduled | sent_immediate | drafted.",
+		InputSchema: inputSchemaWithEnums[SendMessageInput](map[string][]any{
+			"mode": {"send", "schedule", "draft"},
+		}),
 		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},
 	}, h.handle)
 }
@@ -165,7 +168,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 			draftReq.ReplyTo = &tg.InputReplyToMessage{ReplyToMsgID: replyToID}
 		}
 		if _, err := h.client.MessagesSaveDraft(ctx, draftReq); err != nil {
-			return errResult(fmt.Sprintf("Failed to save draft: %v", err)), nil, nil
+			return telegramErrResult("save draft", err), nil, nil
 		}
 		return nil, &SendMessageResult{
 			Status:             "drafted",
@@ -190,7 +193,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 
 	updates, err := h.client.MessagesSendMessage(ctx, sendReq)
 	if err != nil {
-		return errResult(fmt.Sprintf("Failed to send message: %v", err)), nil, nil
+		return telegramErrResult("send message", err), nil, nil
 	}
 
 	res := &SendMessageResult{

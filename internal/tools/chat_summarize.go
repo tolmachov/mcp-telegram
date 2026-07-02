@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -45,6 +46,10 @@ type SummarizeChatResult struct {
 	PeriodEnd   string `json:"period_end"`   // RFC3339
 	Provider    string `json:"provider"`
 	Summary     string `json:"summary"`
+	// Partial is true when summarization stopped early (e.g. a provider error
+	// on a later batch) and Summary holds only the batches completed so far.
+	Partial bool   `json:"partial,omitempty"`
+	Warning string `json:"warning,omitempty"`
 }
 
 // Register adds the tool to the MCP server.
@@ -102,15 +107,19 @@ func (h *ChatSummarizeHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 			"chat_id": in.ChatID,
 			"error":   err.Error(),
 		})
-		// Specifically surface the sampling-unsupported case so the user gets a
-		// clear next step instead of a generic transport error.
-		if errors.Is(err, summarize.ErrSamplingUnsupported) {
-			return errResult(err.Error()), nil, nil
-		}
-		return errResult(fmt.Sprintf("Summarization failed: %v", err)), nil, nil
 	}
+	errRes, out := h.buildResult(in, since, periodEnd, result, err)
+	return errRes, out, nil
+}
 
-	return nil, &SummarizeChatResult{
+// buildResult shapes the tool response from a summarizer outcome, kept separate
+// from handle so the (result, err) → response branching is unit-testable without
+// driving a live LLM. On success it returns the full summary; on a late failure
+// that still produced text it returns a partial result (salvaging completed
+// batches); the sampling-unsupported case gets a targeted error; and a total
+// failure returns a generic error.
+func (h *ChatSummarizeHandler) buildResult(in SummarizeChatInput, since, periodEnd time.Time, result string, err error) (*mcp.CallToolResult, *SummarizeChatResult) {
+	out := &SummarizeChatResult{
 		ChatID:      in.ChatID,
 		Goal:        in.Goal,
 		Period:      in.Period,
@@ -118,7 +127,24 @@ func (h *ChatSummarizeHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 		PeriodEnd:   periodEnd.UTC().Format(time.RFC3339),
 		Provider:    string(h.config.Provider),
 		Summary:     result,
-	}, nil
+	}
+
+	if err == nil {
+		return nil, out
+	}
+	// Specifically surface the sampling-unsupported case so the user gets a
+	// clear next step instead of a generic transport error.
+	if errors.Is(err, summarize.ErrSamplingUnsupported) {
+		return errResult(err.Error()), nil
+	}
+	// A later batch failed but earlier batches produced a usable summary —
+	// return it marked partial rather than throwing the completed work away.
+	if strings.TrimSpace(result) != "" {
+		out.Partial = true
+		out.Warning = fmt.Sprintf("summarization stopped early: %v", err)
+		return nil, out
+	}
+	return errResult(fmt.Sprintf("Summarization failed: %v", err)), nil
 }
 
 func (h *ChatSummarizeHandler) parseSinceTime(in SummarizeChatInput) (time.Time, error) {

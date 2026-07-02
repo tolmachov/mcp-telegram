@@ -2,12 +2,12 @@ package flags
 
 import (
 	"context"
-	"log/slog"
+	"time"
 
 	"github.com/urfave/cli/v3"
 
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
-	"github.com/tolmachov/mcp-telegram/internal/tools"
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // Environment variable name constants.
@@ -33,6 +33,7 @@ const (
 	MediaMaxBytes        = "media-max-bytes"
 	TGRateLimitRPS       = "tg-rate-limit-rps"
 	PinnedRefreshSecs    = "pinned-refresh-seconds"
+	FloodWaitMaxSecs     = "flood-wait-max-seconds"
 )
 
 // DefaultPinnedRefreshSeconds is the default polling interval for the
@@ -68,18 +69,16 @@ func APIHashFlag() *cli.StringFlag {
 	}
 }
 
+// AllowedPathsFlag defines --allowed-paths. It intentionally sets no default
+// Value: computing the default backup directory touches the filesystem, which
+// must not happen while merely constructing flags (e.g. for `run --help`). When
+// the flag and its env var are both empty, the run command fills in the default
+// lazily via tools.DefaultBackupDir (see app.go).
 func AllowedPathsFlag() *cli.StringSliceFlag {
-	var defaultDirs []string
-	if d, err := tools.DefaultBackupDir(); err != nil {
-		slog.Warn("could not determine default backup directory; --allowed-paths will have no default", "err", err)
-	} else {
-		defaultDirs = []string{d}
-	}
 	return &cli.StringSliceFlag{
 		Name:    AllowedPaths,
-		Usage:   "Allowed directories for file operations",
+		Usage:   "Allowed directories for file operations (defaults to the OS backup directory when unset)",
 		Sources: cli.EnvVars("TELEGRAM_ALLOWED_PATHS"),
-		Value:   defaultDirs,
 	}
 }
 
@@ -170,5 +169,16 @@ func PinnedRefreshSecsFlag() *cli.IntFlag {
 		Value:   DefaultPinnedRefreshSeconds,
 		Usage:   "Polling interval (seconds) for the pinned-chat resource watcher. 0 disables the watcher entirely.",
 		Sources: cli.EnvVars("TELEGRAM_PINNED_REFRESH_SECONDS"),
+	}
+}
+
+// FloodWaitMaxSecsFlag defines --flood-wait-max-seconds: how long the client
+// will wait out a Telegram FLOOD_WAIT before failing with a retry-after error.
+func FloodWaitMaxSecsFlag() *cli.IntFlag {
+	return &cli.IntFlag{
+		Name:    FloodWaitMaxSecs,
+		Value:   int(tgclient.DefaultFloodWaitMaxWait / time.Second),
+		Usage:   "Maximum seconds to wait out a Telegram FLOOD_WAIT before failing fast with a retry-after hint. Keep it below your MCP client's tool-call timeout (Claude Desktop cancels at ~240s) — waiting longer just makes the client time out instead. Raise only for headless/automation runs with no such timeout.",
+		Sources: cli.EnvVars("TELEGRAM_FLOOD_WAIT_MAX_SECONDS"),
 	}
 }

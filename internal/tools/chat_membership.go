@@ -192,6 +192,9 @@ func (h *JoinChatHandler) joinError(ctx context.Context, req *mcp.CallToolReques
 		"chat":  chat,
 		"error": err.Error(),
 	})
+	if res, ok := floodWaitResult("join", err); ok {
+		return res, nil, nil
+	}
 	return errResult(fmt.Sprintf("Failed to join %q: %v", chat, err)), nil, nil
 }
 
@@ -267,6 +270,9 @@ func (h *LeaveChatHandler) leaveChannel(ctx context.Context, req *mcp.CallToolRe
 			return errResult(fmt.Sprintf("Cannot leave %q: you are its owner. Transfer ownership or delete the channel instead.", chat)), nil, nil
 		}
 		mcpLog(ctx, req.Session, logLevelWarning, "LeaveChat", map[string]any{"chat": chat, "error": err.Error()})
+		if res, ok := floodWaitResult("leave", err); ok {
+			return res, nil, nil
+		}
 		return errResult(fmt.Sprintf("Failed to leave %q: %v", chat, err)), nil, nil
 	}
 	return nil, &LeaveChatResult{Status: statusLeft, Chat: chat, ChatID: p.ChannelID, Kind: "channel"}, nil
@@ -282,6 +288,9 @@ func (h *LeaveChatHandler) leaveBasicChat(ctx context.Context, req *mcp.CallTool
 			return nil, &LeaveChatResult{Status: statusNotMember, Chat: chat, ChatID: p.ChatID, Kind: "chat"}, nil
 		}
 		mcpLog(ctx, req.Session, logLevelWarning, "LeaveChat", map[string]any{"chat": chat, "error": err.Error()})
+		if res, ok := floodWaitResult("leave", err); ok {
+			return res, nil, nil
+		}
 		return errResult(fmt.Sprintf("Failed to leave %q: %v", chat, err)), nil, nil
 	}
 	return nil, &LeaveChatResult{Status: statusLeft, Chat: chat, ChatID: p.ChatID, Kind: "chat"}, nil
@@ -370,20 +379,15 @@ func chatRefFromURL(s string) (kind, value string, ok bool) {
 // *tg.Channel for metadata. Users and basic chats are rejected — only
 // channels/supergroups have a public username you can act on this way.
 func resolveChannelByUsername(ctx context.Context, client *tg.Client, username string) (*tg.InputChannel, *tg.Channel, error) {
-	username = strings.TrimPrefix(strings.TrimSpace(username), "@")
-	if username == "" {
-		return nil, nil, fmt.Errorf("empty username")
-	}
-	resolved, err := client.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{Username: username})
+	resolved, err := resolvePublicUsername(ctx, client, username)
 	if err != nil {
 		return nil, nil, err
 	}
-	for _, chat := range resolved.Chats {
-		if channel, ok := chat.(*tg.Channel); ok {
-			return &tg.InputChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash}, channel, nil
-		}
+	input, channel, err := resolvedChannel(resolved)
+	if err != nil {
+		return nil, nil, fmt.Errorf("@%s is %w", strings.TrimPrefix(strings.TrimSpace(username), "@"), err)
 	}
-	return nil, nil, fmt.Errorf("@%s is not a channel or supergroup", username)
+	return input, channel, nil
 }
 
 // joinResultFrom builds a JoinChatResult from the join response. The Ok variant

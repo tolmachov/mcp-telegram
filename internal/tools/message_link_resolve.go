@@ -92,7 +92,7 @@ func (h *MessageLinkResolveHandler) handle(ctx context.Context, _ *mcp.CallToolR
 		if err != nil {
 			return errResult(fmt.Sprintf("failed to resolve username @%s from link: %v", parsed.Username, err)), nil, nil
 		}
-		chatID, title, found := chatIDFromResolved(resolved)
+		chatID, title, found := resolvedPeerInfo(resolved)
 		if !found {
 			return errResult(fmt.Sprintf("username @%s resolved with no usable chat or user. The link may point to a private or deleted entity.", parsed.Username)), nil, nil
 		}
@@ -303,22 +303,5 @@ func validateUsername(s string) error {
 	return nil
 }
 
-// chatIDFromResolved extracts the bare MTProto chat ID and display title from
-// a ContactsResolveUsername response.
-func chatIDFromResolved(r *tg.ContactsResolvedPeer) (int64, string, bool) {
-	for _, c := range r.Chats {
-		switch chat := c.(type) {
-		case *tg.Chat:
-			return chat.ID, chat.Title, true
-		case *tg.Channel:
-			return chat.ID, chat.Title, true
-		}
-	}
-	for _, u := range r.Users {
-		if user, ok := u.(*tg.User); ok {
-			name := strings.TrimSpace(user.FirstName + " " + user.LastName)
-			return user.ID, name, true
-		}
-	}
-	return 0, "", false
-}
+// (username → chat id/title resolution now lives in resolvedPeerInfo, shared
+// across all tools via username_lookup.go.)

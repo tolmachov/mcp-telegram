@@ -154,6 +154,28 @@ func TestProcessGlobalHistoryCursorAllServiceMessages(t *testing.T) {
 	assert.Equal(t, 3, res.NextCursor.MsgID)
 }
 
+// TestProcessGlobalHistoryDropsZeroID verifies the global path routes through
+// the shared buildMessage and drops non-positive IDs (which would otherwise
+// panic FormatRegularRef at the tool boundary), counting them as skipped rather
+// than emitting them.
+func TestProcessGlobalHistoryDropsZeroID(t *testing.T) {
+	p := &Provider{}
+	peer := &tg.PeerUser{UserID: 42}
+	users := []tg.UserClass{&tg.User{ID: 42, FirstName: "Alice", AccessHash: 111}}
+
+	raw := []tg.MessageClass{
+		&tg.Message{ID: 0, PeerID: peer, Message: "zero"},
+		&tg.Message{ID: 5, PeerID: peer, Message: "valid"},
+	}
+	history := &tg.MessagesMessagesSlice{Count: 100, Messages: raw, Users: users}
+
+	res, err := p.processGlobalHistory(history, 50)
+	require.NoError(t, err)
+	require.Equal(t, 1, res.Count, "the zero-ID message must be dropped")
+	assert.Equal(t, 5, res.Messages[0].ID)
+	assert.Equal(t, 1, res.SkippedCount)
+}
+
 // TestProcessGlobalHistoryPartialPageNoCursor: a partial raw page (fewer
 // entries than limit) is the genuine end-of-stream signal; no cursor should
 // be emitted.

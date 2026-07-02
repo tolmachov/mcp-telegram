@@ -97,7 +97,11 @@ func (s *Summarizer) Summarize(ctx context.Context, chatID int64, goal string, s
 
 		summary, err := s.summarizeWithProgress(ctx, prompt, i+1, totalBatches, onProgress)
 		if err != nil {
-			return "", fmt.Errorf("summarizing batch %d: %w", i+1, err)
+			// Return the summary accumulated from earlier batches alongside the
+			// error so the caller can surface partial work instead of discarding
+			// everything — a long chat that fails on batch 19/20 has real value
+			// in the first 18. runningSummary is "" only if batch 1 failed.
+			return runningSummary, fmt.Errorf("summarizing batch %d/%d: %w", i+1, totalBatches, err)
 		}
 
 		runningSummary = strings.TrimSpace(summary)

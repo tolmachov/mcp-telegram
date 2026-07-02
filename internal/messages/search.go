@@ -27,7 +27,7 @@ func (p *Provider) Search(ctx context.Context, chatID int64, opts SearchOptions)
 			opts.MinDate.Format(time.RFC3339), opts.MaxDate.Format(time.RFC3339))
 	}
 
-	peer, err := tgclient.ResolvePeer(ctx, p.client, chatID)
+	peer, err := p.peers.Resolve(ctx, p.client, chatID)
 	if err != nil {
 		return nil, fmt.Errorf("resolving peer: %w", err)
 	}
@@ -54,7 +54,7 @@ func (p *Provider) Search(ctx context.Context, chatID int64, opts SearchOptions)
 		req.SetTopMsgID(opts.TopMsgID)
 	}
 	if opts.FromSenderID != 0 {
-		fromPeer, err := tgclient.ResolvePeer(ctx, p.client, opts.FromSenderID)
+		fromPeer, err := p.peers.Resolve(ctx, p.client, opts.FromSenderID)
 		if err != nil {
 			return nil, fmt.Errorf("resolving from_sender %d: %w", opts.FromSenderID, err)
 		}
@@ -75,7 +75,7 @@ func (p *Provider) Search(ctx context.Context, chatID int64, opts SearchOptions)
 		return nil, fmt.Errorf("searching messages: %w", err)
 	}
 
-	result, err := p.processHistory(history, peer)
+	result, err := p.processHistory(history, peer, opts.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -181,25 +181,18 @@ func (p *Provider) processGlobalHistory(history tg.MessagesMessagesClass, limit 
 		}
 	}
 
-	// Three parallel maps for chat lookups:
-	//   - chatTitleMap holds the *display title* keyed by the raw Telegram ID.
-	//   - chatIDByRaw maps a raw Telegram ID to the bare MTProto ID we return to
-	//     the caller. Bare IDs equal the raw ID for every peer type, so this is
-	//     now effectively an identity map; it is kept as a single seam in case
-	//     the returned ID format ever needs to diverge again.
+	// Two parallel maps for chat lookups:
+	//   - chatTitleMap holds the *display title* keyed by the bare Telegram ID.
 	//   - channelByID holds full channel records so access_hash lookups for
 	//     cursor construction are O(1).
 	chatTitleMap := make(map[int64]string, len(chats))
-	chatIDByRaw := make(map[int64]int64, len(chats))
 	channelByID := make(map[int64]*tg.Channel, len(chats))
 	for _, c := range chats {
 		switch chat := c.(type) {
 		case *tg.Chat:
 			chatTitleMap[chat.ID] = chat.Title
-			chatIDByRaw[chat.ID] = chat.ID
 		case *tg.Channel:
 			chatTitleMap[chat.ID] = chat.Title
-			chatIDByRaw[chat.ID] = chat.ID
 			channelByID[chat.ID] = chat
 		}
 	}
@@ -226,45 +219,18 @@ func (p *Provider) processGlobalHistory(history tg.MessagesMessagesClass, limit 
 		// peerKind — skip the message rather than emitting zero
 		// attribution to the LLM, which would show up as a chat_id=0
 		// result the caller cannot do anything with.
-		chatID, chatTitle, peerKind, _, _ := extractGlobalChat(msg.PeerID, userMap, chatTitleMap, chatIDByRaw, userByID, channelByID)
+		chatID, chatTitle, peerKind, _ := extractGlobalChat(msg.PeerID, userMap, chatTitleMap, userByID, channelByID)
 		if peerKind == "" {
 			slog.Debug("SearchMessagesGlobal: skipping message with unknown peer kind", "msg_id", msg.ID, "peer_type", fmt.Sprintf("%T", msg.PeerID))
 			skipped++
 			continue
 		}
 
-		m := Message{
-			ID:   msg.ID,
-			Date: time.Unix(int64(msg.Date), 0),
-			Text: msg.Message,
-			Raw:  msg,
-		}
-
-		if msg.FromID != nil {
-			m.SenderID, m.SenderName = extractSender(msg.FromID, userMap, chatTitleMap)
-		} else {
-			// DM fallback: sender is the other end of the conversation.
-			m.SenderID, m.SenderName = extractSender(msg.PeerID, userMap, chatTitleMap)
-		}
-
-		if msg.ReplyTo != nil {
-			m.ReplyToID = extractReplyToID(msg.ReplyTo)
-		}
-		if msg.Media != nil {
-			m.Media = extractMediaType(msg.Media)
-		}
-		if replies, ok := msg.GetReplies(); ok {
-			m.Replies = extractReplies(replies)
-		}
-		for _, entity := range msg.Entities {
-			if url, ok := entity.(*tg.MessageEntityURL); ok {
-				if extracted := extractSubstring(msg.Message, url.Offset, url.Length); extracted != "" {
-					m.Entities = append(m.Entities, extracted)
-				}
-			}
-			if textURL, ok := entity.(*tg.MessageEntityTextURL); ok {
-				m.Entities = append(m.Entities, textURL.URL)
-			}
+		// DM fallback: sender is the other end of the conversation (msg.PeerID).
+		m, ok := buildMessage(msg, userMap, chatTitleMap, msg.PeerID)
+		if !ok {
+			skipped++
+			continue
 		}
 
 		result.Messages = append(result.Messages, GlobalMessage{
@@ -310,11 +276,10 @@ func (p *Provider) processGlobalHistory(history tg.MessagesMessagesClass, limit 
 // extractGlobalChat returns everything needed to both report a message's
 // chat to the caller and to rebuild an InputPeer for pagination:
 //
-//	chatID         — bare MTProto id (positive for every peer type)
+//	chatID         — bare MTProto id (positive for every peer type); this is
+//	                 also the id fed back into InputPeer reconstruction
 //	chatTitle      — display name for UI
 //	peerKind       — "user" | "chat" | "channel" (drives cursor round-trip)
-//	peerRawID      — same bare id, named separately because it feeds InputPeer
-//	                 reconstruction for pagination (chatID == peerRawID today)
 //	accessHash     — required for user/channel InputPeer; 0 for basic chat
 //
 // The userByID / channelByID maps are pre-built by the caller so access_hash
@@ -323,14 +288,12 @@ func extractGlobalChat(
 	peer tg.PeerClass,
 	users map[int64]string,
 	chatTitles map[int64]string,
-	chatIDByRaw map[int64]int64,
 	userByID map[int64]*tg.User,
 	channelByID map[int64]*tg.Channel,
-) (chatID int64, chatTitle string, peerKind PeerKind, peerRawID int64, accessHash int64) {
+) (chatID int64, chatTitle string, peerKind PeerKind, accessHash int64) {
 	switch p := peer.(type) {
 	case *tg.PeerUser:
 		peerKind = PeerKindUser
-		peerRawID = p.UserID
 		chatID = p.UserID
 		chatTitle = users[p.UserID]
 		if user, ok := userByID[p.UserID]; ok {
@@ -338,19 +301,11 @@ func extractGlobalChat(
 		}
 	case *tg.PeerChat:
 		peerKind = PeerKindChat
-		peerRawID = p.ChatID
-		chatID = chatIDByRaw[p.ChatID]
-		if chatID == 0 {
-			chatID = p.ChatID
-		}
+		chatID = p.ChatID
 		chatTitle = chatTitles[p.ChatID]
 	case *tg.PeerChannel:
 		peerKind = PeerKindChannel
-		peerRawID = p.ChannelID
-		chatID = chatIDByRaw[p.ChannelID]
-		if chatID == 0 {
-			chatID = p.ChannelID
-		}
+		chatID = p.ChannelID
 		chatTitle = chatTitles[p.ChannelID]
 		if ch, ok := channelByID[p.ChannelID]; ok {
 			accessHash = ch.AccessHash
@@ -375,12 +330,9 @@ func lastGlobalCursorAnchor(
 			if msg.ID <= 0 || msg.PeerID == nil {
 				continue
 			}
-			// nil maps for users/chatTitles/chatIDByRaw are safe: only
-			// peerKind, peerRawID, and accessHash are used for cursor
-			// construction. chatID and chatTitle may be partially populated
-			// (users/channels still compute them from the peer directly) but
-			// the caller discards those return values intentionally.
-			_, _, peerKind, peerRawID, accessHash = extractGlobalChat(msg.PeerID, nil, nil, nil, userByID, channelByID)
+			// nil name maps are safe: only peerKind, chatID (the bare id), and
+			// accessHash feed cursor construction; the title lookup is discarded.
+			peerRawID, _, peerKind, accessHash = extractGlobalChat(msg.PeerID, nil, nil, userByID, channelByID)
 			if peerKind != "" {
 				return peerKind, peerRawID, accessHash, msg.ID
 			}
@@ -389,7 +341,7 @@ func lastGlobalCursorAnchor(
 				continue
 			}
 			// Same nil-map rationale as the *tg.Message case above.
-			_, _, peerKind, peerRawID, accessHash = extractGlobalChat(msg.PeerID, nil, nil, nil, userByID, channelByID)
+			peerRawID, _, peerKind, accessHash = extractGlobalChat(msg.PeerID, nil, nil, userByID, channelByID)
 			if peerKind != "" {
 				return peerKind, peerRawID, accessHash, msg.ID
 			}

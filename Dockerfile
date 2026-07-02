@@ -7,12 +7,23 @@ RUN go mod download
 
 COPY . .
 
-RUN go build -o mcp-telegram .
+# Stamp the version the same way the Makefile does so the container binary
+# self-reports a real version instead of "dev".
+ARG VERSION=docker
+RUN go build -ldflags="-s -w -X github.com/tolmachov/mcp-telegram/internal.Version=${VERSION}" -o mcp-telegram .
 
-FROM alpine:latest
+FROM alpine:3.20
 
-WORKDIR /root/
+# ca-certificates is required for the HTTPS summarize providers (Anthropic,
+# Gemini); without it their TLS handshakes fail inside the container.
+RUN apk add --no-cache ca-certificates \
+	&& adduser -D -h /home/app app
 
-COPY --from=builder /app/mcp-telegram .
+USER app
+WORKDIR /home/app
 
-ENTRYPOINT ["./mcp-telegram"]
+COPY --from=builder /app/mcp-telegram /usr/local/bin/mcp-telegram
+
+# The Telegram session and file-backed config live under the home directory.
+# Mount a volume at /home/app to persist login across container restarts.
+ENTRYPOINT ["mcp-telegram"]

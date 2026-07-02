@@ -1,12 +1,5 @@
 package tools
 
-import (
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"strings"
-)
-
 // forumTopicsCursorEnvelope is the wire form of a GetForumTopics pagination
 // cursor: the (offset_topic, offset_id, offset_date) tuple Telegram's
 // messages.getForumTopics needs to resume from the last topic of the prior
@@ -21,6 +14,8 @@ type forumTopicsCursorEnvelope struct {
 	OffsetDate  int `json:"od"`
 }
 
+func (e forumTopicsCursorEnvelope) cursorVersion() int { return e.Version }
+
 // forumTopicsCursorVersion is the current envelope schema version.
 const forumTopicsCursorVersion = 1
 
@@ -34,13 +29,7 @@ func FormatForumTopicsCursor(offsetTopic, offsetID, offsetDate int) string {
 		OffsetID:    offsetID,
 		OffsetDate:  offsetDate,
 	}
-	payload, err := json.Marshal(env)
-	if err != nil {
-		// A fixed struct of ints cannot fail to marshal; if it ever does,
-		// silently returning an empty cursor would mask the bug.
-		panic(fmt.Sprintf("marshaling forum topics cursor envelope: %v", err))
-	}
-	return base64.RawURLEncoding.EncodeToString(payload)
+	return encodeCursor(env)
 }
 
 // ParseForumTopicsCursor decodes a cursor produced by a prior GetForumTopics
@@ -48,28 +37,9 @@ func FormatForumTopicsCursor(offsetTopic, offsetID, offsetDate int) string {
 // version) is enforced here so the LLM gets a descriptive error instead of a
 // silent bad-pagination loop.
 func ParseForumTopicsCursor(s string) (offsetTopic, offsetID, offsetDate int, err error) {
-	if s == "" {
-		return 0, 0, 0, fmt.Errorf("cursor is empty")
-	}
-	if s != strings.TrimSpace(s) {
-		return 0, 0, 0, fmt.Errorf("cursor contains whitespace")
-	}
-
-	raw, err := base64.RawURLEncoding.DecodeString(s)
+	env, err := decodeCursor[forumTopicsCursorEnvelope](s, forumTopicsCursorVersion)
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("cursor is not valid base64url: %w", err)
-	}
-
-	// We intentionally do NOT use DisallowUnknownFields: the Version field is
-	// the schema-compat mechanism. A future v1-compatible cursor that adds an
-	// optional key must still decode here, so the version check below — not a
-	// strict-field decoder — is what guards against incompatible cursors.
-	var env forumTopicsCursorEnvelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return 0, 0, 0, fmt.Errorf("cursor payload is not valid JSON: %w", err)
-	}
-	if env.Version > forumTopicsCursorVersion {
-		return 0, 0, 0, fmt.Errorf("cursor version %d is newer than supported (%d); restart pagination without the cursor", env.Version, forumTopicsCursorVersion)
+		return 0, 0, 0, err
 	}
 
 	return env.OffsetTopic, env.OffsetID, env.OffsetDate, nil

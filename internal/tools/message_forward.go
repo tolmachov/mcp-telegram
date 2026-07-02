@@ -50,7 +50,10 @@ func (h *MessageForwardHandler) Register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "ForwardMessage",
 		Description: "Copy a message from one chat to another, preserving the original sender attribution and any media. Works with any regular message type (text, media, documents); scheduled handles (\"s:...\") are rejected. Both chats must be accessible to you. The copy is a new, independent message visible to all members of the destination chat — it does not carry the original send time. This duplicates content into another chat, so the host may ask for confirmation. To send fresh text instead of copying, use SendMessage.",
-		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},
+		// DestructiveHint mirrors the other confirm-gated tools (DeleteMessage,
+		// LeaveChat): forwarding publishes content into another chat, an
+		// outward-facing side effect the handler asks to confirm.
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptrTrue(), OpenWorldHint: ptrTrue()},
 	}, h.handle)
 }
 
@@ -69,6 +72,18 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 		return errResult("to_chat_id is required. Use SearchChats or GetChats to find the destination chat ID."), nil, nil
 	}
 
+	// Resolve both peers before confirming so the confirmation dialog only
+	// appears for actionable requests, mirroring DeleteMessage and LeaveChat.
+	// A bad chat ID surfaces as a resolve error instead of a confirm-then-fail.
+	fromPeer, err := tgclient.ResolvePeer(ctx, h.client, in.FromChatID)
+	if err != nil {
+		return errResolvePeer(in.FromChatID, err), nil, nil
+	}
+	toPeer, err := tgclient.ResolvePeer(ctx, h.client, in.ToChatID)
+	if err != nil {
+		return errResolvePeer(in.ToChatID, err), nil, nil
+	}
+
 	confirmed, err := confirmDestructive(ctx, req, fmt.Sprintf(
 		"Forward message %s from chat %d to chat %d? This creates a permanent copy visible to everyone in the destination chat.",
 		ref.Format(), in.FromChatID, in.ToChatID,
@@ -78,15 +93,6 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	}
 	if !confirmed {
 		return textResult("Cancelled by user. No message was forwarded."), nil, nil
-	}
-
-	fromPeer, err := tgclient.ResolvePeer(ctx, h.client, in.FromChatID)
-	if err != nil {
-		return errResolvePeer(in.FromChatID, err), nil, nil
-	}
-	toPeer, err := tgclient.ResolvePeer(ctx, h.client, in.ToChatID)
-	if err != nil {
-		return errResolvePeer(in.ToChatID, err), nil, nil
 	}
 
 	updates, err := h.client.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
@@ -103,7 +109,7 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 			"msg_id":  ref.ID,
 			"error":   err.Error(),
 		})
-		return errResult(fmt.Sprintf("Failed to forward message: %v", err)), nil, nil
+		return telegramErrResult("forward message", err), nil, nil
 	}
 
 	forwardedMsgID, date := extractSentMessageID(updates)

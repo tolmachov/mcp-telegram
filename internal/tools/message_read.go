@@ -39,6 +39,10 @@ type MarkAsReadResult struct {
 	SuccessIDs []int64             `json:"success_ids,omitempty"`
 	Failures   []MarkAsReadFailure `json:"failures,omitempty"`
 	TotalChats int                 `json:"total_chats"`
+	// SkippedIDs holds chats not attempted because the batch stopped early on a
+	// flood wait; Warning explains why. Both are empty on a normal run.
+	SkippedIDs []int64 `json:"skipped_ids,omitempty"`
+	Warning    string  `json:"warning,omitempty"`
 }
 
 // markReadResult is the internal per-chat outcome before formatting.
@@ -70,24 +74,55 @@ func (h *MessageReadHandler) handle(ctx context.Context, req *mcp.CallToolReques
 
 	results := make([]markReadResult, 0, len(in.ChatIDs))
 
-	for _, chatID := range in.ChatIDs {
+	for i, chatID := range in.ChatIDs {
 		err := h.markChatAsRead(ctx, chatID)
 		results = append(results, markReadResult{
 			chatID:  chatID,
 			success: err == nil,
 			err:     err,
 		})
-		// Continue even on error — partial failures are surfaced via the result
-		// payload AND via a structured Warning log so MCP clients with a log
-		// panel can flag them.
+		// Continue past ordinary errors — partial failures are surfaced via the
+		// result payload AND via a structured Warning log so MCP clients with a
+		// log panel can flag them. A flood wait is the one exception (below): it
+		// stops the batch so we don't deepen the rate limit.
 		if err != nil {
 			mcpLog(ctx, req.Session, logLevelWarning, "MarkAsRead", map[string]any{
 				"chat_id": chatID,
 				"error":   err.Error(),
 			})
+			// A flood wait is account-level and cumulative: marking the
+			// remaining chats would fire more ReadHistory calls into the flood
+			// window and deepen the limit. Stop the batch and report the rest as
+			// skipped so the model waits instead of retry-spamming.
+			if msg, ok := floodWaitMessage("mark chats as read", err); ok {
+				out := h.buildResult(results)
+				out.SkippedIDs = append([]int64(nil), in.ChatIDs[i+1:]...)
+				out.Warning = msg
+				return nil, out, nil
+			}
 		}
 	}
 
+	return h.finalResult(results)
+}
+
+// finalResult assembles the tool result for a completed (un-interrupted) batch,
+// collapsing to an error when every chat failed.
+func (h *MessageReadHandler) finalResult(results []markReadResult) (*mcp.CallToolResult, *MarkAsReadResult, error) {
+	out := h.buildResult(results)
+	if out.Failed > 0 && out.Successful == 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "Failed to mark all %d chat(s) as read:", out.Failed)
+		for _, f := range out.Failures {
+			fmt.Fprintf(&b, "\n  chat_id=%d: %s", f.ChatID, f.Error)
+		}
+		return errResult(b.String()), nil, nil
+	}
+	return nil, out, nil
+}
+
+// buildResult tallies per-chat outcomes into the structured result.
+func (h *MessageReadHandler) buildResult(results []markReadResult) *MarkAsReadResult {
 	out := &MarkAsReadResult{TotalChats: len(results)}
 	for _, r := range results {
 		if r.success {
@@ -101,15 +136,7 @@ func (h *MessageReadHandler) handle(ctx context.Context, req *mcp.CallToolReques
 			})
 		}
 	}
-	if out.Failed > 0 && out.Successful == 0 {
-		var b strings.Builder
-		b.WriteString(fmt.Sprintf("Failed to mark all %d chat(s) as read:", out.Failed))
-		for _, f := range out.Failures {
-			b.WriteString(fmt.Sprintf("\n  chat_id=%d: %s", f.ChatID, f.Error))
-		}
-		return errResult(b.String()), nil, nil
-	}
-	return nil, out, nil
+	return out
 }
 
 // markChatAsRead marks a single chat as read.

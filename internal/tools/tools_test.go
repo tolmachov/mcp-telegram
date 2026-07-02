@@ -2,12 +2,46 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
+	"github.com/gotd/td/tgerr"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestFloodWaitResult verifies the flood-wait detector extracts the retry
+// duration both from a bare FLOOD_WAIT and from the wrapped form the
+// flood-wait middleware returns when the wait exceeds its max ("flood wait
+// argument is too big (... > ...)"). The wrapped case is the one that bit us:
+// the middleware wraps the original error, so detection must unwrap.
+func TestFloodWaitResult(t *testing.T) {
+	flood := &tgerr.Error{Code: 420, Message: "FLOOD_WAIT_265", Type: "FLOOD_WAIT", Argument: 265}
+
+	t.Run("bare flood wait", func(t *testing.T) {
+		res, ok := floodWaitResult("join", flood)
+		require.True(t, ok)
+		require.NotNil(t, res)
+		assert.True(t, res.IsError)
+		txt := toolResultText(res)
+		assert.Contains(t, txt, "265 seconds")
+		assert.Contains(t, txt, "join")
+	})
+
+	t.Run("wrapped by the waiter (too big)", func(t *testing.T) {
+		wrapped := fmt.Errorf("flood wait argument is too big (4m25s > 1m0s): %w", flood)
+		res, ok := floodWaitResult("join", wrapped)
+		require.True(t, ok)
+		assert.Contains(t, toolResultText(res), "265 seconds")
+	})
+
+	t.Run("non-flood error returns false", func(t *testing.T) {
+		res, ok := floodWaitResult("join", fmt.Errorf("some other error"))
+		assert.False(t, ok)
+		assert.Nil(t, res)
+	})
+}
 
 // Note: progress-token extraction is now SDK-provided
 // (req.Params.GetProgressToken()), so the previous TestProgressToken case was

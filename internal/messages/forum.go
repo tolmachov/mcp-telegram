@@ -8,8 +8,6 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
-
-	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // ForumTopic is a single thematic thread ("topic") of a forum supergroup, as
@@ -60,7 +58,7 @@ func (p *Provider) FetchForumTopics(ctx context.Context, chatID int64, query str
 		limit = 100
 	}
 
-	peer, err := tgclient.ResolvePeer(ctx, p.client, chatID)
+	peer, err := p.peers.Resolve(ctx, p.client, chatID)
 	if err != nil {
 		return nil, fmt.Errorf("resolving peer: %w", err)
 	}

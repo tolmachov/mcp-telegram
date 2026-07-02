@@ -4,7 +4,7 @@
 // resource-template variables (ref/resource) as the user types. This server
 // backs those suggestions with the user's Telegram chats:
 //   - prompt argument "chat" (chat-catchup, find-and-reply) → chat titles / @usernames
-//   - resource variable "chat_id" (telegram://chat/{chat_id}/info) → numeric chat IDs
+//   - resource variable "chat_id" (telegram://chats/{chat_id}/info) → numeric chat IDs
 //   - prompt argument "period" (daily-digest, chat-catchup) → day / week / month
 package completion
 
@@ -83,7 +83,7 @@ func (c *completer) handle(ctx context.Context, req *mcp.CompleteRequest) (*mcp.
 }
 
 // completeChats returns matching chat suggestions. When asID is true the
-// returned values are numeric chat IDs (for the telegram://chat/{chat_id}/info
+// returned values are numeric chat IDs (for the telegram://chats/{chat_id}/info
 // resource template); otherwise they are @usernames or titles (for prompt
 // arguments that accept "Chat ID, @username, or chat title").
 //

@@ -191,7 +191,7 @@ func TestRunEOFBeforeInitialize(t *testing.T) {
 
 func TestRunContextCancelBeforeInitialize(t *testing.T) {
 	srv, stdinW, _ := newServerWithPipes(t, &tgclient.Config{})
-	defer stdinW.Close()
+	defer func() { _ = stdinW.Close() }()
 
 	ctx, cancel := context.WithCancel(t.Context())
 
@@ -226,8 +226,8 @@ func TestIsTTYRejectsPipe(t *testing.T) {
 	// isTTY must return false and take the JSON-RPC response path.
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
-	defer r.Close()
-	defer w.Close()
+	defer func() { _ = r.Close() }()
+	defer func() { _ = w.Close() }()
 	assert.False(t, isTTY(r))
 }
 

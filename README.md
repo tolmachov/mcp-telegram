@@ -100,7 +100,7 @@ Set environment variables in your `.env` file or pass them via `--env`.
 
 ## Available Tools
 
-22 tools exposed to MCP clients. Messages are identified by opaque string
+29 tools exposed to MCP clients. Messages are identified by opaque string
 handles (`"42"` for regular, `"s:42"` for scheduled) — copy them back
 verbatim from tool outputs to follow-up calls, never parse or construct
 them manually.
@@ -115,6 +115,8 @@ them manually.
 | `SearchMessages` | Search within one chat by substring, with optional date / sender / media / thread filters |
 | `SearchMessagesGlobal` | Search by substring across all chats with opaque cursor-based pagination |
 | `GetMessageContext` | Get messages around a specific anchor message in chronological order |
+| `GetReplies` | Get the messages of a reply thread / comment section under a root message |
+| `GetForumTopics` | List a forum supergroup's topics with opaque cursor-based pagination |
 | `SendMessage` | Send, reply, schedule, or draft a message. `mode` = `send` (default) / `schedule` / `draft`; `reply_to_message_id` works with any mode; `schedule_at` is RFC3339 |
 | `EditMessage` | Edit a message; for scheduled handles, `schedule_at` reschedules delivery in the same call |
 | `DeleteMessage` | Delete a message; `"s:<id>"` handles cancel pending scheduled messages |
@@ -124,7 +126,7 @@ them manually.
 | `LeaveChat` | Leave a channel/group/supergroup by @username or numeric ID (asks for confirmation) |
 | `ResolveMessageLink` | Parse `t.me` / `tg://` message links into `chat_id`, `message_id`, and `topic_message_id` for forum links |
 | `MarkAsRead` | Mark one or more chats as read |
-| `BackupMessages` | Export messages to a text file (idempotent; overwrites target) |
+| `BackupMessages` | Export messages to a text file. Filters mirror the read tools: `from_date` (inclusive) / `to_date` (exclusive) / `limit` |
 | `ResolveUsername` | Resolve @username to user/chat info |
 | `SetChatMute` | Mute or unmute chat notifications (`muted` bool + optional `duration_seconds`) |
 | `SummarizeChat` | AI-powered chat summarization via sampling / Gemini / Ollama / Anthropic |
@@ -141,8 +143,8 @@ them manually.
 |-----|-------------|
 | `telegram://me` | Current user info |
 | `telegram://chats` | All chats list |
-| `telegram://chat/{id}/info` | Detailed info for any chat ID via resource template |
-| `telegram://chats/{id}` | Last 100 messages from a pinned chat (dynamic resource, only for currently pinned chats) |
+| `telegram://chats/{id}/info` | Detailed info for any chat ID via resource template |
+| `telegram://chats/{id}/messages` | Last 100 messages from a pinned chat (dynamic resource, only for currently pinned chats) |
 
 Pinned chat resources are created dynamically for each pinned chat and refreshed in the background; clients will receive `resources/list_changed` when the set changes.
 
@@ -243,6 +245,7 @@ Credentials resolve in this priority order (higher wins): CLI flags (`--api-id`,
 | `TELEGRAM_MEDIA_MAX_BYTES` | Max bytes `GetMedia` will download per call (cap to avoid OOM on large attachments) | `52428800` (50 MiB) |
 | `TELEGRAM_RATE_LIMIT_RPS` | RPS ceiling for history-fetching calls to Telegram. Exceeding Telegram's FLOOD_WAIT thresholds pauses all tools. | `0` (safe built-in default) |
 | `TELEGRAM_PINNED_REFRESH_SECONDS` | Polling interval (seconds) for the pinned-chat resource watcher. `0` disables the watcher. | `30` |
+| `TELEGRAM_FLOOD_WAIT_MAX_SECONDS` | Max seconds to wait out a Telegram `FLOOD_WAIT` before failing fast with a retry-after hint. Keep below your MCP client's tool-call timeout (Claude Desktop ≈ 240s). | `60` |
 
 ## Destructive Actions
 
@@ -256,6 +259,22 @@ Tools like `DeleteMessage` request user confirmation via [MCP elicitation](https
 Config values set via `mcp-telegram config set` (API keys, Telegram credentials) follow the same backend: Keychain on macOS, plaintext JSON on Linux/Windows.
 
 > **Note on the plaintext store (Linux/Windows):** the session file grants full access to your Telegram account. Place it on an encrypted filesystem (LUKS/BitLocker) and do **not** sync `~/.local/state/mcp-telegram` (or `~/.config`) to an unencrypted cloud backup — a leaked `session.json` is equivalent to a leaked login.
+
+## Development
+
+```bash
+make build            # build the binary with version metadata
+make lint             # golangci-lint
+make test             # unit tests
+make test-integration # end-to-end tests (need a real account + TEST_* vars)
+```
+
+Unit tests run without credentials. The integration suite in `test/` is behind
+the `integration` build tag and drives the server over a real stdio pipe using a
+second MCP implementation (mark3labs/mcp-go) as the client, to catch wire-level
+interop issues. It reads the `TEST_*` variables documented in `.env.example`
+(e.g. `TEST_CHAT_ID`, `TEST_GROUP_ID`) and skips any test whose variable or
+Telegram credentials are unset.
 
 ## License
 
