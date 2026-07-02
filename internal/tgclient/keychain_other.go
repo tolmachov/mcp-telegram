@@ -54,7 +54,7 @@ func (s *SessionStorage) LoadSession(_ context.Context) ([]byte, error) {
 		return nil, session.ErrNotFound
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("reading session file: %w", err)
 	}
 	if len(data) == 0 {
 		return nil, session.ErrNotFound
@@ -83,5 +83,8 @@ func (s *SessionStorage) DeleteSession() error {
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return fmt.Errorf("deleting session file: %w", err)
+	}
+	return nil
 }
