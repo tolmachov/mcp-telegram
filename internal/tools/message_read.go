@@ -38,7 +38,10 @@ type MarkAsReadResult struct {
 	Failed     int                 `json:"failed"`
 	SuccessIDs []int64             `json:"success_ids,omitempty"`
 	Failures   []MarkAsReadFailure `json:"failures,omitempty"`
-	TotalChats int                 `json:"total_chats"`
+	// TotalChats counts chats *attempted* (Successful + Failed), not chats
+	// requested. On the flood-wait early-stop path the batch ends before every
+	// input is tried, so the requested total is TotalChats + len(SkippedIDs).
+	TotalChats int `json:"total_chats"`
 	// SkippedIDs holds chats not attempted because the batch stopped early on a
 	// flood wait; Warning explains why. Both are empty on a normal run.
 	SkippedIDs []int64 `json:"skipped_ids,omitempty"`
