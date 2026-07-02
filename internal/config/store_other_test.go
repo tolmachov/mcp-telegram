@@ -37,7 +37,9 @@ func TestResolveConfigPathErrorsWhenMkdirAllFails(t *testing.T) {
 
 	_, err = resolveConfigPath()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "creating config directory")
+	// The state dir is created by the shared xdg.StateDir helper, whose error
+	// names it the "state directory" (it backs both config.json and session.json).
+	assert.Contains(t, err.Error(), "creating state directory")
 }
 
 func TestFileStoreGetSetDeleteList(t *testing.T) {
