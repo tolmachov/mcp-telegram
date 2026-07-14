@@ -52,11 +52,18 @@ type SummarizeChatResult struct {
 	Warning string `json:"warning,omitempty"`
 }
 
+// MetaWarning is the CallToolResult.Meta key a tool sets to flag a degraded
+// success — a usable 200 (IsError=false) that nonetheless hides a failure the
+// operator should see. The server's request logger reads it and escalates the
+// entry to Warn (see internal/server/reqlog.go); without it a partial result
+// would be logged only at Info server-side and the failure would be invisible.
+const MetaWarning = "mcp-telegram/warning"
+
 // Register adds the tool to the MCP server.
 func (h *ChatSummarizeHandler) Register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "SummarizeChat",
-		Description: "Summarize messages from a Telegram chat using rolling/incremental summarization with AI. Specify a goal (e.g., 'key decisions', 'action items') and a time period. Uses the configured LLM provider for summarization.",
+		Description: "Use this whenever the user asks to summarize, digest, recap, or 'catch up on' a Telegram chat. Prefer it over fetching messages with GetMessages and summarizing them yourself: it performs rolling/incremental summarization server-side, so it handles long histories (weeks/months, hundreds of messages) without loading every message into the conversation context. Specify a goal (e.g. 'key decisions', 'action items', 'what did I miss') and a time period (day/week/month) or a since date.",
 		InputSchema: inputSchemaWithEnums[SummarizeChatInput](map[string][]any{
 			"period": {"day", "week", "month"},
 		}),
@@ -139,10 +146,12 @@ func (h *ChatSummarizeHandler) buildResult(in SummarizeChatInput, since, periodE
 	}
 	// A later batch failed but earlier batches produced a usable summary —
 	// return it marked partial rather than throwing the completed work away.
+	// The warning also rides in Meta so the server request logger surfaces
+	// this degraded success at Warn (the result itself is not an error).
 	if strings.TrimSpace(result) != "" {
 		out.Partial = true
 		out.Warning = fmt.Sprintf("summarization stopped early: %v", err)
-		return nil, out
+		return &mcp.CallToolResult{Meta: mcp.Meta{MetaWarning: out.Warning}}, out
 	}
 	return errResult(fmt.Sprintf("Summarization failed: %v", err)), nil
 }

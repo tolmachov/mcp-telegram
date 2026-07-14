@@ -1,0 +1,12 @@
+# Keep the Cloud Build upload context small and free of secrets/artifacts.
+# gcloud uses this file (not .dockerignore) to decide what to upload; the
+# Dockerfile build itself is further narrowed by .dockerignore.
+.git
+.github
+.gocache
+mcp-telegram
+*.txt
+.env
+.env.*
+!.env.example
+research/

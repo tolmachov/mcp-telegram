@@ -21,10 +21,15 @@ type GeminiProvider struct {
 	client *http.Client
 }
 
-// NewGeminiProvider creates a new GeminiProvider.
+// NewGeminiProvider creates a new GeminiProvider. When model is empty it
+// defaults to gemini-flash-latest — the alias that always tracks the current
+// GA flash model. Pinning an older model (e.g. gemini-2.0-flash) eventually
+// breaks: Google restricts superseded models to "existing users" and a new
+// API consumer then gets 404 "no longer available to new users"; the alias
+// sidesteps that class of failure.
 func NewGeminiProvider(apiKey, model string) *GeminiProvider {
 	if model == "" {
-		model = "gemini-2.0-flash"
+		model = "gemini-flash-latest"
 	}
 	return &GeminiProvider{
 		apiKey: apiKey,

@@ -22,6 +22,7 @@
 - **Messages**: Read, search, inspect context, send, draft, schedule, link-resolve, and backup messages
 - **AI Summarization**: Summarize chat conversations using multiple LLM providers
 - **Secure**: Session stored in macOS Keychain (file-based storage on Linux/Windows)
+- **Two transports**: local **stdio** (single account) or remote **streamable HTTP** with an embedded OAuth 2.1 server and per-user Telegram QR login — multi-user and deployable to Cloud Run (see [Remote (HTTP) Mode](#remote-http-mode))
 
 ## Installation
 
@@ -277,6 +278,87 @@ Credentials resolve in this priority order (higher wins): CLI flags (`--api-id`,
 | `TELEGRAM_RATE_LIMIT_RPS` | RPS ceiling for history-fetching calls to Telegram. Exceeding Telegram's FLOOD_WAIT thresholds pauses all tools. | `0` (safe built-in default) |
 | `TELEGRAM_PINNED_REFRESH_SECONDS` | Polling interval (seconds) for the pinned-chat resource watcher. `0` disables the watcher. | `30` |
 | `TELEGRAM_FLOOD_WAIT_MAX_SECONDS` | Max seconds to wait out a Telegram `FLOOD_WAIT` before failing fast with a retry-after hint. Keep below your MCP client's tool-call timeout (Claude Desktop ≈ 240s). | `60` |
+| `MCP_TRANSPORT` | MCP transport: `stdio` or `http` (streamable HTTP) | `stdio` |
+| `MCP_HTTP_ADDR` | Listen address for the HTTP transport | `:8080` |
+| `MCP_AUTH` | HTTP authorization mode: `none` or `telegram` | `none` |
+| `AUTH_ISSUER_URL` | Public base URL (OAuth issuer); required with `MCP_AUTH=telegram` | - |
+| `AUTH_ALLOWED_USERS` | Comma-separated Telegram user ids allowed to log in, or `*` alone to allow any account (only as private as the URL; cannot be mixed with ids); required with `MCP_AUTH=telegram` | - |
+| `AUTH_TOKEN_KEY` | Base64 32-byte master key(s) for tokens + session encryption (comma-separated for rotation); required with `MCP_AUTH=telegram` | - |
+| `AUTH_ALLOWED_REDIRECTS` | Extra exact-match HTTPS OAuth redirect URIs (loopback and claude.ai/claude.com are always allowed) | - |
+| `AUTH_SESSION_BUCKET` / `AUTH_SESSION_DIR` | Where per-user Telegram sessions live (GCS bucket or local dir; exactly one with `MCP_AUTH=telegram`) | - |
+
+## Remote (HTTP) Mode
+
+By default the server speaks the **stdio** transport: one local process, one
+Telegram account, driven by a desktop MCP client. It can instead run as a
+long-lived remote server over the MCP **streamable HTTP** transport, so a single
+hosted deployment serves many users — each authenticating with their own
+Telegram account — over the network.
+
+| | stdio (default) | streamable HTTP |
+|---|---|---|
+| Transport | stdio pipe | HTTP on one endpoint (`POST` for requests, `GET` for the SSE stream) |
+| Users | single account on the host | many, isolated per Telegram user |
+| Auth | none (local trust) | embedded OAuth 2.1 + Telegram QR login |
+| Session storage | Keychain / local file | encrypted per-user blobs in a GCS bucket or a directory |
+| Use for | local desktop clients | a shared or hosted server |
+
+### How authorization works
+
+Authorization is pure Telegram — no bots, no external identity provider. The
+server embeds a small OAuth 2.1 authorization server (Dynamic Client
+Registration + PKCE); when a client connects it opens the authorization page,
+which shows a **QR code**. You scan it with the Telegram app (Settings → Devices
+→ Link Desktop Device), and the resulting MTProto session both proves who you
+are and becomes your working session (a 2FA-password prompt appears if your
+account has one). Only Telegram user ids listed in `AUTH_ALLOWED_USERS` may
+complete the login — everyone else is rejected after the scan and their session
+is discarded. Each allowed user gets their own isolated session, **encrypted at
+rest** (AES-256-GCM with a key derived from `AUTH_TOKEN_KEY`, bound to the
+issuer and user id), and their own MCP server assembly.
+
+### Try it locally
+
+```bash
+# Issuer on loopback may use plain http:
+mcp-telegram run --transport http --http-addr :8080 \
+  --auth telegram \
+  --auth-issuer-url http://localhost:8080 \
+  --auth-allowed-users 123456789 \
+  --auth-token-key "$(head -c 32 /dev/urandom | base64)" \
+  --auth-session-dir ~/.local/state/mcp-telegram/http-sessions
+```
+
+Then point an MCP client at `http://localhost:8080/` and complete the browser
+flow. `--auth none` (the default for HTTP) serves plain streamable HTTP with no
+authentication — only safe behind a trusted proxy. Use `*` as the sole entry in
+`--auth-allowed-users` to allow **any** Telegram account (the deployment is then
+only as private as its URL; `*` cannot be combined with specific ids).
+
+### Deploy to Google Cloud Run
+
+The production target is Cloud Run: one container, scale-to-zero, secrets from
+Secret Manager, sessions in a GCS bucket. In outline:
+
+1. **Create a bucket** for the encrypted per-user sessions and a dedicated
+   service account with `roles/storage.objectAdmin` on just that bucket.
+2. **Store two secrets** in Secret Manager — the Telegram `api_hash` and a
+   freshly generated 32-byte `AUTH_TOKEN_KEY`
+   (`head -c 32 /dev/urandom | base64`) — and grant the service account
+   `roles/secretmanager.secretAccessor` on them. The token key never leaves
+   Secret Manager in plaintext, and it is what decrypts the sessions — losing it
+   logs everyone out; leaking it exposes every session.
+3. **Deploy** with `gcloud run deploy --source .`, wiring the non-secret env
+   from [`deploy/cloudrun.env.example`](deploy/cloudrun.env.example), the two
+   secrets via `--set-secrets`, and **`--max-instances=1`** (mandatory: two
+   instances loading the same MTProto session trip Telegram's
+   `AUTH_KEY_DUPLICATED` and forcibly log every user out).
+4. **Set `AUTH_ISSUER_URL`** to the service URL and redeploy — tokens and
+   session encryption are bound to the issuer value.
+
+Copy-paste commands, the exact IAM bindings, the token/revocation model, and how
+to connect claude.ai / Claude Desktop / Claude Code are in
+**[deploy/README.md](deploy/README.md)**.
 
 ## Destructive Actions
 

@@ -22,9 +22,12 @@ const (
 	variantResearch = "research"
 )
 
-// methodListTools is the JSON-RPC method the compact middleware rewrites. The
-// SDK's own constant is unexported, so we spell it out.
-const methodListTools = "tools/list"
+// JSON-RPC method names the middlewares key off. The SDK's own constants are
+// unexported, so we spell them out.
+const (
+	methodListTools = "tools/list"
+	methodCallTool  = "tools/call"
+)
 
 // serveMode says how a variant serves tools. Encoding it as one enum instead of
 // two independent bools makes illegal combinations (e.g. "read-only subset but
@@ -200,14 +203,15 @@ func compactToolsMiddleware(logger *slog.Logger) mcp.Middleware {
 }
 
 // newInner builds one inner mcp.Server: it registers the given tool handlers,
-// runs wire (resources/template/prompts), and — when compact is true — installs
-// the description-shortening middleware.
+// runs wire (resources/template/prompts), installs the request-logging
+// middleware, and — when compact is true — the description-shortening one.
 func newInner(impl *mcp.Implementation, opts *mcp.ServerOptions, handlers []tools.Handler, wire func(*mcp.Server), compact bool, logger *slog.Logger) *mcp.Server {
 	s := mcp.NewServer(impl, opts)
 	tools.RegisterTools(s, handlers)
 	if wire != nil {
 		wire(s)
 	}
+	s.AddReceivingMiddleware(requestLogMiddleware(logger))
 	if compact {
 		s.AddReceivingMiddleware(compactToolsMiddleware(logger))
 	}

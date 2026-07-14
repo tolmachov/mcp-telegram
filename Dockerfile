@@ -26,4 +26,7 @@ COPY --from=builder /app/mcp-telegram /usr/local/bin/mcp-telegram
 
 # The Telegram session and file-backed config live under the home directory.
 # Mount a volume at /home/app to persist login across container restarts.
+# In the HTTP mode (MCP_TRANSPORT=http + AUTH_* env) no volume is needed:
+# per-user sessions live in the configured GCS bucket.
 ENTRYPOINT ["mcp-telegram"]
+CMD ["run"]

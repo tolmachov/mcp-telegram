@@ -40,12 +40,16 @@ func TestChatSummarizeBuildResult(t *testing.T) {
 
 	t.Run("late failure with partial text is salvaged", func(t *testing.T) {
 		errRes, out := h.buildResult(in, since, end, "batches 1-18", errors.New("batch 19/20: boom"))
-		require.Nil(t, errRes)
 		require.NotNil(t, out)
 		assert.Equal(t, "batches 1-18", out.Summary)
 		assert.True(t, out.Partial)
 		assert.Contains(t, out.Warning, "stopped early")
 		assert.Contains(t, out.Warning, "boom")
+		// A partial result is not an IsError, but it must carry the MetaWarning
+		// marker so the server request logger surfaces it at Warn.
+		require.NotNil(t, errRes)
+		assert.False(t, errRes.IsError)
+		assert.Equal(t, out.Warning, errRes.Meta[MetaWarning])
 	})
 
 	t.Run("failure with no text is a hard error", func(t *testing.T) {

@@ -9,8 +9,10 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/tolmachov/mcp-telegram/internal/authsrv"
 	"github.com/tolmachov/mcp-telegram/internal/flags"
 	"github.com/tolmachov/mcp-telegram/internal/server"
+	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 	"github.com/tolmachov/mcp-telegram/internal/tools"
@@ -34,6 +36,60 @@ func requireCredentials(cmd *cli.Command) (*tgclient.Config, error) {
 		return nil, fmt.Errorf("%s and %s are required (set via env, flags, or 'config set')", flags.EnvTelegramAPIID, flags.EnvTelegramAPIHash)
 	}
 	return cfg, nil
+}
+
+// buildAuthOptions assembles the auth config and per-user session store for
+// --auth telegram, or returns (nil, nil, nil) for --auth none. Fails fast on
+// misconfiguration: unlike missing Telegram credentials (reported through the
+// MCP init-error dance for stdio hosts), auth is HTTP-only and has no MCP
+// peer yet, so a plain error is the right surface.
+func buildAuthOptions(ctx context.Context, cmd *cli.Command) (*authsrv.Config, sessionstore.Store, error) {
+	if cmd.String(flags.Auth) != flags.AuthModeTelegram {
+		return nil, nil, nil
+	}
+
+	allow, err := authsrv.ParseAllowlist(cmd.StringSlice(flags.AuthAllowedUsers))
+	if err != nil {
+		return nil, nil, fmt.Errorf("--%s: %w", flags.AuthAllowedUsers, err)
+	}
+
+	cfg := &authsrv.Config{
+		IssuerURL:      cmd.String(flags.AuthIssuerURL),
+		Allow:          allow,
+		TokenKeys:      cmd.StringSlice(flags.AuthTokenKey),
+		ExtraRedirects: cmd.StringSlice(flags.AuthAllowedRedirects),
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, nil, fmt.Errorf("auth configuration: %w", err)
+	}
+
+	bucket := cmd.String(flags.AuthSessionBucket)
+	dir := cmd.String(flags.AuthSessionDir)
+	var backend sessionstore.Store
+	switch {
+	case bucket != "" && dir != "":
+		return nil, nil, fmt.Errorf("--%s and --%s are mutually exclusive", flags.AuthSessionBucket, flags.AuthSessionDir)
+	case bucket != "":
+		gcs, err := sessionstore.NewGCS(ctx, bucket)
+		if err != nil {
+			return nil, nil, err
+		}
+		backend = gcs
+	case dir != "":
+		fs, err := sessionstore.NewFS(dir)
+		if err != nil {
+			return nil, nil, err
+		}
+		backend = fs
+	default:
+		return nil, nil, fmt.Errorf("--auth telegram requires exactly one of --%s / --%s", flags.AuthSessionBucket, flags.AuthSessionDir)
+	}
+
+	cipher, err := sessionstore.NewCipher(cfg.TokenKeys, cfg.IssuerURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cfg, sessionstore.Encrypted(backend, cipher), nil
 }
 
 // New creates a new instance of application.
@@ -64,6 +120,17 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					flags.PinnedRefreshSecsFlag(),
 					flags.FloodWaitMaxSecsFlag(),
 					flags.VariantFlag(),
+					flags.TransportFlag(),
+					flags.HTTPAddrFlag(),
+					flags.LogFormatFlag(),
+					flags.LogLevelFlag(),
+					flags.AuthFlag(),
+					flags.AuthIssuerURLFlag(),
+					flags.AuthAllowedUsersFlag(),
+					flags.AuthTokenKeyFlag(),
+					flags.AuthAllowedRedirectsFlag(),
+					flags.AuthSessionBucketFlag(),
+					flags.AuthSessionDirFlag(),
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					// Credential validation is intentionally NOT performed here.
@@ -100,15 +167,25 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 						AnthropicAPIKey: cmd.String(flags.AnthropicAPIKey),
 						BatchTokens:     cmd.Int(flags.SummarizeBatchTokens),
 					}
+					authCfg, store, err := buildAuthOptions(ctx, cmd)
+					if err != nil {
+						return err
+					}
 					serverOpts := server.Options{
 						Config:         cfg,
 						Version:        Version,
+						Auth:           authCfg,
+						SessionStore:   store,
 						AllowedPaths:   allowedPaths,
 						SummarizeCfg:   summarizeCfg,
 						MediaMaxBytes:  cmd.Int(flags.MediaMaxBytes),
 						TGRateLimitRPS: cmd.Int(flags.TGRateLimitRPS),
 						PinnedRefresh:  time.Duration(cmd.Int(flags.PinnedRefreshSecs)) * time.Second,
 						Variant:        cmd.String(flags.Variant),
+						Transport:      cmd.String(flags.Transport),
+						HTTPAddr:       cmd.String(flags.HTTPAddr),
+						LogFormat:      cmd.String(flags.LogFormat),
+						LogLevel:       cmd.String(flags.LogLevel),
 						Stdin:          cmd.Root().Reader,
 						Stdout:         cmd.Root().Writer,
 						ErrOut:         cmd.Root().ErrWriter,

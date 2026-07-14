@@ -2,10 +2,12 @@ package flags
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/tolmachov/mcp-telegram/internal/authsrv"
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
@@ -35,6 +37,23 @@ const (
 	PinnedRefreshSecs    = "pinned-refresh-seconds"
 	FloodWaitMaxSecs     = "flood-wait-max-seconds"
 	Variant              = "variant"
+	Transport            = "transport"
+	HTTPAddr             = "http-addr"
+	LogFormat            = "log-format"
+	LogLevel             = "log-level"
+	Auth                 = "auth"
+	AuthIssuerURL        = "auth-issuer-url"
+	AuthAllowedUsers     = "auth-allowed-users"
+	AuthTokenKey         = "auth-token-key" //nolint:gosec // flag name, not a credential
+	AuthAllowedRedirects = "auth-allowed-redirects"
+	AuthSessionBucket    = "auth-session-bucket"
+	AuthSessionDir       = "auth-session-dir"
+)
+
+// Auth mode values for --auth.
+const (
+	AuthModeNone     = "none"
+	AuthModeTelegram = "telegram"
 )
 
 // DefaultPinnedRefreshSeconds is the default polling interval for the
@@ -181,6 +200,123 @@ func FloodWaitMaxSecsFlag() *cli.IntFlag {
 		Value:   int(tgclient.DefaultFloodWaitMaxWait / time.Second),
 		Usage:   "Maximum seconds to wait out a Telegram FLOOD_WAIT before failing fast with a retry-after hint. Keep it below your MCP client's tool-call timeout (Claude Desktop cancels at ~240s) — waiting longer just makes the client time out instead. Raise only for headless/automation runs with no such timeout.",
 		Sources: cli.EnvVars("TELEGRAM_FLOOD_WAIT_MAX_SECONDS"),
+	}
+}
+
+// TransportFlag selects the MCP transport: newline-delimited stdio (default,
+// what desktop hosts spawn) or streamable HTTP (for remote deployments).
+// The value is validated in server.New.
+func TransportFlag() *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:    Transport,
+		Value:   "stdio",
+		Usage:   "MCP transport: 'stdio' (default) or 'http' (streamable HTTP on --http-addr)",
+		Sources: cli.EnvVars("MCP_TRANSPORT"),
+	}
+}
+
+// HTTPAddrFlag defines the listen address used when --transport is 'http'.
+func HTTPAddrFlag() *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:    HTTPAddr,
+		Value:   ":8080",
+		Usage:   "Listen address for the streamable HTTP transport (used with --transport http)",
+		Sources: cli.EnvVars("MCP_HTTP_ADDR"),
+	}
+}
+
+// AuthFlag selects the HTTP authorization mode. 'none' serves MCP without
+// authentication (put a trusted proxy in front); 'telegram' enables the
+// embedded OAuth 2.1 server with per-user Telegram QR login.
+func AuthFlag() *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:    Auth,
+		Value:   AuthModeNone,
+		Usage:   "HTTP authorization mode: 'none' or 'telegram' (embedded OAuth + per-user Telegram QR login; requires --transport http)",
+		Sources: cli.EnvVars("MCP_AUTH"),
+		Action: func(_ context.Context, _ *cli.Command, value string) error {
+			if value != AuthModeNone && value != AuthModeTelegram {
+				return fmt.Errorf("--%s must be %q or %q, got %q", Auth, AuthModeNone, AuthModeTelegram, value)
+			}
+			return nil
+		},
+	}
+}
+
+func AuthIssuerURLFlag() *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:    AuthIssuerURL,
+		Usage:   "Public base URL of this server (OAuth issuer), e.g. https://mcp.example.com. Required with --auth telegram.",
+		Sources: cli.EnvVars("AUTH_ISSUER_URL"),
+	}
+}
+
+func AuthAllowedUsersFlag() *cli.StringSliceFlag {
+	return &cli.StringSliceFlag{
+		Name:    AuthAllowedUsers,
+		Usage:   "Telegram user ids allowed to log in (comma-separated), or '*' alone to allow ANY account (only as private as the URL). '*' cannot be combined with specific ids. Required with --auth telegram.",
+		Sources: cli.EnvVars("AUTH_ALLOWED_USERS"),
+		// Validate the wildcard/ids rule at parse time so a bad value fails
+		// fast with a clear message, using the same parser server startup does.
+		Action: func(_ context.Context, _ *cli.Command, value []string) error {
+			if _, err := authsrv.ParseAllowlist(value); err != nil {
+				return fmt.Errorf("--%s: %w", AuthAllowedUsers, err)
+			}
+			return nil
+		},
+	}
+}
+
+func AuthTokenKeyFlag() *cli.StringSliceFlag {
+	return &cli.StringSliceFlag{
+		Name:    AuthTokenKey,
+		Usage:   "Base64-encoded 32-byte master key(s) for sealing tokens and encrypting sessions (comma-separated; first seals, all open — enables rotation). Required with --auth telegram.",
+		Sources: cli.EnvVars("AUTH_TOKEN_KEY"),
+	}
+}
+
+func AuthAllowedRedirectsFlag() *cli.StringSliceFlag {
+	return &cli.StringSliceFlag{
+		Name:    AuthAllowedRedirects,
+		Usage:   "Extra exact-match HTTPS redirect URIs allowed for OAuth clients (loopback URIs and the claude.ai/claude.com callbacks are always allowed)",
+		Sources: cli.EnvVars("AUTH_ALLOWED_REDIRECTS"),
+	}
+}
+
+func AuthSessionBucketFlag() *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:    AuthSessionBucket,
+		Usage:   "GCS bucket for per-user Telegram sessions (exactly one of --auth-session-bucket / --auth-session-dir with --auth telegram)",
+		Sources: cli.EnvVars("AUTH_SESSION_BUCKET"),
+	}
+}
+
+func AuthSessionDirFlag() *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:    AuthSessionDir,
+		Usage:   "Local directory for per-user Telegram sessions (exactly one of --auth-session-bucket / --auth-session-dir with --auth telegram)",
+		Sources: cli.EnvVars("AUTH_SESSION_DIR"),
+	}
+}
+
+// LogFormatFlag selects the log output format. Empty (the default) resolves
+// to JSON in http mode (for GCP Cloud Logging) and text otherwise; see app.go.
+func LogFormatFlag() *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:    LogFormat,
+		Usage:   "Log format: 'json' (GCP-structured) or 'text'. Default: json for --transport http, text for stdio.",
+		Sources: cli.EnvVars("MCP_LOG_FORMAT"),
+	}
+}
+
+// LogLevelFlag sets the minimum log level. Debug surfaces the high-volume
+// list/lifecycle method calls; info (default) keeps them quiet.
+func LogLevelFlag() *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:    LogLevel,
+		Value:   "info",
+		Usage:   "Minimum log level: debug, info, warn, or error. Debug also logs list/lifecycle method calls.",
+		Sources: cli.EnvVars("MCP_LOG_LEVEL"),
 	}
 }
 
