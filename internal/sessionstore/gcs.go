@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"cloud.google.com/go/storage"
 	"github.com/gotd/td/session"
+	"google.golang.org/api/iterator"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
@@ -19,11 +21,10 @@ import (
 // Encrypted); bucket IAM is the outer protection layer.
 //
 // Because each authorization keeps its own object, a client that drops its
-// token without logging out leaves an object behind. There is no automatic
-// reclamation yet; an object older than the refresh-token TTL can never be
-// used again (its refresh would be rejected as expired) and is safe to delete,
-// so an age-based sweep is the intended follow-up. Set a bucket lifecycle rule
-// as an interim guard against unbounded growth.
+// token without logging out leaves an object behind. The authsrv orphan
+// sweeper reclaims those via List: an object older than the refresh-token TTL
+// can never be used again (its refresh would be rejected as expired) and is
+// deleted.
 type GCS struct {
 	bucket *storage.BucketHandle
 }
@@ -49,9 +50,9 @@ func NewGCS(ctx context.Context, bucketName string) (*GCS, error) {
 // legacy per-user layout so pre-upgrade sessions remain readable.
 func objectName(userID tgid.UserID, sid string) string {
 	if sid == "" {
-		return "sessions/" + userID.String() + ".bin"
+		return sessionPrefix + userID.String() + ".bin"
 	}
-	return "sessions/" + userID.String() + "." + sid + ".bin"
+	return sessionPrefix + userID.String() + "." + sid + ".bin"
 }
 
 func (g *GCS) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {
@@ -78,6 +79,32 @@ func (g *GCS) Delete(ctx context.Context, userID tgid.UserID, sid string) error 
 		return fmt.Errorf("sessionstore: deleting %s: %w", name, err)
 	}
 	return nil
+}
+
+const sessionPrefix = "sessions/"
+
+func (g *GCS) List(ctx context.Context) ([]SessionRef, error) {
+	var refs []SessionRef
+	it := g.bucket.Objects(ctx, &storage.Query{Prefix: sessionPrefix})
+	for {
+		attrs, err := it.Next()
+		if errors.Is(err, iterator.Done) {
+			return refs, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("sessionstore: listing sessions: %w", err)
+		}
+		base, found := strings.CutPrefix(attrs.Name, sessionPrefix)
+		if !found {
+			continue
+		}
+		userID, sid, ok := parseSessionBase(base)
+		if !ok {
+			// A foreign object under the prefix — not ours to touch.
+			continue
+		}
+		refs = append(refs, SessionRef{UserID: userID, SID: sid, UpdatedAt: attrs.Updated})
+	}
 }
 
 type gcsSession struct {

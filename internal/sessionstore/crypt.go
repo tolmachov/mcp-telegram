@@ -255,6 +255,14 @@ func (s *encryptedStore) Delete(ctx context.Context, userID tgid.UserID, sid str
 	return nil
 }
 
+func (s *encryptedStore) List(ctx context.Context) ([]SessionRef, error) {
+	refs, err := s.inner.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("encrypted store: %w", err)
+	}
+	return refs, nil
+}
+
 type encryptedSession struct {
 	inner   session.Storage
 	cipher  *Cipher

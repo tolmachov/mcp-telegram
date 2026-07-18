@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/session"
 
@@ -258,6 +259,85 @@ func TestFSSplitKeyNotMasterDecryptable(t *testing.T) {
 	got, err := store.Session(user, sid, uk).LoadSession(ctx)
 	if err != nil || string(got) != "mtproto" {
 		t.Errorf("load with per-session key = (%q, %v), want (%q, nil)", got, err, "mtproto")
+	}
+}
+
+// TestFSList pins the listing contract on the FS backend: legacy and suffixed
+// sessions are attributed correctly, foreign files are skipped.
+func TestFSList(t *testing.T) {
+	ctx := t.Context()
+	dir := filepath.Join(t.TempDir(), "sessions")
+	fs, err := NewFS(dir)
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+
+	const sidA = "0123456789abcdef0123456789abcdef"
+	if err := fs.Session(1, "", nil).StoreSession(ctx, []byte("legacy")); err != nil {
+		t.Fatalf("store legacy: %v", err)
+	}
+	if err := fs.Session(1, sidA, nil).StoreSession(ctx, []byte("a")); err != nil {
+		t.Fatalf("store a: %v", err)
+	}
+	if err := fs.Session(2, sidA, nil).StoreSession(ctx, []byte("b")); err != nil {
+		t.Fatalf("store b: %v", err)
+	}
+	// Foreign files must be skipped, not attributed or failed on.
+	if err := os.WriteFile(filepath.Join(dir, "README.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("writing stray file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "not-a-number.bin"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("writing stray bin: %v", err)
+	}
+
+	refs, err := fs.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	got := map[string]bool{}
+	for _, r := range refs {
+		got[r.UserID.String()+"|"+r.SID] = true
+		if r.UpdatedAt.IsZero() {
+			t.Errorf("ref %v has zero UpdatedAt", r)
+		}
+	}
+	want := []string{"1|", "1|" + sidA, "2|" + sidA}
+	if len(refs) != len(want) {
+		t.Fatalf("List returned %d refs (%v), want %d", len(refs), got, len(want))
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("List is missing %q", w)
+		}
+	}
+}
+
+// TestMemoryList mirrors TestFSList on the Memory backend and pins that the
+// injectable clock stamps writes.
+func TestMemoryList(t *testing.T) {
+	ctx := t.Context()
+	m := NewMemory()
+	stamp := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	m.Now = func() time.Time { return stamp }
+
+	if err := m.Session(7, "", nil).StoreSession(ctx, []byte("legacy")); err != nil {
+		t.Fatalf("store legacy: %v", err)
+	}
+	if err := m.Session(7, "aa", nil).StoreSession(ctx, []byte("a")); err != nil {
+		t.Fatalf("store a: %v", err)
+	}
+
+	refs, err := m.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("List returned %d refs, want 2", len(refs))
+	}
+	for _, r := range refs {
+		if r.UserID != 7 || !r.UpdatedAt.Equal(stamp) {
+			t.Errorf("ref = %+v, want user 7 at %v", r, stamp)
+		}
 	}
 }
 

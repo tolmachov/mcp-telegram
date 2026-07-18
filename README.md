@@ -331,6 +331,14 @@ latter.) Pre-existing sessions from older versions stay readable with the master
 key alone and are transparently upgraded to a split-key session on their next
 token refresh.
 
+Session lifecycle is managed automatically: `POST /revoke` (RFC 7009) with an
+access or refresh token deletes that authorization's own session — its refresh
+grant dies immediately, while an already-issued access token remains valid
+until it expires (≤55 minutes). Sessions abandoned without revocation are
+reclaimed by a background sweep once their stored blob is older than the
+refresh-token TTL plus a day — past that age no refresh token for the session
+can still be valid, so deletion cannot log out a live client.
+
 ### Try it locally
 
 ```bash

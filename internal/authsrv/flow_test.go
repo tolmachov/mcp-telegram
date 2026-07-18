@@ -912,6 +912,112 @@ func TestIdentityFromContext(t *testing.T) {
 	})
 }
 
+// revokeToken posts to /revoke and returns the status code.
+func revokeToken(t *testing.T, ts *httptest.Server, form url.Values) int {
+	t.Helper()
+	resp, err := http.PostForm(ts.URL+"/revoke", form)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+// loginAndRedeem drives a full QR flow and code exchange, returning the token
+// pair plus the session identity minted for it.
+func loginAndRedeem(t *testing.T, a *AuthServer, ts *httptest.Server, flow *fakeFlow, clientID string) (*tokenResponse, codeClaims) {
+	t.Helper()
+	verifier, challenge := pkcePair()
+	loginID := startAuthorize(t, ts, clientID, challenge, "s")
+	code, _ := finishLogin(t, ts, loginID, flow, LoginUser{ID: allowedUser, Username: "durov"}, []byte("sess"))
+	tr, _, status := redeemCode(t, ts, clientID, testRedirectURI, code, verifier)
+	require.Equal(t, http.StatusOK, status)
+	cc, err := openBlob(a.sealer, codeBlob, code, a.now())
+	require.NoError(t, err)
+	return tr, cc
+}
+
+func TestRevoke(t *testing.T) {
+	t.Run("refresh token deletes its session and kills the grant", func(t *testing.T) {
+		store := sessionstore.NewMemory()
+		flow := newFakeFlow()
+		a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
+		clientID := registerClient(t, ts, testRedirectURI)
+		tr, cc := loginAndRedeem(t, a, ts, flow, clientID)
+
+		require.Equal(t, http.StatusOK, revokeToken(t, ts, url.Values{
+			"token": {tr.RefreshToken}, "token_type_hint": {"refresh_token"},
+		}))
+		exists, err := store.Exists(context.Background(), allowedUser, cc.SessionID)
+		require.NoError(t, err)
+		assert.False(t, exists, "revocation must delete the token's own session")
+
+		_, oe, status := refreshGrant(t, ts, clientID, tr.RefreshToken)
+		require.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "invalid_grant", oe.Error)
+	})
+
+	t.Run("access token works too, hint is advisory", func(t *testing.T) {
+		store := sessionstore.NewMemory()
+		flow := newFakeFlow()
+		a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
+		clientID := registerClient(t, ts, testRedirectURI)
+		tr, cc := loginAndRedeem(t, a, ts, flow, clientID)
+
+		// Wrong hint: the handler must fall through to the other token kind.
+		require.Equal(t, http.StatusOK, revokeToken(t, ts, url.Values{
+			"token": {tr.AccessToken}, "token_type_hint": {"refresh_token"},
+		}))
+		exists, err := store.Exists(context.Background(), allowedUser, cc.SessionID)
+		require.NoError(t, err)
+		assert.False(t, exists)
+	})
+
+	t.Run("invalid token is acknowledged without effect", func(t *testing.T) {
+		store := sessionstore.NewMemory()
+		flow := newFakeFlow()
+		a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
+		clientID := registerClient(t, ts, testRedirectURI)
+		_, cc := loginAndRedeem(t, a, ts, flow, clientID)
+
+		require.Equal(t, http.StatusOK, revokeToken(t, ts, url.Values{"token": {"mcp_rt_garbage"}}))
+		require.Equal(t, http.StatusOK, revokeToken(t, ts, url.Values{}))
+		exists, err := store.Exists(context.Background(), allowedUser, cc.SessionID)
+		require.NoError(t, err)
+		assert.True(t, exists, "an invalid token must not delete anything")
+	})
+
+	t.Run("client_id mismatch is acknowledged without effect", func(t *testing.T) {
+		store := sessionstore.NewMemory()
+		flow := newFakeFlow()
+		a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
+		clientID := registerClient(t, ts, testRedirectURI)
+		tr, cc := loginAndRedeem(t, a, ts, flow, clientID)
+
+		require.Equal(t, http.StatusOK, revokeToken(t, ts, url.Values{
+			"token": {tr.RefreshToken}, "client_id": {"mcp_cid_someone_else"},
+		}))
+		exists, err := store.Exists(context.Background(), allowedUser, cc.SessionID)
+		require.NoError(t, err)
+		assert.True(t, exists, "a client_id mismatch must not delete the session")
+	})
+
+	t.Run("legacy token deletes the legacy object", func(t *testing.T) {
+		store := sessionstore.NewMemory()
+		a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
+		require.NoError(t, store.Session(allowedUser, "", nil).StoreSession(context.Background(), []byte("legacy")))
+		now := a.now()
+		legacyRefresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
+			Subject: allowedUser.String(), ClientID: "mcp_cid_x",
+			IssuedAt: now.Unix(), LoginAt: now.Unix(),
+		})
+		require.NoError(t, err)
+
+		require.Equal(t, http.StatusOK, revokeToken(t, ts, url.Values{"token": {legacyRefresh}}))
+		exists, err := store.Exists(context.Background(), allowedUser, "")
+		require.NoError(t, err)
+		assert.False(t, exists, "revoking a legacy token must delete the legacy object")
+	})
+}
+
 // TestRefreshCarriesSessionIdentity pins that a session's sid and per-session
 // key ride verbatim through every refresh, so a refreshed token keeps pointing
 // at (and decrypting) the same session object.

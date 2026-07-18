@@ -17,11 +17,27 @@ package sessionstore
 
 import (
 	"context"
+	"strings"
+	"time"
 
 	"github.com/gotd/td/session"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
+
+// SessionRef identifies one stored session and when its blob was last
+// written. UpdatedAt is the storage-layer modification time (object mtime),
+// which is always >= the LoginAt of any token bound to the session — login,
+// upgrade-on-refresh, and every gotd re-store all write the blob. The orphan
+// sweeper relies on that invariant: a blob older than the refresh-token TTL
+// cannot be reached by any live grant.
+type SessionRef struct {
+	UserID tgid.UserID
+	// SID is the per-authorization session id; "" for the legacy per-user
+	// object.
+	SID       string
+	UpdatedAt time.Time
+}
 
 // Store is a collection of per-authorization Telegram sessions.
 //
@@ -36,11 +52,37 @@ import (
 //
 // Exists is a cheap probe used by token refresh to force a re-login after a
 // session was deleted. Delete removes one session; the pool builder calls it
-// when Telegram refuses a decryptable session (ErrSessionUnauthorized), and an
-// operator may call it to force a re-login. A session that fails to decrypt is
-// deliberately NOT deleted (see ErrCorruptSession).
+// when Telegram refuses a decryptable session (ErrSessionUnauthorized), token
+// revocation calls it for the revoked session, and an operator may call it to
+// force a re-login. A session that fails to decrypt is deliberately NOT
+// deleted (see ErrCorruptSession).
+//
+// List enumerates every stored session; the orphan sweeper uses it to reclaim
+// sessions whose blobs are older than any live refresh grant could be.
+// Backends skip entries they cannot attribute (malformed names) rather than
+// failing the whole listing.
 type Store interface {
 	Session(userID tgid.UserID, sid string, userKey []byte) session.Storage
 	Exists(ctx context.Context, userID tgid.UserID, sid string) (bool, error)
 	Delete(ctx context.Context, userID tgid.UserID, sid string) error
+	List(ctx context.Context) ([]SessionRef, error)
+}
+
+// parseSessionBase reverses the object/file naming shared by the GCS and FS
+// backends: "<userID>.bin" (legacy, sid "") or "<userID>.<sid>.bin". ok is
+// false for anything else — listings skip such entries instead of failing.
+func parseSessionBase(base string) (userID tgid.UserID, sid string, ok bool) {
+	name, found := strings.CutSuffix(base, ".bin")
+	if !found || name == "" {
+		return 0, "", false
+	}
+	idPart, sidPart, hasSID := strings.Cut(name, ".")
+	if hasSID && sidPart == "" {
+		return 0, "", false
+	}
+	id, err := tgid.Parse(idPart)
+	if err != nil {
+		return 0, "", false
+	}
+	return id, sidPart, true
 }

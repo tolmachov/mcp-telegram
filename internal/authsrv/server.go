@@ -24,13 +24,14 @@ type AuthServer struct {
 	now        func() time.Time
 
 	// loginCtx carries values to login flows and signals shutdown to the
-	// janitor; canceling it (via Close) stops the janitor. It does NOT abort
-	// in-flight QR flows — those detach from any context (see StartLoginFunc)
-	// and are stopped explicitly by Close draining the pending registry and
-	// calling Abort on each flow.
+	// janitor and the orphan-session sweeper; canceling it (via Close) stops
+	// both. It does NOT abort in-flight QR flows — those detach from any
+	// context (see StartLoginFunc) and are stopped explicitly by Close
+	// draining the pending registry and calling Abort on each flow.
 	loginCtx    context.Context
 	cancelLogin context.CancelFunc
 	janitorDone chan struct{}
+	sweepDone   chan struct{}
 
 	pendingMu sync.Mutex
 	pending   map[string]*pendingLogin
@@ -74,16 +75,20 @@ func New(cfg *Config, logger *slog.Logger, store sessionstore.Store, startLogin 
 		loginCtx:    ctx,
 		cancelLogin: cancel,
 		janitorDone: make(chan struct{}),
+		sweepDone:   make(chan struct{}),
 		pending:     map[string]*pendingLogin{},
 	}
 	go a.janitor(ctx)
+	go a.sessionSweeper(ctx)
 	return a, nil
 }
 
-// Close stops the janitor and aborts every in-flight Telegram login. Idempotent.
+// Close stops the janitor and the orphan-session sweeper, then aborts every
+// in-flight Telegram login. Idempotent.
 func (a *AuthServer) Close() {
 	a.cancelLogin()
 	<-a.janitorDone
+	<-a.sweepDone
 
 	a.pendingMu.Lock()
 	stale := make([]*pendingLogin, 0, len(a.pending))

@@ -67,6 +67,33 @@ func (f *FS) Delete(_ context.Context, userID tgid.UserID, sid string) error {
 	return nil
 }
 
+func (f *FS) List(_ context.Context) ([]SessionRef, error) {
+	entries, err := os.ReadDir(f.dir)
+	if err != nil {
+		return nil, fmt.Errorf("sessionstore: listing %s: %w", f.dir, err)
+	}
+	var refs []SessionRef
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		userID, sid, ok := parseSessionBase(e.Name())
+		if !ok {
+			// A foreign file in the directory (temp file, stray note) — skip.
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue // deleted between ReadDir and Info
+			}
+			return nil, fmt.Errorf("sessionstore: stat %s: %w", e.Name(), err)
+		}
+		refs = append(refs, SessionRef{UserID: userID, SID: sid, UpdatedAt: info.ModTime()})
+	}
+	return refs, nil
+}
+
 type fsSession struct {
 	path string
 }
