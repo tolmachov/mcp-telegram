@@ -25,6 +25,38 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
+// sidHexLen is the character length of a session id: hex of 16 random bytes.
+const sidHexLen = 32
+
+// ValidSID reports whether s is a well-formed session id — exactly sidHexLen
+// lowercase hex characters. Session ids reach this layer as an object-name /
+// file-path suffix, so callers that take a sid from an untrusted source (a
+// token blob) must validate it with ValidSID before it can influence a path;
+// parseSessionBase applies the same rule so the sweeper never attributes (and
+// thus never deletes) a foreign, operator-named object.
+func ValidSID(s string) bool {
+	if len(s) != sidHexLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// sessionBase builds the object/file base name for a session: "<userID>.bin"
+// (legacy, sid "") or "<userID>.<sid>.bin". It is the single source of truth
+// for the naming scheme; parseSessionBase is its inverse.
+func sessionBase(userID tgid.UserID, sid string) string {
+	if sid == "" {
+		return userID.String() + ".bin"
+	}
+	return userID.String() + "." + sid + ".bin"
+}
+
 // SessionRef identifies one stored session and when its blob was last
 // written. UpdatedAt is the storage-layer modification time (object mtime),
 // which is always >= the LoginAt of any token bound to the session — login,
@@ -68,16 +100,18 @@ type Store interface {
 	List(ctx context.Context) ([]SessionRef, error)
 }
 
-// parseSessionBase reverses the object/file naming shared by the GCS and FS
-// backends: "<userID>.bin" (legacy, sid "") or "<userID>.<sid>.bin". ok is
-// false for anything else — listings skip such entries instead of failing.
+// parseSessionBase reverses sessionBase: "<userID>.bin" (legacy, sid "") or
+// "<userID>.<sid>.bin". ok is false for anything else — a legacy name with a
+// non-numeric id, or a suffixed name whose sid is not a valid session id (an
+// operator's "123.bak.bin", a stray file). Listings skip such entries, so the
+// sweeper only ever deletes objects this package itself could have written.
 func parseSessionBase(base string) (userID tgid.UserID, sid string, ok bool) {
 	name, found := strings.CutSuffix(base, ".bin")
 	if !found || name == "" {
 		return 0, "", false
 	}
 	idPart, sidPart, hasSID := strings.Cut(name, ".")
-	if hasSID && sidPart == "" {
+	if hasSID && !ValidSID(sidPart) {
 		return 0, "", false
 	}
 	id, err := tgid.Parse(idPart)

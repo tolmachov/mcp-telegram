@@ -106,6 +106,73 @@ func TestUserPoolIndependentSessionsPerUser(t *testing.T) {
 	}
 }
 
+// TestUserPoolEvictSession pins that EvictSession tears down a specific
+// session's assembly (even though it is idle-but-warm) so a revoked/upgraded
+// session's client is stopped and the next request cold-rebuilds.
+func TestUserPoolEvictSession(t *testing.T) {
+	var builds, closes atomic.Int64
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+		builds.Add(1)
+		return builtAssembly{
+			Handler: okHandler(),
+			Closer:  closerFunc(func() error { closes.Add(1); return nil }),
+		}, nil
+	}, testWWWAuthenticate, discardLogger())
+
+	if rec := poolRequestSID(t, pool, 1, "aaaa"); rec.Code != http.StatusOK {
+		t.Fatalf("build status = %d, want 200", rec.Code)
+	}
+	pool.EvictSession(1, "aaaa")
+	if got := closes.Load(); got != 1 {
+		t.Errorf("evicted session closed %d times, want 1", got)
+	}
+	if pool.size() != 0 {
+		t.Errorf("pool size after EvictSession = %d, want 0", pool.size())
+	}
+	// A different session of the same user is untouched by the targeted evict.
+	if rec := poolRequestSID(t, pool, 1, "aaaa"); rec.Code != http.StatusOK {
+		t.Fatalf("rebuild status = %d, want 200", rec.Code)
+	}
+	if got := builds.Load(); got != 2 {
+		t.Errorf("builder ran %d times, want 2 (rebuild after evict)", got)
+	}
+}
+
+// TestUserPoolPerUserCap pins that one account cannot fill the pool: once it is
+// at userPoolMaxPerUser assemblies, a further authorization evicts THAT
+// account's own LRU entry, never another user's.
+func TestUserPoolPerUserCap(t *testing.T) {
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+		return okAssembly(), nil
+	}, testWWWAuthenticate, discardLogger())
+
+	// Another user's assembly must survive the churn below.
+	if rec := poolRequestSID(t, pool, 2, "bbbb"); rec.Code != http.StatusOK {
+		t.Fatalf("user 2 status = %d, want 200", rec.Code)
+	}
+	// User 1 opens one more authorization than its per-account cap.
+	for i := 0; i <= userPoolMaxPerUser; i++ {
+		sid := "aaaa" + string(rune('a'+i))
+		if rec := poolRequestSID(t, pool, 1, sid); rec.Code != http.StatusOK {
+			t.Fatalf("user 1 sid %s status = %d, want 200", sid, rec.Code)
+		}
+	}
+	// User 1 is capped; user 2's single entry still present → total cap+1.
+	if got := pool.size(); got != userPoolMaxPerUser+1 {
+		t.Errorf("pool size = %d, want %d (user1 capped + user2)", got, userPoolMaxPerUser+1)
+	}
+	pool.mu.Lock()
+	_, user2Present := pool.entries[poolKey{id: 2, sid: "bbbb"}]
+	user1Count := pool.countForUserLocked(1)
+	pool.mu.Unlock()
+	if !user2Present {
+		t.Error("user 2's assembly was evicted by user 1's churn; per-account cap must not touch other users")
+	}
+	if user1Count != userPoolMaxPerUser {
+		t.Errorf("user 1 holds %d assemblies, want %d (its cap)", user1Count, userPoolMaxPerUser)
+	}
+}
+
 func TestUserPoolUnauthorizedSessionMapsTo401(t *testing.T) {
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
 		return builtAssembly{}, tgclient.ErrSessionUnauthorized
@@ -213,7 +280,7 @@ func TestUserPoolDeadBusyAssemblyMapsTo401(t *testing.T) {
 	// Simulate a hung stream holding the entry while the client dies: the
 	// pool cannot tear it down, so new requests get the re-auth 401.
 	pool.mu.Lock()
-	pool.entries[sessionKey{id: 1}].inflight.Add(1)
+	pool.entries[poolKey{id: 1}].inflight.Add(1)
 	pool.mu.Unlock()
 	dead.Store(true)
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
+	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
 // AuthServer is the embedded OAuth 2.1 authorization server protecting the
@@ -33,8 +34,29 @@ type AuthServer struct {
 	janitorDone chan struct{}
 	sweepDone   chan struct{}
 
+	// invalidate tears down any live client assembly for a (userID, sid)
+	// session so it cannot re-store the blob after we delete it (revocation,
+	// legacy upgrade). Set via SetSessionInvalidator; nil when no pool is wired
+	// (tests, or a caller that does not run the user pool).
+	invalidate func(userID tgid.UserID, sid string)
+
 	pendingMu sync.Mutex
 	pending   map[string]*pendingLogin
+}
+
+// SetSessionInvalidator wires the callback that stops a live client for a
+// session before its blob is deleted. The user pool is built after the auth
+// server, so this is a setter rather than a constructor argument. Safe to leave
+// unset: invalidation is then a no-op.
+func (a *AuthServer) SetSessionInvalidator(fn func(userID tgid.UserID, sid string)) {
+	a.invalidate = fn
+}
+
+// invalidateSession invokes the configured invalidator, if any.
+func (a *AuthServer) invalidateSession(userID tgid.UserID, sid string) {
+	if a.invalidate != nil {
+		a.invalidate(userID, sid)
+	}
 }
 
 // New validates cfg and builds the authorization server. store persists the

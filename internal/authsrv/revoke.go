@@ -8,15 +8,21 @@ import (
 
 // handleRevoke implements RFC 7009. Since every authorization owns an
 // independent session object named by the token's sid claim, revoking a token
-// deletes exactly that session: its refresh grant dies immediately (the
-// per-sid Exists gate on /token fails). Limits, stated plainly:
+// tears down that session's live client (if any) and deletes its object, so the
+// refresh grant dies immediately (the per-sid Exists gate on /token fails) and
+// no warm client can re-store the blob. Limits, stated plainly:
 //
 //   - Already-issued access tokens are stateless and keep verifying until they
-//     expire (<= accessTokenTTL), and a warm pooled assembly keeps serving
-//     until evicted; the next cold build 401s into a fresh login.
+//     expire (<= accessTokenTTL); the pool assembly is torn down here, so the
+//     next request cold-builds and 401s into a fresh login.
 //   - A legacy token (empty sid) deletes the shared legacy per-user object,
-//     logging out ALL of that account's legacy clients — acceptable while the
-//     legacy fallback exists at all.
+//     logging out ALL of that account's not-yet-upgraded legacy clients —
+//     acceptable while the legacy fallback exists at all.
+//   - This does NOT terminate the Telegram-side device authorization (it stays
+//     listed in the account's Settings → Devices until Telegram expires it);
+//     revocation forgets the server's copy of the session. After deletion no
+//     party holds the auth key, so the credential is unusable, but a full
+//     Telegram auth.LogOut on revoke is a possible follow-up.
 //
 // Possession of a decryptable token is sufficient authorization to revoke it
 // (§2.1 — all our clients are public); expiry does not block revocation, since
@@ -56,6 +62,18 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		ok()
 		return
 	}
+	// A non-empty sid becomes a storage object-name/path suffix below; a
+	// malformed one means a forged/corrupt token — acknowledge without touching
+	// storage.
+	if sid != "" && !validSessionID(sid) {
+		a.logger.Warn("revocation ignored: malformed session id", "user_id", userID)
+		ok()
+		return
+	}
+	// Tear down any live client for this session BEFORE deleting the object, so a
+	// warm gotd client cannot re-store (resurrect) the blob after the delete and
+	// let the revoked refresh token pass the Exists gate again.
+	a.invalidateSession(userID, sid)
 	if err := a.store.Delete(r.Context(), userID, sid); err != nil {
 		// The client cannot retry meaningfully and must not learn store
 		// internals; the orphan sweeper will reclaim the session later.

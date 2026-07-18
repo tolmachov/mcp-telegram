@@ -32,13 +32,11 @@ func NewFS(dir string) (*FS, error) {
 }
 
 // path maps a session to its file. An empty sid keeps the legacy per-user
-// layout. sid is server-generated hex (see authsrv.validSessionID), so it
-// cannot contain path separators or traversal sequences.
+// layout. A non-empty sid is validated (ValidSID) before any store operation
+// builds a path from a token-carried value, so it is always hex and cannot
+// contain path separators or traversal sequences.
 func (f *FS) path(userID tgid.UserID, sid string) string {
-	if sid == "" {
-		return filepath.Join(f.dir, userID.String()+".bin")
-	}
-	return filepath.Join(f.dir, userID.String()+"."+sid+".bin")
+	return filepath.Join(f.dir, sessionBase(userID, sid))
 }
 
 func (f *FS) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {
@@ -84,10 +82,11 @@ func (f *FS) List(_ context.Context) ([]SessionRef, error) {
 		}
 		info, err := e.Info()
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue // deleted between ReadDir and Info
-			}
-			return nil, fmt.Errorf("sessionstore: stat %s: %w", e.Name(), err)
+			// A transient stat error (the file vanished, or an EIO/ESTALE on one
+			// entry) must not abort the whole listing — that would stall every
+			// session's reclamation while one bad file persists. Skip it; the
+			// next sweep retries.
+			continue
 		}
 		refs = append(refs, SessionRef{UserID: userID, SID: sid, UpdatedAt: info.ModTime()})
 	}

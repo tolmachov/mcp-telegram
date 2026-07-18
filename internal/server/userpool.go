@@ -29,6 +29,13 @@ const (
 	// set of stateless API clients — hence a far smaller cap than a typical HTTP
 	// pool. Allowlisted deployments are small by construction.
 	userPoolMaxUsers = 25
+	// userPoolMaxPerUser caps how many concurrent assemblies ONE account may
+	// hold. Because the pool is keyed by (user id, sid), a single account with
+	// many authorizations (several clients, or stale sids from re-logins) could
+	// otherwise fill every global slot and LRU-evict other users' live
+	// assemblies. This confines that churn to the account causing it while
+	// staying well above normal multi-client use.
+	userPoolMaxPerUser = 4
 	// userPoolJanitorInterval is how often idle entries are collected.
 	userPoolJanitorInterval = time.Minute
 )
@@ -111,13 +118,23 @@ func (e *userEntry) evictable() bool {
 	return e.done() && e.buildErr == nil && e.inflight.Load() == 0
 }
 
-// sessionKey identifies one pooled assembly: a Telegram user plus the
+// poolKey identifies one pooled assembly: a Telegram user plus the
 // per-authorization session id. Keying by both (rather than by user id alone)
 // lets a single account hold several concurrent authorizations — each its own
-// session object and its own live MTProto client — without contending.
-type sessionKey struct {
+// session object and its own live MTProto client — without contending. Named
+// poolKey (not sessionKey) to avoid confusion with UserIdentity.SessionKey,
+// which is the secret per-session encryption key and must never be logged; a
+// poolKey (id + sid) is loggable.
+type poolKey struct {
 	id  tgid.UserID
 	sid string
+}
+
+// poolKeyFor is the single derivation of a request's pool key from its
+// identity, shared by entryFor and runBuild's cleanup so the two can never
+// drift (a divergence would let a failed build's entry leak in the map).
+func poolKeyFor(user *authsrv.UserIdentity) poolKey {
+	return poolKey{id: user.ID, sid: user.SessionID}
 }
 
 // userPool caches one HTTP assembly per authorization, keyed by (user id,
@@ -125,7 +142,7 @@ type sessionKey struct {
 // entries are evicted (and their Telegram clients disconnected) by the janitor.
 type userPool struct {
 	mu      sync.Mutex
-	entries map[sessionKey]*userEntry
+	entries map[poolKey]*userEntry
 	build   userHandlerBuilder
 	// baseCtx is the server-lifetime context builds run on, so canceling one
 	// request cannot poison a build other requests will share.
@@ -141,7 +158,7 @@ type userPool struct {
 
 func newUserPool(baseCtx context.Context, build userHandlerBuilder, wwwAuthenticate string, logger *slog.Logger) *userPool {
 	return &userPool{
-		entries:         map[sessionKey]*userEntry{},
+		entries:         map[poolKey]*userEntry{},
 		build:           build,
 		baseCtx:         baseCtx,
 		maxUsers:        userPoolMaxUsers,
@@ -202,7 +219,7 @@ func (p *userPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // canceled caller stops waiting, while the build itself continues on the
 // pool's base context for the next request to reuse.
 func (p *userPool) entryFor(ctx context.Context, user *authsrv.UserIdentity) (*userEntry, error) {
-	key := sessionKey{id: user.ID, sid: user.SessionID}
+	key := poolKeyFor(user)
 	p.mu.Lock()
 	if e, ok := p.entries[key]; ok {
 		// A dead client (Run loop exited) must not serve. If nothing is
@@ -243,14 +260,35 @@ func (p *userPool) entryFor(ctx context.Context, user *authsrv.UserIdentity) (*u
 		}
 	}
 
-	var evicted *userEntry
-	var evictedKey sessionKey
-	if len(p.entries) >= p.maxUsers {
-		evictedKey, evicted = p.takeOneEvictableLocked()
-		if evicted == nil {
+	type eviction struct {
+		key   poolKey
+		entry *userEntry
+		// reason distinguishes a per-account cap eviction from a global one in
+		// logs; both close the same way.
+		perUser bool
+	}
+	var evictions []eviction
+
+	// Per-account cap first: evict THIS user's own LRU assembly, never another
+	// user's, so one account cannot starve the pool. If the account is at its
+	// cap with every entry busy, reject only this request.
+	if p.countForUserLocked(user.ID) >= userPoolMaxPerUser {
+		ek, ee := p.takeOneEvictableForUserLocked(user.ID)
+		if ee == nil {
 			p.mu.Unlock()
 			return nil, errPoolFull
 		}
+		evictions = append(evictions, eviction{ek, ee, true})
+	}
+
+	// Global cap: evict the pool-wide LRU evictable entry.
+	if len(p.entries) >= p.maxUsers {
+		ek, ee := p.takeOneEvictableLocked()
+		if ee == nil {
+			p.mu.Unlock()
+			return nil, errPoolFull
+		}
+		evictions = append(evictions, eviction{ek, ee, false})
 	}
 	e := &userEntry{ready: make(chan struct{})}
 	e.inflight.Add(1)
@@ -258,9 +296,13 @@ func (p *userPool) entryFor(ctx context.Context, user *authsrv.UserIdentity) (*u
 	p.entries[key] = e
 	p.mu.Unlock()
 
-	if evicted != nil {
-		p.logger.Info("evicted least-recently-used user assembly to make room", "user", evictedKey.id, "session", evictedKey.sid)
-		p.closeEntry(evictedKey, evicted)
+	for _, ev := range evictions {
+		if ev.perUser {
+			p.logger.Info("evicted account's own least-recently-used assembly (per-account cap)", "user", ev.key.id, "session", ev.key.sid)
+		} else {
+			p.logger.Info("evicted least-recently-used user assembly to make room", "user", ev.key.id, "session", ev.key.sid)
+		}
+		p.closeEntry(ev.key, ev.entry)
 	}
 
 	if err := p.runBuild(e, user); err != nil {
@@ -288,7 +330,13 @@ func (p *userPool) runBuild(e *userEntry, user *authsrv.UserIdentity) (retErr er
 		}
 		e.fail(retErr)
 		p.mu.Lock()
-		delete(p.entries, sessionKey{id: user.ID, sid: user.SessionID})
+		// Delete only if the map still holds THIS entry: a concurrent
+		// EvictSession (revoke/upgrade) may have already removed it and a new
+		// request may have inserted a fresh entry under the same key, which must
+		// not be clobbered by this failed build's cleanup.
+		if p.entries[poolKeyFor(user)] == e {
+			delete(p.entries, poolKeyFor(user))
+		}
 		p.mu.Unlock()
 	}()
 
@@ -315,8 +363,8 @@ func (p *userPool) size() int {
 // takeOneEvictableLocked removes and returns the least-recently-used
 // evictable entry, or nil when every entry is busy or still building. The
 // caller closes it outside the pool lock.
-func (p *userPool) takeOneEvictableLocked() (sessionKey, *userEntry) {
-	var oldestKey sessionKey
+func (p *userPool) takeOneEvictableLocked() (poolKey, *userEntry) {
+	var oldestKey poolKey
 	var oldest *userEntry
 	for k, e := range p.entries {
 		if !e.evictable() {
@@ -327,10 +375,71 @@ func (p *userPool) takeOneEvictableLocked() (sessionKey, *userEntry) {
 		}
 	}
 	if oldest == nil {
-		return sessionKey{}, nil
+		return poolKey{}, nil
 	}
 	delete(p.entries, oldestKey)
 	return oldestKey, oldest
+}
+
+// countForUserLocked returns how many entries belong to one account.
+func (p *userPool) countForUserLocked(id tgid.UserID) int {
+	n := 0
+	for k := range p.entries {
+		if k.id == id {
+			n++
+		}
+	}
+	return n
+}
+
+// takeOneEvictableForUserLocked is takeOneEvictableLocked restricted to one
+// account's entries, so the per-account cap never evicts another user.
+func (p *userPool) takeOneEvictableForUserLocked(id tgid.UserID) (poolKey, *userEntry) {
+	var oldestKey poolKey
+	var oldest *userEntry
+	for k, e := range p.entries {
+		if k.id != id || !e.evictable() {
+			continue
+		}
+		if oldest == nil || e.lastUsed.Load() < oldest.lastUsed.Load() {
+			oldestKey, oldest = k, e
+		}
+	}
+	if oldest == nil {
+		return poolKey{}, nil
+	}
+	delete(p.entries, oldestKey)
+	return oldestKey, oldest
+}
+
+// EvictSession removes the assembly for one (userID, sid) session and tears it
+// down, so a revoked or upgraded session's live gotd client cannot re-store
+// (resurrect) its blob after the caller deletes it. Unlike idle/LRU eviction it
+// also removes a still-in-use entry: revocation outranks in-flight streams.
+// A done entry is closed synchronously — its client is stopped before this
+// returns, so the caller may safely delete the blob next; a still-building
+// entry is closed asynchronously once its build finishes (it is already out of
+// the map, so no new request will use it), which keeps this off the Telegram
+// connect path.
+func (p *userPool) EvictSession(userID tgid.UserID, sid string) {
+	key := poolKey{id: userID, sid: sid}
+	p.mu.Lock()
+	e, ok := p.entries[key]
+	if ok {
+		delete(p.entries, key)
+	}
+	p.mu.Unlock()
+	if !ok {
+		return
+	}
+	if e.done() {
+		p.closeEntry(key, e)
+		return
+	}
+	go func() {
+		<-e.ready
+		p.closeEntry(key, e)
+	}()
 }
 
 // janitor evicts idle entries until ctx is canceled.
@@ -355,7 +464,7 @@ func (p *userPool) janitor(ctx context.Context) {
 func (p *userPool) evictIdle() {
 	cutoff := p.now().Add(-userPoolIdleTTL).UnixNano()
 	type victim struct {
-		key   sessionKey
+		key   poolKey
 		entry *userEntry
 	}
 	var victims []victim
@@ -376,7 +485,7 @@ func (p *userPool) evictIdle() {
 }
 
 // closeEntry tears down an evicted entry's assembly.
-func (p *userPool) closeEntry(key sessionKey, e *userEntry) {
+func (p *userPool) closeEntry(key poolKey, e *userEntry) {
 	if e.closer == nil {
 		return
 	}
@@ -393,7 +502,7 @@ func (p *userPool) closeEntry(key sessionKey, e *userEntry) {
 func (p *userPool) Close() error {
 	p.mu.Lock()
 	entries := p.entries
-	p.entries = map[sessionKey]*userEntry{}
+	p.entries = map[poolKey]*userEntry{}
 	p.mu.Unlock()
 
 	var errs []error

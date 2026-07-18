@@ -660,9 +660,11 @@ func TestLoginEndpoints(t *testing.T) {
 		assert.Equal(t, "failed", pr.Status)
 		assert.Contains(t, pr.Message, "not allowed")
 
-		exists, err := store.Exists(context.Background(), forbiddenUser, "")
+		// New logins persist under a random sid, so probing only sid "" would no
+		// longer prove "nothing was stored" — assert the whole store is empty.
+		refs, err := store.List(context.Background())
 		require.NoError(t, err)
-		assert.False(t, exists, "a rejected account's session must never be persisted")
+		assert.Empty(t, refs, "a rejected account's session must never be persisted (under any sid)")
 		assert.True(t, flow.wasAborted())
 	})
 
@@ -1018,6 +1020,84 @@ func TestRevoke(t *testing.T) {
 	})
 }
 
+// TestRevokeInvalidatesLiveSession pins that revocation tears down the live
+// client assembly for the token's own session (via the invalidator) before the
+// blob is deleted, so a warm client cannot resurrect it.
+func TestRevokeInvalidatesLiveSession(t *testing.T) {
+	store := sessionstore.NewMemory()
+	flow := newFakeFlow()
+	a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
+	clientID := registerClient(t, ts, testRedirectURI)
+
+	var invalidated []string
+	a.SetSessionInvalidator(func(userID tgid.UserID, sid string) {
+		invalidated = append(invalidated, userID.String()+"|"+sid)
+	})
+
+	tr, cc := loginAndRedeem(t, a, ts, flow, clientID)
+	require.Equal(t, http.StatusOK, revokeToken(t, ts, url.Values{"token": {tr.RefreshToken}}))
+	assert.Contains(t, invalidated, allowedUser.String()+"|"+cc.SessionID,
+		"revoke must invalidate the session's live assembly")
+}
+
+// TestUpgradeInvalidatesLegacySession pins that the move-upgrade tears down the
+// warm legacy assembly, so it cannot run a second gotd client on the same
+// MTProto auth key as the freshly-copied session.
+func TestUpgradeInvalidatesLegacySession(t *testing.T) {
+	store := sessionstore.NewMemory()
+	a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
+	clientID := registerClient(t, ts, testRedirectURI)
+	require.NoError(t, store.Session(allowedUser, "", nil).StoreSession(context.Background(), []byte("legacy")))
+	now := a.now()
+	legacyRefresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
+		Subject: allowedUser.String(), ClientID: clientID,
+		IssuedAt: now.Unix(), LoginAt: now.Unix(),
+	})
+	require.NoError(t, err)
+
+	var invalidated []string
+	a.SetSessionInvalidator(func(userID tgid.UserID, sid string) {
+		invalidated = append(invalidated, userID.String()+"|"+sid)
+	})
+	_, _, status := refreshGrant(t, ts, clientID, legacyRefresh)
+	require.Equal(t, http.StatusOK, status)
+	assert.Contains(t, invalidated, allowedUser.String()+"|", "upgrade must invalidate the legacy assembly")
+}
+
+// TestRefreshRejectsMalformedSid pins the storage-boundary defense: a token
+// carrying a non-hex sid is rejected before the sid can reach the store.
+func TestRefreshRejectsMalformedSid(t *testing.T) {
+	store := sessionstore.NewMemory()
+	a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
+	clientID := registerClient(t, ts, testRedirectURI)
+	now := a.now()
+	bad, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
+		Subject: allowedUser.String(), ClientID: clientID,
+		SessionID: "../../etc/passwd", IssuedAt: now.Unix(), LoginAt: now.Unix(),
+	})
+	require.NoError(t, err)
+	_, oe, status := refreshGrant(t, ts, clientID, bad)
+	require.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "invalid_grant", oe.Error)
+}
+
+// TestRevokeRejectsMalformedSid pins that revocation rejects a malformed sid
+// before any invalidation or store call — no token-carried string reaches a path.
+func TestRevokeRejectsMalformedSid(t *testing.T) {
+	store := sessionstore.NewMemory()
+	a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
+	called := false
+	a.SetSessionInvalidator(func(tgid.UserID, string) { called = true })
+	now := a.now()
+	bad, err := sealBlob(a.sealer, accessBlob, accessClaims{
+		Subject: allowedUser.String(), SessionID: "../evil",
+		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, revokeToken(t, ts, url.Values{"token": {bad}}))
+	assert.False(t, called, "malformed sid must be rejected before invalidation/delete")
+}
+
 // TestRefreshCarriesSessionIdentity pins that a session's sid and per-session
 // key ride verbatim through every refresh, so a refreshed token keeps pointing
 // at (and decrypting) the same session object.
@@ -1088,18 +1168,31 @@ func TestLegacySessionUpgradeOnRefresh(t *testing.T) {
 	require.True(t, validSessionID(rc.SessionID), "upgraded refresh must carry a real sid")
 	require.Len(t, rc.SessionKey, sessionKeyLen)
 
-	// The upgraded session exists as its own object; the legacy one is kept.
+	// Upgrade is a MOVE: the new object exists and the legacy object is gone, so
+	// the old stateless legacy refresh token can no longer mint tokens or spawn
+	// another copy (its next use fails the Exists(uid,"") gate).
 	exists, err := store.Exists(context.Background(), allowedUser, rc.SessionID)
 	require.NoError(t, err)
 	assert.True(t, exists, "upgraded v2 session object must be written")
 	legacyExists, err := store.Exists(context.Background(), allowedUser, "")
 	require.NoError(t, err)
-	assert.True(t, legacyExists, "legacy object must be left in place for other clients / age GC")
+	assert.False(t, legacyExists, "legacy object must be deleted after the move-upgrade")
 
 	// The upgraded session decrypts with the new key and holds the same bytes.
 	got, err := store.Session(allowedUser, rc.SessionID, rc.SessionKey).LoadSession(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, []byte("legacy-session"), got)
+
+	// Replaying the now-orphaned legacy refresh token fails cleanly — no
+	// unbounded proliferation of session copies.
+	_, oe, status := refreshGrant(t, ts, clientID, legacyRefresh)
+	require.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "invalid_grant", oe.Error)
+
+	// Exactly one object exists (the upgraded one) — the replay created none.
+	refs, err := store.List(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, refs, 1, "upgrade is a move + replay is rejected, so only the upgraded object remains")
 }
 
 func TestNewTokenInfoForTesting(t *testing.T) {

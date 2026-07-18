@@ -262,6 +262,32 @@ func TestFSSplitKeyNotMasterDecryptable(t *testing.T) {
 	}
 }
 
+func TestValidSID(t *testing.T) {
+	valid := []string{
+		"0123456789abcdef0123456789abcdef",
+		"ffffffffffffffffffffffffffffffff",
+	}
+	for _, s := range valid {
+		if !ValidSID(s) {
+			t.Errorf("ValidSID(%q) = false, want true", s)
+		}
+	}
+	invalid := []string{
+		"",                                  // empty (legacy is handled separately, not via ValidSID)
+		"0123456789abcdef0123456789abcde",   // 31 chars
+		"0123456789abcdef0123456789abcdef0", // 33 chars
+		"0123456789ABCDEF0123456789abcdef",  // uppercase
+		"0123456789abcdef0123456789abcdeg",  // non-hex 'g'
+		"../../etc/passwd",                  // path traversal
+		"bak",                               // operator suffix
+	}
+	for _, s := range invalid {
+		if ValidSID(s) {
+			t.Errorf("ValidSID(%q) = true, want false", s)
+		}
+	}
+}
+
 // TestFSList pins the listing contract on the FS backend: legacy and suffixed
 // sessions are attributed correctly, foreign files are skipped.
 func TestFSList(t *testing.T) {
@@ -282,12 +308,13 @@ func TestFSList(t *testing.T) {
 	if err := fs.Session(2, sidA, nil).StoreSession(ctx, []byte("b")); err != nil {
 		t.Fatalf("store b: %v", err)
 	}
-	// Foreign files must be skipped, not attributed or failed on.
-	if err := os.WriteFile(filepath.Join(dir, "README.txt"), []byte("x"), 0o600); err != nil {
-		t.Fatalf("writing stray file: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "not-a-number.bin"), []byte("x"), 0o600); err != nil {
-		t.Fatalf("writing stray bin: %v", err)
+	// Foreign files must be skipped, not attributed or failed on — including an
+	// operator's backup with a numeric uid but a non-sid suffix, which the
+	// sweeper must never treat as (and delete as) a session.
+	for _, stray := range []string{"README.txt", "not-a-number.bin", "1.bak.bin", "1.backup-2026.bin"} {
+		if err := os.WriteFile(filepath.Join(dir, stray), []byte("x"), 0o600); err != nil {
+			t.Fatalf("writing stray file %s: %v", stray, err)
+		}
 	}
 
 	refs, err := fs.List(ctx)

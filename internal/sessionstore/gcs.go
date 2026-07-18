@@ -49,10 +49,7 @@ func NewGCS(ctx context.Context, bucketName string) (*GCS, error) {
 // objectName maps a session to its bucket object. An empty sid keeps the
 // legacy per-user layout so pre-upgrade sessions remain readable.
 func objectName(userID tgid.UserID, sid string) string {
-	if sid == "" {
-		return sessionPrefix + userID.String() + ".bin"
-	}
-	return sessionPrefix + userID.String() + "." + sid + ".bin"
+	return sessionPrefix + sessionBase(userID, sid)
 }
 
 func (g *GCS) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {

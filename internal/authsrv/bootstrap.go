@@ -2,8 +2,6 @@ package authsrv
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -79,11 +77,7 @@ func (p *pendingLogin) tryConsume() bool {
 
 // newLoginID returns a 128-bit random hex login identifier.
 func newLoginID() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("generating login id: %w", err)
-	}
-	return hex.EncodeToString(b), nil
+	return randomHex(16)
 }
 
 // addPending registers a login flow under a fresh random id. It fails with

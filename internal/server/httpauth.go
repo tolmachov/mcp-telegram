@@ -189,6 +189,9 @@ func (s *Server) runHTTPWithAuth(ctx context.Context) (retErr error) {
 			s.logger.Warn("failed to close user pool", "err", closeErr)
 		}
 	}()
+	// Let revocation and legacy upgrade stop a session's live client before its
+	// blob is deleted, so a warm client cannot resurrect the deleted object.
+	as.SetSessionInvalidator(pool.EvictSession)
 	go pool.janitor(ctx)
 
 	s.logger.Info("starting with per-user Telegram authentication", "issuer", s.authCfg.IssuerURL)
