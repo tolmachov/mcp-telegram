@@ -1020,6 +1020,59 @@ func TestRevoke(t *testing.T) {
 	})
 }
 
+// failLegacyDeleteStore wraps Memory and fails Delete of the legacy (sid "")
+// object for one user, to exercise the upgrade's rollback path.
+type failLegacyDeleteStore struct {
+	*sessionstore.Memory
+	failUser tgid.UserID
+}
+
+func (s failLegacyDeleteStore) Delete(ctx context.Context, userID tgid.UserID, sid string) error {
+	if userID == s.failUser && sid == "" {
+		return errors.New("simulated legacy delete failure")
+	}
+	return s.Memory.Delete(ctx, userID, sid)
+}
+
+// TestLegacyUpgradeRollsBackOnDeleteFailure pins that if the legacy object
+// cannot be deleted, the upgrade rolls back the just-written split-key object
+// and the refresh falls back to a legacy token — the account is never left with
+// two live objects sharing one auth key.
+func TestLegacyUpgradeRollsBackOnDeleteFailure(t *testing.T) {
+	store := failLegacyDeleteStore{Memory: sessionstore.NewMemory(), failUser: allowedUser}
+	a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
+	clientID := registerClient(t, ts, testRedirectURI)
+	require.NoError(t, store.Session(allowedUser, "", nil).StoreSession(context.Background(), []byte("legacy")))
+	now := a.now()
+	legacyRefresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
+		Subject: allowedUser.String(), ClientID: clientID,
+		IssuedAt: now.Unix(), LoginAt: now.Unix(),
+	})
+	require.NoError(t, err)
+
+	refreshed, _, status := refreshGrant(t, ts, clientID, legacyRefresh)
+	require.Equal(t, http.StatusOK, status)
+	rc, err := openBlob(a.sealer, refreshBlob, refreshed.RefreshToken, a.now())
+	require.NoError(t, err)
+	assert.Empty(t, rc.SessionID, "delete failure must fall back to a legacy token, not a split-key one")
+
+	// Exactly one object remains — the legacy one; the upgraded copy was rolled back.
+	refs, err := store.List(context.Background())
+	require.NoError(t, err)
+	require.Len(t, refs, 1)
+	assert.Equal(t, "", refs[0].SID, "the rolled-back split-key copy must not survive")
+}
+
+// TestNewSessionCredsValid guards against drift between the sid minting length
+// (sessionIDLen) and the validator length (sessionstore.ValidSID): a minted sid
+// must always validate, or every fresh session would 401 on its first refresh.
+func TestNewSessionCredsValid(t *testing.T) {
+	sid, key, err := newSessionCreds()
+	require.NoError(t, err)
+	assert.True(t, validSessionID(sid), "a freshly minted sid must pass validSessionID")
+	assert.Len(t, key, sessionKeyLen)
+}
+
 // TestRevokeInvalidatesLiveSession pins that revocation tears down the live
 // client assembly for the token's own session (via the invalidator) before the
 // blob is deleted, so a warm client cannot resurrect it.

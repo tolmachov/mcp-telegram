@@ -5,13 +5,21 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 
+	"github.com/gotd/td/session"
+
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
+
+// errLegacyAlreadyUpgraded reports that a concurrent (or prior) refresh already
+// migrated this account's legacy session, so the presented legacy token is now
+// stale and its holder must log in again.
+var errLegacyAlreadyUpgraded = errors.New("legacy session already upgraded")
 
 // tokenResponse is the RFC 6749 §5.1 success payload.
 type tokenResponse struct {
@@ -147,13 +155,21 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 
 	// Migrate a legacy (master-only) session to an independent split-key session
 	// on this refresh, so protection completes within one access-token lifetime
-	// without forcing a fresh QR login. Best-effort: on any failure keep the
-	// legacy session and re-issue legacy tokens rather than break the refresh.
+	// without forcing a fresh QR login.
 	sid, sessionKey := rc.SessionID, rc.SessionKey
 	if sid == "" {
-		if upgradedSID, upgradedKey, upErr := a.upgradeLegacySession(r.Context(), userID); upErr != nil {
+		upgradedSID, upgradedKey, upErr := a.upgradeLegacySession(r.Context(), userID)
+		switch {
+		case errors.Is(upErr, errLegacyAlreadyUpgraded):
+			// A concurrent refresh won the upgrade; this legacy token is stale.
+			a.logger.Info("legacy refresh rejected: session already migrated", "user_id", userID)
+			a.tokenError(w, http.StatusBadRequest, "invalid_grant", "session migrated, log in again")
+			return
+		case upErr != nil:
+			// Transient failure: keep the (still-present) legacy session and
+			// re-issue legacy tokens rather than break the refresh.
 			a.logger.Warn("legacy session upgrade skipped; keeping master-only session", "user_id", userID, "err", upErr)
-		} else {
+		default:
 			sid, sessionKey = upgradedSID, upgradedKey
 			a.logger.Info("upgraded legacy session to split-key on refresh", "user_id", userID)
 		}
@@ -183,8 +199,21 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 // legacy client of the same account then fails its next refresh with
 // invalid_grant and re-runs the QR login. That is strictly better than the
 // silent auth-key duplication the copy-based version risked.
+//
+// Concurrency and atomicity: the whole load→write→delete sequence runs under
+// upgradeMu, so two simultaneous legacy refreshes cannot both produce a copy of
+// the same auth key — the loser observes the legacy object already gone
+// (session.ErrNotFound) and is told to log in again. If deleting the legacy
+// object fails, the just-written object is rolled back so the account is never
+// left with two live objects sharing one auth key.
 func (a *AuthServer) upgradeLegacySession(ctx context.Context, userID tgid.UserID) (string, []byte, error) {
+	a.upgradeMu.Lock()
+	defer a.upgradeMu.Unlock()
+
 	data, err := a.store.Session(userID, "", nil).LoadSession(ctx)
+	if errors.Is(err, session.ErrNotFound) {
+		return "", nil, errLegacyAlreadyUpgraded
+	}
 	if err != nil {
 		return "", nil, fmt.Errorf("reading legacy session: %w", err)
 	}
@@ -199,9 +228,13 @@ func (a *AuthServer) upgradeLegacySession(ctx context.Context, userID tgid.UserI
 	// it cannot re-store (resurrect) the blob after the delete.
 	a.invalidateSession(userID, "")
 	if err := a.store.Delete(ctx, userID, ""); err != nil {
-		// Non-fatal: the upgraded session is already written and returned. The
-		// stale legacy object is reclaimed by the sweeper; log for visibility.
-		a.logger.Warn("legacy session upgrade: deleting old object failed", "user_id", userID, "err", err)
+		// Roll back the new object: leaving BOTH live would let the legacy token
+		// upgrade again into a second holder of the same auth key. Best-effort —
+		// a surviving orphan is reclaimed by the sweeper.
+		if delErr := a.store.Delete(ctx, userID, sid); delErr != nil {
+			a.logger.Error("legacy upgrade rollback failed; orphan will be swept", "user_id", userID, "session", sid, "err", delErr)
+		}
+		return "", nil, fmt.Errorf("deleting legacy object: %w", err)
 	}
 	return sid, key, nil
 }

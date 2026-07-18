@@ -138,6 +138,41 @@ func TestUserPoolEvictSession(t *testing.T) {
 	}
 }
 
+// TestUserPoolEvictSessionDefersBusyClose pins that EvictSession never closes an
+// assembly that a request is still using: a busy entry is removed from the map
+// immediately but closed only when the last in-flight request releases it.
+func TestUserPoolEvictSessionDefersBusyClose(t *testing.T) {
+	var closes atomic.Int64
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+		return builtAssembly{
+			Handler: okHandler(),
+			Closer:  closerFunc(func() error { closes.Add(1); return nil }),
+		}, nil
+	}, testWWWAuthenticate, discardLogger())
+
+	if rec := poolRequestSID(t, pool, 1, "aaaa"); rec.Code != http.StatusOK {
+		t.Fatalf("build status = %d, want 200", rec.Code)
+	}
+	// Simulate an in-flight request holding the entry.
+	pool.mu.Lock()
+	e := pool.entries[poolKey{id: 1, sid: "aaaa"}]
+	e.inflight.Add(1)
+	pool.mu.Unlock()
+
+	pool.EvictSession(1, "aaaa")
+	if got := closes.Load(); got != 0 {
+		t.Errorf("busy entry closed %d times during evict; want 0 (deferred)", got)
+	}
+	if pool.size() != 0 {
+		t.Errorf("entry not removed from map on evict; size = %d, want 0", pool.size())
+	}
+	// The last in-flight request releasing closes it exactly once.
+	pool.release(e)
+	if got := closes.Load(); got != 1 {
+		t.Errorf("entry closed %d times after release; want 1", got)
+	}
+}
+
 // TestUserPoolPerUserCap pins that one account cannot fill the pool: once it is
 // at userPoolMaxPerUser assemblies, a further authorization evicts THAT
 // account's own LRU entry, never another user's.

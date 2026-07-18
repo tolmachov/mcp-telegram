@@ -40,6 +40,13 @@ type AuthServer struct {
 	// (tests, or a caller that does not run the user pool).
 	invalidate func(userID tgid.UserID, sid string)
 
+	// upgradeMu serializes legacy→split-key upgrades so two concurrent legacy
+	// refreshes cannot each mint a separate split-key copy of the SAME MTProto
+	// auth key (which Telegram punishes with AUTH_KEY_DUPLICATED). A
+	// single-instance deployment (README: --max-instances=1) makes an
+	// in-process lock sufficient; upgrades are rare and one-time per session.
+	upgradeMu sync.Mutex
+
 	pendingMu sync.Mutex
 	pending   map[string]*pendingLogin
 }

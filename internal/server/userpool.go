@@ -77,6 +77,7 @@ func (e *userEntry) deadReason() error {
 // (buildErr set; the entry has already been removed from the pool map).
 // finish/fail are the only two transitions; both are one-shot.
 type userEntry struct {
+	key      poolKey
 	ready    chan struct{}
 	handler  http.Handler
 	closer   io.Closer
@@ -84,6 +85,13 @@ type userEntry struct {
 	buildErr error
 	lastUsed atomic.Int64 // unix nanos
 	inflight atomic.Int64
+	// closeRequested marks an entry that EvictSession removed while it was busy
+	// or building; the last in-flight request closes it on release so a live
+	// assembly is never torn down out from under an active request.
+	closeRequested atomic.Bool
+	// closeOnce guarantees the assembly's Closer runs exactly once no matter how
+	// many teardown paths (evict, idle, revoke, shutdown) reach this entry.
+	closeOnce sync.Once
 }
 
 // finish publishes a successful build. Field writes happen strictly before
@@ -273,7 +281,7 @@ func (p *userPool) entryFor(ctx context.Context, user *authsrv.UserIdentity) (*u
 	// user's, so one account cannot starve the pool. If the account is at its
 	// cap with every entry busy, reject only this request.
 	if p.countForUserLocked(user.ID) >= userPoolMaxPerUser {
-		ek, ee := p.takeOneEvictableForUserLocked(user.ID)
+		ek, ee := p.takeOneEvictableLocked(func(k poolKey) bool { return k.id == user.ID })
 		if ee == nil {
 			p.mu.Unlock()
 			return nil, errPoolFull
@@ -283,14 +291,14 @@ func (p *userPool) entryFor(ctx context.Context, user *authsrv.UserIdentity) (*u
 
 	// Global cap: evict the pool-wide LRU evictable entry.
 	if len(p.entries) >= p.maxUsers {
-		ek, ee := p.takeOneEvictableLocked()
+		ek, ee := p.takeOneEvictableLocked(nil)
 		if ee == nil {
 			p.mu.Unlock()
 			return nil, errPoolFull
 		}
 		evictions = append(evictions, eviction{ek, ee, false})
 	}
-	e := &userEntry{ready: make(chan struct{})}
+	e := &userEntry{key: key, ready: make(chan struct{})}
 	e.inflight.Add(1)
 	e.lastUsed.Store(p.now().UnixNano())
 	p.entries[key] = e
@@ -349,9 +357,13 @@ func (p *userPool) runBuild(e *userEntry, user *authsrv.UserIdentity) (retErr er
 	return nil
 }
 
-// release decrements the entry's inflight counter.
+// release decrements the entry's inflight counter and, if this was the last
+// in-flight request on an entry EvictSession marked for teardown, closes it —
+// the deferred half of "never Close() an assembly under an active request".
 func (p *userPool) release(e *userEntry) {
-	e.inflight.Add(-1)
+	if e.inflight.Add(-1) == 0 && e.closeRequested.Load() {
+		p.closeEntry(e.key, e)
+	}
 }
 
 func (p *userPool) size() int {
@@ -360,14 +372,16 @@ func (p *userPool) size() int {
 	return len(p.entries)
 }
 
-// takeOneEvictableLocked removes and returns the least-recently-used
-// evictable entry, or nil when every entry is busy or still building. The
-// caller closes it outside the pool lock.
-func (p *userPool) takeOneEvictableLocked() (poolKey, *userEntry) {
+// takeOneEvictableLocked removes and returns the least-recently-used evictable
+// entry for which want returns true (want nil ⇒ any entry), or (zero, nil) when
+// none qualifies. The caller closes the entry outside the pool lock. One helper
+// serves both the global cap (want nil) and the per-account cap (want = same
+// user), so the LRU scan invariant lives in exactly one place.
+func (p *userPool) takeOneEvictableLocked(want func(poolKey) bool) (poolKey, *userEntry) {
 	var oldestKey poolKey
 	var oldest *userEntry
 	for k, e := range p.entries {
-		if !e.evictable() {
+		if !e.evictable() || (want != nil && !want(k)) {
 			continue
 		}
 		if oldest == nil || e.lastUsed.Load() < oldest.lastUsed.Load() {
@@ -392,35 +406,21 @@ func (p *userPool) countForUserLocked(id tgid.UserID) int {
 	return n
 }
 
-// takeOneEvictableForUserLocked is takeOneEvictableLocked restricted to one
-// account's entries, so the per-account cap never evicts another user.
-func (p *userPool) takeOneEvictableForUserLocked(id tgid.UserID) (poolKey, *userEntry) {
-	var oldestKey poolKey
-	var oldest *userEntry
-	for k, e := range p.entries {
-		if k.id != id || !e.evictable() {
-			continue
-		}
-		if oldest == nil || e.lastUsed.Load() < oldest.lastUsed.Load() {
-			oldestKey, oldest = k, e
-		}
-	}
-	if oldest == nil {
-		return poolKey{}, nil
-	}
-	delete(p.entries, oldestKey)
-	return oldestKey, oldest
-}
-
 // EvictSession removes the assembly for one (userID, sid) session and tears it
 // down, so a revoked or upgraded session's live gotd client cannot re-store
-// (resurrect) its blob after the caller deletes it. Unlike idle/LRU eviction it
-// also removes a still-in-use entry: revocation outranks in-flight streams.
-// A done entry is closed synchronously — its client is stopped before this
-// returns, so the caller may safely delete the blob next; a still-building
-// entry is closed asynchronously once its build finishes (it is already out of
-// the map, so no new request will use it), which keeps this off the Telegram
-// connect path.
+// (resurrect) its blob after the caller deletes it. It removes the entry from
+// the map (no new request can attach) and then:
+//
+//   - if the entry is built and idle, closes it now — its client is stopped
+//     before this returns, so the caller may delete the blob next;
+//   - if it is busy or still building, marks it closeRequested; the last
+//     in-flight request closes it on release. This preserves the invariant that
+//     an assembly is never Close()d out from under an active request, and needs
+//     no background goroutine.
+//
+// The residual: a session revoked/upgraded while it holds a long-lived in-flight
+// stream keeps that one stream (and its client) until the stream ends. New
+// requests are rejected immediately (the object is gone → cold rebuild 401s).
 func (p *userPool) EvictSession(userID tgid.UserID, sid string) {
 	key := poolKey{id: userID, sid: sid}
 	p.mu.Lock()
@@ -432,14 +432,14 @@ func (p *userPool) EvictSession(userID tgid.UserID, sid string) {
 	if !ok {
 		return
 	}
-	if e.done() {
+	// Order matters: set the flag first, then read inflight. release() does the
+	// mirror (decrement, then read the flag), so with atomics one of the two
+	// always observes the other's write and exactly one closeEntry runs (and
+	// closeOnce makes even that safe if both do).
+	e.closeRequested.Store(true)
+	if e.done() && e.inflight.Load() == 0 {
 		p.closeEntry(key, e)
-		return
 	}
-	go func() {
-		<-e.ready
-		p.closeEntry(key, e)
-	}()
 }
 
 // janitor evicts idle entries until ctx is canceled.
@@ -484,14 +484,18 @@ func (p *userPool) evictIdle() {
 	}
 }
 
-// closeEntry tears down an evicted entry's assembly.
+// closeEntry tears down an evicted entry's assembly. It is idempotent
+// (closeOnce): several teardown paths may target the same entry, and every one
+// funnels through here, so the underlying Closer runs at most once.
 func (p *userPool) closeEntry(key poolKey, e *userEntry) {
-	if e.closer == nil {
-		return
-	}
-	if err := e.closer.Close(); err != nil {
-		p.logger.Warn("closing evicted user assembly failed", "user", key.id, "session", key.sid, "err", err)
-	}
+	e.closeOnce.Do(func() {
+		if e.closer == nil {
+			return
+		}
+		if err := e.closer.Close(); err != nil {
+			p.logger.Warn("closing evicted user assembly failed", "user", key.id, "session", key.sid, "err", err)
+		}
+	})
 }
 
 // Close tears down every pooled assembly. Called after the HTTP server's
@@ -507,9 +511,18 @@ func (p *userPool) Close() error {
 
 	var errs []error
 	for _, e := range entries {
-		if e.done() && e.closer != nil {
-			errs = append(errs, e.closer.Close())
+		if !e.done() {
+			continue
 		}
+		// Route through closeOnce so an entry a concurrent EvictSession already
+		// closed is never Close()d twice.
+		e.closeOnce.Do(func() {
+			if e.closer != nil {
+				if err := e.closer.Close(); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		})
 	}
 	return errors.Join(errs...)
 }
