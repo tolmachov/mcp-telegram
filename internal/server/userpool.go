@@ -55,6 +55,13 @@ type builtAssembly struct {
 	Handler http.Handler
 	Closer  io.Closer
 	Health  func() error
+	// StopClient disconnects just the live Telegram client (a context cancel,
+	// safe to call concurrently with an in-flight request), without tearing down
+	// the MCP handler. EvictSession calls it synchronously so a revoked/upgraded
+	// session's client stops re-storing (resurrecting) its blob even while a
+	// request still holds the assembly; the full Closer runs later, on release,
+	// when no request is in flight. Idempotent; nil means "nothing extra to stop".
+	StopClient func() error
 }
 
 // userHandlerBuilder builds the complete per-user HTTP assembly: MCP
@@ -77,14 +84,15 @@ func (e *userEntry) deadReason() error {
 // (buildErr set; the entry has already been removed from the pool map).
 // finish/fail are the only two transitions; both are one-shot.
 type userEntry struct {
-	key      poolKey
-	ready    chan struct{}
-	handler  http.Handler
-	closer   io.Closer
-	health   func() error
-	buildErr error
-	lastUsed atomic.Int64 // unix nanos
-	inflight atomic.Int64
+	key        poolKey
+	ready      chan struct{}
+	handler    http.Handler
+	closer     io.Closer
+	stopClient func() error
+	health     func() error
+	buildErr   error
+	lastUsed   atomic.Int64 // unix nanos
+	inflight   atomic.Int64
 	// closeRequested marks an entry that EvictSession removed while it was busy
 	// or building; the last in-flight request closes it on release so a live
 	// assembly is never torn down out from under an active request.
@@ -99,6 +107,7 @@ type userEntry struct {
 func (e *userEntry) finish(a builtAssembly) {
 	e.handler = a.Handler
 	e.closer = a.Closer
+	e.stopClient = a.StopClient
 	e.health = a.Health
 	close(e.ready)
 }
@@ -360,6 +369,12 @@ func (p *userPool) runBuild(e *userEntry, user *authsrv.UserIdentity) (retErr er
 // release decrements the entry's inflight counter and, if this was the last
 // in-flight request on an entry EvictSession marked for teardown, closes it —
 // the deferred half of "never Close() an assembly under an active request".
+//
+// Dereferencing e.closer here (via closeEntry) outside p.mu is safe only
+// because the builder holds an inflight ref from entry creation until after
+// finish() publishes closer: the inflight 0-transition therefore cannot happen
+// while the entry is still building. A future change that detaches builds
+// without holding inflight would break that and must revisit this.
 func (p *userPool) release(e *userEntry) {
 	if e.inflight.Add(-1) == 0 && e.closeRequested.Load() {
 		p.closeEntry(e.key, e)
@@ -432,13 +447,26 @@ func (p *userPool) EvictSession(userID tgid.UserID, sid string) {
 	if !ok {
 		return
 	}
-	// Order matters: set the flag first, then read inflight. release() does the
-	// mirror (decrement, then read the flag), so with atomics one of the two
-	// always observes the other's write and exactly one closeEntry runs (and
-	// closeOnce makes even that safe if both do).
 	e.closeRequested.Store(true)
-	if e.done() && e.inflight.Load() == 0 {
-		p.closeEntry(key, e)
+	if e.done() {
+		// Stop the live Telegram client NOW, even if the entry is busy: this is
+		// a context cancel (safe to race an in-flight request) and it stops the
+		// client from re-storing its blob after the caller's Delete — closing the
+		// revoke/upgrade resurrection window. Idle entries also get the full
+		// teardown here; busy ones defer the rest (the possibly-unsafe MCP handler
+		// Close) to release, where no request is in flight.
+		if e.stopClient != nil {
+			if err := e.stopClient(); err != nil {
+				p.logger.Warn("stopping telegram client on evict failed", "user", key.id, "session", key.sid, "err", err)
+			}
+		}
+		// Order matters for the deferred close: set the flag first (done above),
+		// then read inflight; release() mirrors (decrement, then read the flag),
+		// so with seq-cst atomics exactly one of them runs closeEntry (closeOnce
+		// guards even that).
+		if e.inflight.Load() == 0 {
+			p.closeEntry(key, e)
+		}
 	}
 }
 

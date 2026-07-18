@@ -40,12 +40,17 @@ type AuthServer struct {
 	// (tests, or a caller that does not run the user pool).
 	invalidate func(userID tgid.UserID, sid string)
 
-	// upgradeMu serializes legacy→split-key upgrades so two concurrent legacy
-	// refreshes cannot each mint a separate split-key copy of the SAME MTProto
-	// auth key (which Telegram punishes with AUTH_KEY_DUPLICATED). A
-	// single-instance deployment (README: --max-instances=1) makes an
-	// in-process lock sufficient; upgrades are rare and one-time per session.
-	upgradeMu sync.Mutex
+	// upgradeLocks serializes legacy→split-key upgrades PER ACCOUNT so two
+	// concurrent legacy refreshes for one account cannot each mint a separate
+	// split-key copy of the same MTProto auth key (which Telegram punishes with
+	// AUTH_KEY_DUPLICATED). Per-account (not global) so a slow/hung upgrade for
+	// one account never blocks unrelated accounts' refreshes. A single-instance
+	// deployment (README: --max-instances=1) makes an in-process lock
+	// sufficient; upgrades are rare and one-time per session. The map is not
+	// pruned — one tiny *sync.Mutex per account that ever upgrades — which is
+	// bounded by the allowlist and negligible.
+	upgradeLocksMu sync.Mutex
+	upgradeLocks   map[tgid.UserID]*sync.Mutex
 
 	pendingMu sync.Mutex
 	pending   map[string]*pendingLogin
@@ -64,6 +69,24 @@ func (a *AuthServer) invalidateSession(userID tgid.UserID, sid string) {
 	if a.invalidate != nil {
 		a.invalidate(userID, sid)
 	}
+}
+
+// lockUpgrade acquires the per-account legacy-upgrade lock and returns its
+// unlock. Only same-account upgrades serialize; different accounts proceed
+// concurrently.
+func (a *AuthServer) lockUpgrade(userID tgid.UserID) func() {
+	a.upgradeLocksMu.Lock()
+	if a.upgradeLocks == nil {
+		a.upgradeLocks = map[tgid.UserID]*sync.Mutex{}
+	}
+	l, ok := a.upgradeLocks[userID]
+	if !ok {
+		l = &sync.Mutex{}
+		a.upgradeLocks[userID] = l
+	}
+	a.upgradeLocksMu.Unlock()
+	l.Lock()
+	return l.Unlock
 }
 
 // New validates cfg and builds the authorization server. store persists the

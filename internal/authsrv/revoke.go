@@ -70,9 +70,12 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		ok()
 		return
 	}
-	// Tear down any live client for this session BEFORE deleting the object, so a
-	// warm gotd client cannot re-store (resurrect) the blob after the delete and
-	// let the revoked refresh token pass the Exists gate again.
+	// Stop this session's live Telegram client BEFORE deleting the object, so it
+	// cannot re-store (resurrect) the blob after the delete and let the revoked
+	// refresh token pass the Exists gate again. The client is disconnected
+	// synchronously even if a request is still streaming (that stream then errors
+	// out — expected for a revoked session); the MCP handler is torn down once
+	// the stream ends.
 	a.invalidateSession(userID, sid)
 	if err := a.store.Delete(r.Context(), userID, sid); err != nil {
 		// The client cannot retry meaningfully and must not learn store

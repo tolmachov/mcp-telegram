@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1021,15 +1022,20 @@ func TestRevoke(t *testing.T) {
 }
 
 // failLegacyDeleteStore wraps Memory and fails Delete of the legacy (sid "")
-// object for one user, to exercise the upgrade's rollback path.
+// object for one user, to exercise the upgrade's rollback path. It counts
+// deletes of suffixed objects so a test can prove the rollback Delete fired.
 type failLegacyDeleteStore struct {
 	*sessionstore.Memory
-	failUser tgid.UserID
+	failUser   tgid.UserID
+	sidDeletes atomic.Int64
 }
 
-func (s failLegacyDeleteStore) Delete(ctx context.Context, userID tgid.UserID, sid string) error {
+func (s *failLegacyDeleteStore) Delete(ctx context.Context, userID tgid.UserID, sid string) error {
 	if userID == s.failUser && sid == "" {
 		return errors.New("simulated legacy delete failure")
+	}
+	if sid != "" {
+		s.sidDeletes.Add(1)
 	}
 	return s.Memory.Delete(ctx, userID, sid)
 }
@@ -1039,7 +1045,7 @@ func (s failLegacyDeleteStore) Delete(ctx context.Context, userID tgid.UserID, s
 // and the refresh falls back to a legacy token — the account is never left with
 // two live objects sharing one auth key.
 func TestLegacyUpgradeRollsBackOnDeleteFailure(t *testing.T) {
-	store := failLegacyDeleteStore{Memory: sessionstore.NewMemory(), failUser: allowedUser}
+	store := &failLegacyDeleteStore{Memory: sessionstore.NewMemory(), failUser: allowedUser}
 	a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
 	clientID := registerClient(t, ts, testRedirectURI)
 	require.NoError(t, store.Session(allowedUser, "", nil).StoreSession(context.Background(), []byte("legacy")))
@@ -1056,11 +1062,74 @@ func TestLegacyUpgradeRollsBackOnDeleteFailure(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, rc.SessionID, "delete failure must fall back to a legacy token, not a split-key one")
 
+	// The rollback actually fired (the split-key object was written, then deleted),
+	// not skipped — proving write-then-rollback rather than just an end state.
+	assert.GreaterOrEqual(t, store.sidDeletes.Load(), int64(1), "rollback must delete the just-written split-key object")
+
 	// Exactly one object remains — the legacy one; the upgraded copy was rolled back.
 	refs, err := store.List(context.Background())
 	require.NoError(t, err)
 	require.Len(t, refs, 1)
 	assert.Equal(t, "", refs[0].SID, "the rolled-back split-key copy must not survive")
+}
+
+// TestConcurrentLegacyUpgrade pins that concurrent refreshes of the same legacy
+// token do not each mint a split-key copy of the one auth key: exactly one wins
+// the upgrade, all others get invalid_grant, and exactly one object remains.
+func TestConcurrentLegacyUpgrade(t *testing.T) {
+	store := sessionstore.NewMemory()
+	a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
+	clientID := registerClient(t, ts, testRedirectURI)
+	require.NoError(t, store.Session(allowedUser, "", nil).StoreSession(context.Background(), []byte("legacy")))
+	now := a.now()
+	legacyRefresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
+		Subject: allowedUser.String(), ClientID: clientID,
+		IssuedAt: now.Unix(), LoginAt: now.Unix(),
+	})
+	require.NoError(t, err)
+
+	const n = 6
+	var wg sync.WaitGroup
+	statuses := make([]int, n)
+	sids := make([]string, n)
+	start := make(chan struct{})
+	for i := range n {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start // release all goroutines together to maximize contention
+			tr, _, status := refreshGrant(t, ts, clientID, legacyRefresh)
+			statuses[i] = status
+			if status == http.StatusOK {
+				if ac, e := openBlob(a.sealer, refreshBlob, tr.RefreshToken, a.now()); e == nil {
+					sids[i] = ac.SessionID
+				}
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	oks, bad, winnerSID := 0, 0, ""
+	for i := range n {
+		switch statuses[i] {
+		case http.StatusOK:
+			oks++
+			winnerSID = sids[i]
+		case http.StatusBadRequest:
+			bad++
+		default:
+			t.Errorf("goroutine %d: unexpected status %d", i, statuses[i])
+		}
+	}
+	assert.Equal(t, 1, oks, "exactly one concurrent legacy refresh must win the upgrade")
+	assert.Equal(t, n-1, bad, "every other concurrent refresh must get invalid_grant")
+	require.NotEmpty(t, winnerSID)
+
+	refs, err := store.List(context.Background())
+	require.NoError(t, err)
+	require.Len(t, refs, 1, "only one split-key object may exist after concurrent upgrades")
+	assert.Equal(t, winnerSID, refs[0].SID)
 }
 
 // TestNewSessionCredsValid guards against drift between the sid minting length

@@ -161,8 +161,9 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 		upgradedSID, upgradedKey, upErr := a.upgradeLegacySession(r.Context(), userID)
 		switch {
 		case errors.Is(upErr, errLegacyAlreadyUpgraded):
-			// A concurrent refresh won the upgrade; this legacy token is stale.
-			a.logger.Info("legacy refresh rejected: session already migrated", "user_id", userID)
+			// The legacy object is gone (a concurrent refresh won the upgrade, or
+			// it was revoked/swept); this legacy token is stale.
+			a.logger.Info("legacy refresh rejected: session already migrated or deleted", "user_id", userID)
 			a.tokenError(w, http.StatusBadRequest, "invalid_grant", "session migrated, log in again")
 			return
 		case upErr != nil:
@@ -207,11 +208,15 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 // object fails, the just-written object is rolled back so the account is never
 // left with two live objects sharing one auth key.
 func (a *AuthServer) upgradeLegacySession(ctx context.Context, userID tgid.UserID) (string, []byte, error) {
-	a.upgradeMu.Lock()
-	defer a.upgradeMu.Unlock()
+	unlock := a.lockUpgrade(userID)
+	defer unlock()
 
 	data, err := a.store.Session(userID, "", nil).LoadSession(ctx)
 	if errors.Is(err, session.ErrNotFound) {
+		// Under the per-account lock, a missing legacy object means it was
+		// already migrated by a prior/concurrent refresh (or deleted by
+		// revoke/logout/sweep) — either way this legacy token is stale and its
+		// holder must log in again.
 		return "", nil, errLegacyAlreadyUpgraded
 	}
 	if err != nil {
