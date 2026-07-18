@@ -84,10 +84,16 @@ type SessionRef struct {
 //
 // Exists is a cheap probe used by token refresh to force a re-login after a
 // session was deleted. Delete removes one session; the pool builder calls it
-// when Telegram refuses a decryptable session (ErrSessionUnauthorized), token
-// revocation calls it for the revoked session, and an operator may call it to
-// force a re-login. A session that fails to decrypt is deliberately NOT
-// deleted (see ErrCorruptSession).
+// when Telegram refuses a decryptable session (ErrSessionUnauthorized) and an
+// operator may call it to force a re-login. A session that fails to decrypt is
+// deliberately NOT deleted (see ErrCorruptSession).
+//
+// Revocation is durable and independent of the blob: Revoke writes a tombstone
+// (and deletes the blob) and Revoked reports it. Because a live gotd client can
+// re-store (resurrect) a deleted blob, deletion alone cannot revoke; the
+// tombstone lives where the client never writes, so it survives a re-store and
+// the refresh grant checks Revoked. ListRevoked enumerates tombstones for the
+// sweeper to reclaim once no live refresh token could reference them.
 //
 // List enumerates every stored session; the orphan sweeper uses it to reclaim
 // sessions whose blobs are older than any live refresh grant could be.
@@ -98,6 +104,18 @@ type Store interface {
 	Exists(ctx context.Context, userID tgid.UserID, sid string) (bool, error)
 	Delete(ctx context.Context, userID tgid.UserID, sid string) error
 	List(ctx context.Context) ([]SessionRef, error)
+
+	// Revoke durably marks (userID, sid) revoked (a tombstone) and deletes its
+	// session blob. Idempotent.
+	Revoke(ctx context.Context, userID tgid.UserID, sid string) error
+	// Revoked reports whether (userID, sid) has a revocation tombstone.
+	Revoked(ctx context.Context, userID tgid.UserID, sid string) (bool, error)
+	// ListRevoked enumerates revocation tombstones (with their write time) so
+	// the sweeper can reclaim ones older than any live refresh token.
+	ListRevoked(ctx context.Context) ([]SessionRef, error)
+	// DeleteRevoked removes a revocation tombstone; the sweeper calls it once no
+	// live refresh token could reference the session.
+	DeleteRevoked(ctx context.Context, userID tgid.UserID, sid string) error
 }
 
 // parseSessionBase reverses sessionBase: "<userID>.bin" (legacy, sid "") or

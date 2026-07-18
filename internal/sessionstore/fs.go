@@ -20,7 +20,8 @@ type FS struct {
 	dir string
 }
 
-// NewFS creates the directory (0700) if needed and returns the store.
+// NewFS creates the directory (0700) if needed and returns the store. It also
+// creates the revoked/ subdir that holds revocation tombstones.
 func NewFS(dir string) (*FS, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("sessionstore: directory is required")
@@ -28,7 +29,11 @@ func NewFS(dir string) (*FS, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("sessionstore: creating %s: %w", dir, err)
 	}
-	return &FS{dir: dir}, nil
+	f := &FS{dir: dir}
+	if err := os.MkdirAll(f.revokedDir(), 0o700); err != nil {
+		return nil, fmt.Errorf("sessionstore: creating %s: %w", f.revokedDir(), err)
+	}
+	return f, nil
 }
 
 // path maps a session to its file. An empty sid keeps the legacy per-user
@@ -37,6 +42,14 @@ func NewFS(dir string) (*FS, error) {
 // contain path separators or traversal sequences.
 func (f *FS) path(userID tgid.UserID, sid string) string {
 	return filepath.Join(f.dir, sessionBase(userID, sid))
+}
+
+// revokedDir is the subdir holding tombstones — the gotd client only writes
+// session files in dir itself, so a tombstone here survives a blob re-store.
+func (f *FS) revokedDir() string { return filepath.Join(f.dir, "revoked") }
+
+func (f *FS) revokedPath(userID tgid.UserID, sid string) string {
+	return filepath.Join(f.revokedDir(), sessionBase(userID, sid))
 }
 
 func (f *FS) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {
@@ -66,9 +79,23 @@ func (f *FS) Delete(_ context.Context, userID tgid.UserID, sid string) error {
 }
 
 func (f *FS) List(_ context.Context) ([]SessionRef, error) {
-	entries, err := os.ReadDir(f.dir)
+	return f.listDir(f.dir)
+}
+
+func (f *FS) ListRevoked(_ context.Context) ([]SessionRef, error) {
+	return f.listDir(f.revokedDir())
+}
+
+// listDir enumerates session-named files directly in dir (never recursing, so
+// List skips the revoked/ subdir via IsDir), skipping foreign or unreadable
+// entries rather than failing the whole listing.
+func (f *FS) listDir(dir string) ([]SessionRef, error) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, fmt.Errorf("sessionstore: listing %s: %w", f.dir, err)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("sessionstore: listing %s: %w", dir, err)
 	}
 	var refs []SessionRef
 	for _, e := range entries {
@@ -91,6 +118,41 @@ func (f *FS) List(_ context.Context) ([]SessionRef, error) {
 		refs = append(refs, SessionRef{UserID: userID, SID: sid, UpdatedAt: info.ModTime()})
 	}
 	return refs, nil
+}
+
+func (f *FS) Revoke(_ context.Context, userID tgid.UserID, sid string) error {
+	// Tombstone first (source of truth), then remove the blob. A zero-byte file
+	// is enough; its presence is the signal (checked via os.Stat, not read).
+	p := f.revokedPath(userID, sid)
+	if err := xdg.WriteFileAtomic(p, []byte{}, 0o600, ".revoked-*.tmp"); err != nil {
+		return fmt.Errorf("sessionstore: writing tombstone %s: %w", p, err)
+	}
+	blob := f.path(userID, sid)
+	if err := os.Remove(blob); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("sessionstore: removing %s: %w", blob, err)
+	}
+	return nil
+}
+
+func (f *FS) Revoked(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
+	p := f.revokedPath(userID, sid)
+	_, err := os.Stat(p)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, os.ErrNotExist):
+		return false, nil
+	default:
+		return false, fmt.Errorf("sessionstore: stat %s: %w", p, err)
+	}
+}
+
+func (f *FS) DeleteRevoked(_ context.Context, userID tgid.UserID, sid string) error {
+	p := f.revokedPath(userID, sid)
+	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("sessionstore: removing tombstone %s: %w", p, err)
+	}
+	return nil
 }
 
 type fsSession struct {

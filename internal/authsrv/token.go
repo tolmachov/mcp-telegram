@@ -139,6 +139,19 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "this Telegram account is not allowed")
 		return
 	}
+	// Revocation gate: durable and independent of the blob, so a live client
+	// that re-stored (resurrected) the deleted blob cannot un-revoke the grant.
+	revoked, err := a.store.Revoked(r.Context(), userID, rc.SessionID)
+	if err != nil {
+		a.logger.Error("revocation check failed on refresh", "user_id", userID, "err", err)
+		a.tokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "session check failed, try again")
+		return
+	}
+	if revoked {
+		a.logger.Warn("refresh rejected: session revoked", "user_id", userID)
+		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "session revoked, log in again")
+		return
+	}
 	exists, err := a.store.Exists(r.Context(), userID, rc.SessionID)
 	if err != nil {
 		// Backend failure, not a dead grant: 503 keeps the client retrying
@@ -186,25 +199,25 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 
 // upgradeLegacySession MOVES a user's legacy master-only session into a fresh
 // independent split-key session: it copies the blob to a new (sid, key) object,
-// then deletes the legacy object and tears down any warm assembly still serving
-// it. The move (rather than a copy) is deliberate and load-bearing:
+// then REVOKES the legacy session (tombstone + delete). Tombstoning the legacy
+// session (rather than a bare delete) is load-bearing:
 //
-//   - It invalidates the old stateless legacy refresh token: its next use fails
-//     the Exists(userID, "") gate, so a replayed or un-rotated legacy token
-//     cannot keep minting tokens or spawn a fresh copy per refresh.
-//   - It prevents two live gotd clients from running on the same MTProto auth
-//     key (the just-created copy plus the still-warm legacy assembly), which
-//     Telegram punishes with AUTH_KEY_DUPLICATED, force-logging out the account.
+//   - The old stateless legacy refresh token is durably invalidated: the refresh
+//     gate's Revoked(userID, "") check rejects it, so a replayed or un-rotated
+//     legacy token cannot mint tokens or spawn another copy — even if a live
+//     legacy client re-stores (resurrects) the legacy blob.
+//   - Two live gotd clients briefly running on the same auth key (the new copy
+//     plus a still-warm legacy assembly) is a migration-only, one-time overlap;
+//     the pooled legacy assembly is dropped best-effort and idle-evicts.
 //
 // Trade-off: the FIRST legacy client to refresh wins the upgrade; any other
-// legacy client of the same account then fails its next refresh with
-// invalid_grant and re-runs the QR login. That is strictly better than the
-// silent auth-key duplication the copy-based version risked.
+// legacy client of the same account then fails its next refresh (Revoked) and
+// re-runs the QR login.
 //
-// Concurrency and atomicity: the whole load→write→delete sequence runs under
-// upgradeMu, so two simultaneous legacy refreshes cannot both produce a copy of
-// the same auth key — the loser observes the legacy object already gone
-// (session.ErrNotFound) and is told to log in again. If deleting the legacy
+// Concurrency and atomicity: the whole load→write→revoke sequence runs under the
+// per-account lock, so two simultaneous legacy refreshes cannot both produce a
+// copy of the same auth key — the loser observes the legacy object already gone
+// (session.ErrNotFound) and is told to log in again. If revoking the legacy
 // object fails, the just-written object is rolled back so the account is never
 // left with two live objects sharing one auth key.
 func (a *AuthServer) upgradeLegacySession(ctx context.Context, userID tgid.UserID) (string, []byte, error) {
@@ -229,17 +242,17 @@ func (a *AuthServer) upgradeLegacySession(ctx context.Context, userID tgid.UserI
 	if err := a.store.Session(userID, sid, key).StoreSession(ctx, data); err != nil {
 		return "", nil, fmt.Errorf("writing upgraded session: %w", err)
 	}
-	// Stop any warm client on the legacy session before removing the object, so
-	// it cannot re-store (resurrect) the blob after the delete.
+	// Drop the warm legacy assembly (best-effort) and tombstone the legacy
+	// session so the old legacy token is durably dead.
 	a.invalidateSession(userID, "")
-	if err := a.store.Delete(ctx, userID, ""); err != nil {
+	if err := a.store.Revoke(ctx, userID, ""); err != nil {
 		// Roll back the new object: leaving BOTH live would let the legacy token
 		// upgrade again into a second holder of the same auth key. Best-effort —
 		// a surviving orphan is reclaimed by the sweeper.
 		if delErr := a.store.Delete(ctx, userID, sid); delErr != nil {
 			a.logger.Error("legacy upgrade rollback failed; orphan will be swept", "user_id", userID, "session", sid, "err", delErr)
 		}
-		return "", nil, fmt.Errorf("deleting legacy object: %w", err)
+		return "", nil, fmt.Errorf("revoking legacy object: %w", err)
 	}
 	return sid, key, nil
 }

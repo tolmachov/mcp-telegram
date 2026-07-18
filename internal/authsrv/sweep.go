@@ -30,6 +30,7 @@ func (a *AuthServer) sessionSweeper(ctx context.Context) {
 			return
 		case <-t.C:
 			a.sweepOrphanSessions(ctx)
+			a.sweepExpiredTombstones(ctx)
 			t.Reset(sweepInterval)
 		}
 	}
@@ -63,6 +64,35 @@ func (a *AuthServer) sweepOrphanSessions(ctx context.Context) {
 			continue
 		}
 		a.logger.Info("orphan-session sweep: deleted unreachable session",
+			"user_id", ref.UserID, "session", ref.SID, "age", age.Round(time.Hour))
+	}
+}
+
+// sweepExpiredTombstones reclaims revocation tombstones older than the cutoff.
+// A tombstone's mtime is its revoke time, and a session's LoginAt precedes its
+// revoke time, so once the tombstone is older than refreshTokenTTL+margin no
+// refresh token for that session can still be valid — the tombstone has done
+// its job and can go. Same skip-and-continue error handling as the session
+// sweep.
+func (a *AuthServer) sweepExpiredTombstones(ctx context.Context) {
+	refs, err := a.store.ListRevoked(ctx)
+	if err != nil {
+		a.logger.Error("tombstone sweep: listing tombstones failed", "err", err)
+		return
+	}
+	cutoff := a.cfg.refreshTokenTTL() + sweepMargin
+	now := a.now()
+	for _, ref := range refs {
+		age := now.Sub(ref.UpdatedAt)
+		if age <= cutoff {
+			continue
+		}
+		if err := a.store.DeleteRevoked(ctx, ref.UserID, ref.SID); err != nil {
+			a.logger.Error("tombstone sweep: delete failed",
+				"user_id", ref.UserID, "session", ref.SID, "err", err)
+			continue
+		}
+		a.logger.Info("tombstone sweep: reclaimed expired tombstone",
 			"user_id", ref.UserID, "session", ref.SID, "age", age.Round(time.Hour))
 	}
 }

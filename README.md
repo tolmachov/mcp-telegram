@@ -332,23 +332,25 @@ key alone and are transparently upgraded to a split-key session on their next
 token refresh.
 
 Session lifecycle is managed automatically: `POST /revoke` (RFC 7009) with an
-access or refresh token tears down that authorization's live client and deletes
-its session — its refresh grant dies immediately (a warm client cannot re-store
-the object), while an already-issued access token remains valid until it expires
-(≤55 minutes). Revocation forgets the server's copy of the session but does not
-terminate the Telegram-side device authorization (it stays in Settings →
-Devices until Telegram expires it); after deletion no party holds the auth key,
-so the credential is unusable. Sessions abandoned without revocation are
-reclaimed by a background sweep once their stored blob is older than the
-refresh-token TTL plus a day — past that age no refresh token for the session
-can still be valid, so deletion cannot log out a live client.
+access or refresh token durably marks that authorization revoked (a tombstone
+stored where the Telegram client never writes) and deletes its session. The
+refresh grant dies immediately and stays dead — even if a still-live client
+re-stores the session object, the refresh check consults the tombstone, so
+revocation cannot be undone by a resurrected blob. An already-issued access
+token remains valid until it expires (≤55 minutes): revocation reliably stops
+renewal, matching the standard short-lived-access / revocable-refresh model.
+Revocation does not terminate the Telegram-side device authorization (it stays
+in Settings → Devices until Telegram expires it). Sessions abandoned without
+revocation — and old tombstones — are reclaimed by a background sweep once older
+than the refresh-token TTL plus a day, past which no refresh token for the
+session can still be valid.
 
 Legacy (pre-split-key) sessions are upgraded on their next token refresh by
-*moving* the session to a fresh split-key object. Consequently, if one account
-was logged in from several clients before upgrading, the first client to refresh
-wins the upgrade and the others re-run the QR login on their next refresh — this
-avoids ever running two Telegram clients on one auth key (which would trip
-`AUTH_KEY_DUPLICATED`).
+*moving* the session to a fresh split-key object and revoking the old legacy
+session. Consequently, if one account was logged in from several clients before
+upgrading, the first client to refresh wins the upgrade and the others re-run
+the QR login on their next refresh — this avoids ever running two Telegram
+clients on one auth key (which would trip `AUTH_KEY_DUPLICATED`).
 
 ### Try it locally
 

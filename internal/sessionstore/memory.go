@@ -27,12 +27,13 @@ type memBlob struct {
 type Memory struct {
 	Now func() time.Time
 
-	mu    sync.Mutex
-	blobs map[memKey]memBlob
+	mu      sync.Mutex
+	blobs   map[memKey]memBlob
+	revoked map[memKey]time.Time
 }
 
 func NewMemory() *Memory {
-	return &Memory{Now: time.Now, blobs: map[memKey]memBlob{}}
+	return &Memory{Now: time.Now, blobs: map[memKey]memBlob{}, revoked: map[memKey]time.Time{}}
 }
 
 func (m *Memory) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {
@@ -61,6 +62,39 @@ func (m *Memory) List(_ context.Context) ([]SessionRef, error) {
 		refs = append(refs, SessionRef{UserID: k.userID, SID: k.sid, UpdatedAt: b.updatedAt})
 	}
 	return refs, nil
+}
+
+func (m *Memory) Revoke(_ context.Context, userID tgid.UserID, sid string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := memKey{userID, sid}
+	m.revoked[k] = m.Now()
+	delete(m.blobs, k)
+	return nil
+}
+
+func (m *Memory) Revoked(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.revoked[memKey{userID, sid}]
+	return ok, nil
+}
+
+func (m *Memory) ListRevoked(_ context.Context) ([]SessionRef, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	refs := make([]SessionRef, 0, len(m.revoked))
+	for k, t := range m.revoked {
+		refs = append(refs, SessionRef{UserID: k.userID, SID: k.sid, UpdatedAt: t})
+	}
+	return refs, nil
+}
+
+func (m *Memory) DeleteRevoked(_ context.Context, userID tgid.UserID, sid string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.revoked, memKey{userID, sid})
+	return nil
 }
 
 type memorySession struct {

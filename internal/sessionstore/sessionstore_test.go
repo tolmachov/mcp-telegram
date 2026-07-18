@@ -262,6 +262,71 @@ func TestFSSplitKeyNotMasterDecryptable(t *testing.T) {
 	}
 }
 
+// TestRevokeTombstone exercises the tombstone lifecycle on every real backend:
+// Revoke marks + deletes the blob, Revoked reflects it, tombstones are listed
+// by ListRevoked but NOT by List (not mistaken for sessions), and DeleteRevoked
+// clears them.
+func TestRevokeTombstone(t *testing.T) {
+	const user = tgid.UserID(55)
+	const sid = "0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		name string
+		make func(t *testing.T) Store
+	}{
+		{"memory", func(_ *testing.T) Store { return NewMemory() }},
+		{"fs", func(t *testing.T) Store {
+			fs, err := NewFS(filepath.Join(t.TempDir(), "sessions"))
+			if err != nil {
+				t.Fatalf("NewFS: %v", err)
+			}
+			return fs
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			store := tc.make(t)
+			if err := store.Session(user, sid, nil).StoreSession(ctx, []byte("blob")); err != nil {
+				t.Fatalf("StoreSession: %v", err)
+			}
+
+			if r, err := store.Revoked(ctx, user, sid); err != nil || r {
+				t.Fatalf("Revoked before revoke = (%v, %v), want (false, nil)", r, err)
+			}
+			if err := store.Revoke(ctx, user, sid); err != nil {
+				t.Fatalf("Revoke: %v", err)
+			}
+			if r, err := store.Revoked(ctx, user, sid); err != nil || !r {
+				t.Errorf("Revoked after revoke = (%v, %v), want (true, nil)", r, err)
+			}
+			// The blob is gone; the tombstone is not listed as a session.
+			if ok, _ := store.Exists(ctx, user, sid); ok {
+				t.Error("Revoke must delete the session blob")
+			}
+			sessions, err := store.List(ctx)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if len(sessions) != 0 {
+				t.Errorf("List returned %d sessions, want 0 (tombstone must not appear as a session)", len(sessions))
+			}
+			revoked, err := store.ListRevoked(ctx)
+			if err != nil {
+				t.Fatalf("ListRevoked: %v", err)
+			}
+			if len(revoked) != 1 || revoked[0].UserID != user || revoked[0].SID != sid {
+				t.Errorf("ListRevoked = %+v, want one tombstone for (%d,%s)", revoked, user, sid)
+			}
+
+			if err := store.DeleteRevoked(ctx, user, sid); err != nil {
+				t.Fatalf("DeleteRevoked: %v", err)
+			}
+			if r, _ := store.Revoked(ctx, user, sid); r {
+				t.Error("Revoked after DeleteRevoked = true, want false")
+			}
+		})
+	}
+}
+
 func TestValidSID(t *testing.T) {
 	valid := []string{
 		"0123456789abcdef0123456789abcdef",

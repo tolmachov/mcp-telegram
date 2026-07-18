@@ -6,29 +6,27 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
-// handleRevoke implements RFC 7009. Since every authorization owns an
-// independent session object named by the token's sid claim, revoking a token
-// tears down that session's live client (if any) and deletes its object, so the
-// refresh grant dies immediately (the per-sid Exists gate on /token fails) and
-// no warm client can re-store the blob. Limits, stated plainly:
+// handleRevoke implements RFC 7009. Revoking a token writes a durable
+// revocation tombstone for its (userID, sid) session and deletes the blob. The
+// tombstone — not the delete — is the reliable part: the refresh grant checks
+// Revoked, so even if a warm gotd client re-stores (resurrects) the blob, the
+// grant stays dead. Limits, stated plainly:
 //
 //   - Already-issued access tokens are stateless and keep verifying until they
-//     expire (<= accessTokenTTL); the pool assembly is torn down here, so the
-//     next request cold-builds and 401s into a fresh login.
-//   - A legacy token (empty sid) deletes the shared legacy per-user object,
-//     logging out ALL of that account's not-yet-upgraded legacy clients —
+//     expire (<= accessTokenTTL); revocation stops renewal (the refresh grant),
+//     not the current short-lived access token. The pooled assembly is dropped
+//     best-effort to free the connection.
+//   - A legacy token (empty sid) tombstones the shared legacy per-user session,
+//     revoking ALL of that account's not-yet-upgraded legacy clients —
 //     acceptable while the legacy fallback exists at all.
 //   - This does NOT terminate the Telegram-side device authorization (it stays
-//     listed in the account's Settings → Devices until Telegram expires it);
-//     revocation forgets the server's copy of the session. After deletion no
-//     party holds the auth key, so the credential is unusable, but a full
-//     Telegram auth.LogOut on revoke is a possible follow-up.
+//     listed in Settings → Devices until Telegram expires it); a full
+//     auth.LogOut on revoke is a possible follow-up.
 //
 // Possession of a decryptable token is sufficient authorization to revoke it
-// (§2.1 — all our clients are public); expiry does not block revocation, since
-// deleting an expired grant's session is pure cleanup. Every response is 200
-// (§2.2 requires that even for invalid tokens, so there is no validity
-// oracle); the reason class is logged server-side, never the token.
+// (§2.1 — all our clients are public); expiry does not block revocation. Every
+// response is 200 (§2.2 requires that even for invalid tokens, so there is no
+// validity oracle); the reason class is logged server-side, never the token.
 func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	r.Body = http.MaxBytesReader(w, r.Body, maxFormBody)
@@ -70,21 +68,23 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		ok()
 		return
 	}
-	// Stop this session's live Telegram client BEFORE deleting the object, so it
-	// cannot re-store (resurrect) the blob after the delete and let the revoked
-	// refresh token pass the Exists gate again. The client is disconnected
-	// synchronously even if a request is still streaming (that stream then errors
-	// out — expected for a revoked session); the MCP handler is torn down once
-	// the stream ends.
-	a.invalidateSession(userID, sid)
-	if err := a.store.Delete(r.Context(), userID, sid); err != nil {
+	// Durably mark the session revoked (a tombstone) and delete its blob. The
+	// tombstone — not the delete — is what makes revocation reliable: a warm
+	// gotd client may re-store (resurrect) the blob, but the refresh gate checks
+	// Revoked, so the grant stays dead regardless. The already-issued access
+	// token remains valid until it expires (<= accessTokenTTL); revocation stops
+	// renewal, matching the short-lived-access / revocable-refresh model.
+	if err := a.store.Revoke(r.Context(), userID, sid); err != nil {
 		// The client cannot retry meaningfully and must not learn store
-		// internals; the orphan sweeper will reclaim the session later.
-		a.logger.Error("revocation could not delete session", "user_id", userID, "session", sid, "err", err)
+		// internals; log for the operator.
+		a.logger.Error("revocation could not be recorded", "user_id", userID, "session", sid, "err", err)
 		ok()
 		return
 	}
-	a.logger.Info("token revoked, session deleted", "user_id", userID, "session", sid)
+	// Best-effort: drop the pooled assembly so the connection is freed promptly.
+	// Not required for correctness (the tombstone is) and may be a no-op.
+	a.invalidateSession(userID, sid)
+	a.logger.Info("token revoked", "user_id", userID, "session", sid)
 	ok()
 }
 

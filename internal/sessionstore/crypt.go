@@ -263,6 +263,39 @@ func (s *encryptedStore) List(ctx context.Context) ([]SessionRef, error) {
 	return refs, nil
 }
 
+// Revocation tombstones carry no secret (mere presence is the signal), so the
+// Encrypted wrapper delegates the tombstone methods straight through.
+
+func (s *encryptedStore) Revoke(ctx context.Context, userID tgid.UserID, sid string) error {
+	if err := s.inner.Revoke(ctx, userID, sid); err != nil {
+		return fmt.Errorf("encrypted store: %w", err)
+	}
+	return nil
+}
+
+func (s *encryptedStore) Revoked(ctx context.Context, userID tgid.UserID, sid string) (bool, error) {
+	ok, err := s.inner.Revoked(ctx, userID, sid)
+	if err != nil {
+		return false, fmt.Errorf("encrypted store: %w", err)
+	}
+	return ok, nil
+}
+
+func (s *encryptedStore) ListRevoked(ctx context.Context) ([]SessionRef, error) {
+	refs, err := s.inner.ListRevoked(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("encrypted store: %w", err)
+	}
+	return refs, nil
+}
+
+func (s *encryptedStore) DeleteRevoked(ctx context.Context, userID tgid.UserID, sid string) error {
+	if err := s.inner.DeleteRevoked(ctx, userID, sid); err != nil {
+		return fmt.Errorf("encrypted store: %w", err)
+	}
+	return nil
+}
+
 type encryptedSession struct {
 	inner   session.Storage
 	cipher  *Cipher

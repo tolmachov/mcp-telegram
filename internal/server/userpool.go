@@ -55,13 +55,6 @@ type builtAssembly struct {
 	Handler http.Handler
 	Closer  io.Closer
 	Health  func() error
-	// StopClient disconnects just the live Telegram client (a context cancel,
-	// safe to call concurrently with an in-flight request), without tearing down
-	// the MCP handler. EvictSession calls it synchronously so a revoked/upgraded
-	// session's client stops re-storing (resurrecting) its blob even while a
-	// request still holds the assembly; the full Closer runs later, on release,
-	// when no request is in flight. Idempotent; nil means "nothing extra to stop".
-	StopClient func() error
 }
 
 // userHandlerBuilder builds the complete per-user HTTP assembly: MCP
@@ -84,15 +77,14 @@ func (e *userEntry) deadReason() error {
 // (buildErr set; the entry has already been removed from the pool map).
 // finish/fail are the only two transitions; both are one-shot.
 type userEntry struct {
-	key        poolKey
-	ready      chan struct{}
-	handler    http.Handler
-	closer     io.Closer
-	stopClient func() error
-	health     func() error
-	buildErr   error
-	lastUsed   atomic.Int64 // unix nanos
-	inflight   atomic.Int64
+	key      poolKey
+	ready    chan struct{}
+	handler  http.Handler
+	closer   io.Closer
+	health   func() error
+	buildErr error
+	lastUsed atomic.Int64 // unix nanos
+	inflight atomic.Int64
 	// closeRequested marks an entry that EvictSession removed while it was busy
 	// or building; the last in-flight request closes it on release so a live
 	// assembly is never torn down out from under an active request.
@@ -107,7 +99,6 @@ type userEntry struct {
 func (e *userEntry) finish(a builtAssembly) {
 	e.handler = a.Handler
 	e.closer = a.Closer
-	e.stopClient = a.StopClient
 	e.health = a.Health
 	close(e.ready)
 }
@@ -421,21 +412,14 @@ func (p *userPool) countForUserLocked(id tgid.UserID) int {
 	return n
 }
 
-// EvictSession removes the assembly for one (userID, sid) session and tears it
-// down, so a revoked or upgraded session's live gotd client cannot re-store
-// (resurrect) its blob after the caller deletes it. It removes the entry from
-// the map (no new request can attach) and then:
-//
-//   - if the entry is built and idle, closes it now — its client is stopped
-//     before this returns, so the caller may delete the blob next;
-//   - if it is busy or still building, marks it closeRequested; the last
-//     in-flight request closes it on release. This preserves the invariant that
-//     an assembly is never Close()d out from under an active request, and needs
-//     no background goroutine.
-//
-// The residual: a session revoked/upgraded while it holds a long-lived in-flight
-// stream keeps that one stream (and its client) until the stream ends. New
-// requests are rejected immediately (the object is gone → cold rebuild 401s).
+// EvictSession drops the pooled assembly for one (userID, sid) session so its
+// connection is freed after a revoke or legacy upgrade. It is best-effort
+// cleanup, NOT the correctness mechanism: revocation is guaranteed by the
+// durable tombstone (the refresh gate checks Revoked), so a live client that
+// keeps running until its in-flight stream ends is harmless. It removes the
+// entry from the map (no new request can attach) and closes it now if built and
+// idle, else defers the close to the last in-flight request's release — an
+// assembly is never Close()d out from under an active request.
 func (p *userPool) EvictSession(userID tgid.UserID, sid string) {
 	key := poolKey{id: userID, sid: sid}
 	p.mu.Lock()
@@ -447,26 +431,16 @@ func (p *userPool) EvictSession(userID tgid.UserID, sid string) {
 	if !ok {
 		return
 	}
+	// Order matters: set the flag first, then read inflight; release() mirrors
+	// (decrement, then read the flag), so with seq-cst atomics exactly one of the
+	// two runs closeEntry (closeOnce guards even that). A busy entry is closed by
+	// the last in-flight request's release — never torn down under an active
+	// request. This teardown is only about freeing the pooled connection;
+	// revocation correctness comes from the durable tombstone, not from stopping
+	// the client, so a brief live-client overlap here is harmless.
 	e.closeRequested.Store(true)
-	if e.done() {
-		// Stop the live Telegram client NOW, even if the entry is busy: this is
-		// a context cancel (safe to race an in-flight request) and it stops the
-		// client from re-storing its blob after the caller's Delete — closing the
-		// revoke/upgrade resurrection window. Idle entries also get the full
-		// teardown here; busy ones defer the rest (the possibly-unsafe MCP handler
-		// Close) to release, where no request is in flight.
-		if e.stopClient != nil {
-			if err := e.stopClient(); err != nil {
-				p.logger.Warn("stopping telegram client on evict failed", "user", key.id, "session", key.sid, "err", err)
-			}
-		}
-		// Order matters for the deferred close: set the flag first (done above),
-		// then read inflight; release() mirrors (decrement, then read the flag),
-		// so with seq-cst atomics exactly one of them runs closeEntry (closeOnce
-		// guards even that).
-		if e.inflight.Load() == 0 {
-			p.closeEntry(key, e)
-		}
+	if e.done() && e.inflight.Load() == 0 {
+		p.closeEntry(key, e)
 	}
 }
 

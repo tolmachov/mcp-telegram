@@ -1021,31 +1021,35 @@ func TestRevoke(t *testing.T) {
 	})
 }
 
-// failLegacyDeleteStore wraps Memory and fails Delete of the legacy (sid "")
-// object for one user, to exercise the upgrade's rollback path. It counts
+// failLegacyRevokeStore wraps Memory and fails Revoke of the legacy (sid "")
+// session for one user, to exercise the upgrade's rollback path. It counts
 // deletes of suffixed objects so a test can prove the rollback Delete fired.
-type failLegacyDeleteStore struct {
+type failLegacyRevokeStore struct {
 	*sessionstore.Memory
 	failUser   tgid.UserID
 	sidDeletes atomic.Int64
 }
 
-func (s *failLegacyDeleteStore) Delete(ctx context.Context, userID tgid.UserID, sid string) error {
+func (s *failLegacyRevokeStore) Revoke(ctx context.Context, userID tgid.UserID, sid string) error {
 	if userID == s.failUser && sid == "" {
-		return errors.New("simulated legacy delete failure")
+		return errors.New("simulated legacy revoke failure")
 	}
+	return s.Memory.Revoke(ctx, userID, sid)
+}
+
+func (s *failLegacyRevokeStore) Delete(ctx context.Context, userID tgid.UserID, sid string) error {
 	if sid != "" {
 		s.sidDeletes.Add(1)
 	}
 	return s.Memory.Delete(ctx, userID, sid)
 }
 
-// TestLegacyUpgradeRollsBackOnDeleteFailure pins that if the legacy object
-// cannot be deleted, the upgrade rolls back the just-written split-key object
+// TestLegacyUpgradeRollsBackOnRevokeFailure pins that if the legacy session
+// cannot be revoked, the upgrade rolls back the just-written split-key object
 // and the refresh falls back to a legacy token — the account is never left with
 // two live objects sharing one auth key.
-func TestLegacyUpgradeRollsBackOnDeleteFailure(t *testing.T) {
-	store := &failLegacyDeleteStore{Memory: sessionstore.NewMemory(), failUser: allowedUser}
+func TestLegacyUpgradeRollsBackOnRevokeFailure(t *testing.T) {
+	store := &failLegacyRevokeStore{Memory: sessionstore.NewMemory(), failUser: allowedUser}
 	a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
 	clientID := registerClient(t, ts, testRedirectURI)
 	require.NoError(t, store.Session(allowedUser, "", nil).StoreSession(context.Background(), []byte("legacy")))
@@ -1060,7 +1064,7 @@ func TestLegacyUpgradeRollsBackOnDeleteFailure(t *testing.T) {
 	require.Equal(t, http.StatusOK, status)
 	rc, err := openBlob(a.sealer, refreshBlob, refreshed.RefreshToken, a.now())
 	require.NoError(t, err)
-	assert.Empty(t, rc.SessionID, "delete failure must fall back to a legacy token, not a split-key one")
+	assert.Empty(t, rc.SessionID, "revoke failure must fall back to a legacy token, not a split-key one")
 
 	// The rollback actually fired (the split-key object was written, then deleted),
 	// not skipped — proving write-then-rollback rather than just an end state.
@@ -1218,6 +1222,35 @@ func TestRevokeRejectsMalformedSid(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, revokeToken(t, ts, url.Values{"token": {bad}}))
 	assert.False(t, called, "malformed sid must be rejected before invalidation/delete")
+}
+
+// TestRevokeSurvivesResurrection is the headline check for the tombstone design:
+// after revoke, even if the live gotd client re-stores (resurrects) the deleted
+// blob, the revoked refresh token stays rejected — the durable tombstone, not
+// the blob's presence, gates the grant.
+func TestRevokeSurvivesResurrection(t *testing.T) {
+	store := sessionstore.NewMemory()
+	flow := newFakeFlow()
+	a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
+	clientID := registerClient(t, ts, testRedirectURI)
+	tr, cc := loginAndRedeem(t, a, ts, flow, clientID)
+
+	require.Equal(t, http.StatusOK, revokeToken(t, ts, url.Values{"token": {tr.RefreshToken}}))
+	revoked, err := store.Revoked(context.Background(), allowedUser, cc.SessionID)
+	require.NoError(t, err)
+	require.True(t, revoked, "revoke must record a tombstone")
+
+	// Simulate the still-live client re-storing the blob after the delete.
+	require.NoError(t, store.Session(allowedUser, cc.SessionID, cc.SessionKey).
+		StoreSession(context.Background(), []byte("resurrected")))
+	exists, err := store.Exists(context.Background(), allowedUser, cc.SessionID)
+	require.NoError(t, err)
+	require.True(t, exists, "precondition: the blob was resurrected")
+
+	// The revoked refresh token is STILL rejected despite the resurrected blob.
+	_, oe, status := refreshGrant(t, ts, clientID, tr.RefreshToken)
+	require.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "invalid_grant", oe.Error)
 }
 
 // TestRefreshCarriesSessionIdentity pins that a session's sid and per-session

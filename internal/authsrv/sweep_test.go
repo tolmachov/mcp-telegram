@@ -79,3 +79,33 @@ func TestSweepRespectsConfiguredTTL(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, exists, "session past the cutoff must be reclaimed")
 }
+
+// TestSweepExpiredTombstones pins that revocation tombstones are reclaimed only
+// once older than refreshTokenTTL + sweepMargin — a fresh tombstone survives so
+// it can still reject a live refresh token, a stale one is cleaned up.
+func TestSweepExpiredTombstones(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store := sessionstore.NewMemory()
+
+	const staleSID = "0123456789abcdef0123456789abcdef"
+	const freshSID = "fedcba9876543210fedcba9876543210"
+
+	store.Now = func() time.Time { return base }
+	require.NoError(t, store.Revoke(ctx, allowedUser, staleSID))
+
+	sweepTime := base.Add(defaultRefreshTokenTTL + sweepMargin + time.Hour)
+	store.Now = func() time.Time { return sweepTime.Add(-time.Minute) }
+	require.NoError(t, store.Revoke(ctx, allowedUser, freshSID))
+
+	a, _ := newTestServer(t, testConfig(t), store, neverStartLogin)
+	a.now = func() time.Time { return sweepTime }
+	a.sweepExpiredTombstones(ctx)
+
+	stale, err := store.Revoked(ctx, allowedUser, staleSID)
+	require.NoError(t, err)
+	assert.False(t, stale, "stale tombstone must be reclaimed")
+	fresh, err := store.Revoked(ctx, allowedUser, freshSID)
+	require.NoError(t, err)
+	assert.True(t, fresh, "fresh tombstone must survive to keep rejecting live tokens")
+}

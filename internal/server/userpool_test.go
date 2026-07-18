@@ -173,41 +173,6 @@ func TestUserPoolEvictSessionDefersBusyClose(t *testing.T) {
 	}
 }
 
-// TestUserPoolEvictSessionStopsBusyClient pins that EvictSession stops the live
-// Telegram client synchronously even for a BUSY entry (so a revoked session
-// cannot re-store its blob), while deferring the full assembly teardown until
-// the in-flight request releases.
-func TestUserPoolEvictSessionStopsBusyClient(t *testing.T) {
-	var stops, closes atomic.Int64
-	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
-		return builtAssembly{
-			Handler:    okHandler(),
-			Closer:     closerFunc(func() error { closes.Add(1); return nil }),
-			StopClient: func() error { stops.Add(1); return nil },
-		}, nil
-	}, testWWWAuthenticate, discardLogger())
-
-	if rec := poolRequestSID(t, pool, 1, "aaaa"); rec.Code != http.StatusOK {
-		t.Fatalf("build status = %d, want 200", rec.Code)
-	}
-	pool.mu.Lock()
-	e := pool.entries[poolKey{id: 1, sid: "aaaa"}]
-	e.inflight.Add(1) // simulate an in-flight request holding the entry
-	pool.mu.Unlock()
-
-	pool.EvictSession(1, "aaaa")
-	if got := stops.Load(); got != 1 {
-		t.Errorf("StopClient ran %d times on evict of a busy entry; want 1 (synchronous client stop)", got)
-	}
-	if got := closes.Load(); got != 0 {
-		t.Errorf("full Closer ran %d times while busy; want 0 (deferred)", got)
-	}
-	pool.release(e)
-	if got := closes.Load(); got != 1 {
-		t.Errorf("full Closer ran %d times after release; want 1", got)
-	}
-}
-
 // TestUserPoolPerUserCap pins that one account cannot fill the pool: once it is
 // at userPoolMaxPerUser assemblies, a further authorization evicts THAT
 // account's own LRU entry, never another user's.

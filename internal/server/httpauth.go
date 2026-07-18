@@ -155,11 +155,6 @@ func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 		return builtAssembly{
 			Handler: handler,
 			Closer:  closers,
-			// StopClient disconnects just the Telegram client (a context cancel);
-			// EvictSession uses it to stop a revoked/upgraded session re-storing
-			// its blob without racing the MCP handler close. running.Close is
-			// idempotent, so the Closer chain calling it again later is harmless.
-			StopClient: running.Close,
 			// RunErr turns non-nil as soon as the client's Run loop exits —
 			// the signal (and reason) that this assembly must stop serving.
 			Health: running.RunErr,
