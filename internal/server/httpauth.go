@@ -94,22 +94,24 @@ func (s *Server) startLogin(ctx context.Context) (authsrv.LoginFlow, error) {
 // a fresh MCP assembly on top of it.
 func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 	return func(ctx context.Context, user *authsrv.UserIdentity) (builtAssembly, error) {
-		running, err := tgclient.StartClient(ctx, s.tgConfig, s.sessionStore.Session(user.ID), s.floodWaitLogger())
+		running, err := tgclient.StartClient(ctx, s.tgConfig, s.sessionStore.Session(user.ID, user.SessionID, user.SessionKey), s.floodWaitLogger())
 		if err != nil {
 			switch {
 			case errors.Is(err, sessionstore.ErrCorruptSession):
-				// A stored blob we cannot decrypt — almost always a key or
-				// issuer misconfiguration, not a dead session. Surface it
-				// loudly and preserve the blob: deleting it would make a
-				// recoverable operator mistake permanent.
-				s.logger.Error("stored session could not be decrypted; check AUTH_TOKEN_KEY / AUTH_ISSUER_URL", "user", user.ID, "err", err)
+				// A stored blob we cannot decrypt with this token's own session
+				// key — a key/issuer misconfiguration or a tampered blob, not a
+				// dead session (a token always carries its own object's key).
+				// Surface it loudly and preserve the blob: deleting it would make
+				// a recoverable operator mistake permanent.
+				s.logger.Error("stored session could not be decrypted; check AUTH_TOKEN_KEY / AUTH_ISSUER_URL", "user", user.ID, "session", user.SessionID, "err", err)
 			case errors.Is(err, tgclient.ErrSessionUnauthorized):
 				// The stored session is dead — Telegram refused a session we
-				// decrypted successfully. Drop it so refresh grants stop
-				// treating the user as logged in; the 401 this maps to sends
-				// the client back through the QR login.
-				if delErr := s.sessionStore.Delete(ctx, user.ID); delErr != nil {
-					s.logger.Error("failed to delete dead session; refresh grants may loop until it is removed", "user", user.ID, "err", delErr)
+				// decrypted successfully. Drop just this session so its refresh
+				// grants stop treating the user as logged in; the 401 this maps
+				// to sends that client back through the QR login. Other sessions
+				// of the same account are untouched.
+				if delErr := s.sessionStore.Delete(ctx, user.ID, user.SessionID); delErr != nil {
+					s.logger.Error("failed to delete dead session; refresh grants may loop until it is removed", "user", user.ID, "session", user.SessionID, "err", delErr)
 				}
 			}
 			return builtAssembly{}, fmt.Errorf("connecting Telegram client for user %s: %w", user.ID, err)

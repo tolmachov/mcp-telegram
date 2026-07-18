@@ -313,9 +313,23 @@ which shows a **QR code**. You scan it with the Telegram app (Settings → Devic
 are and becomes your working session (a 2FA-password prompt appears if your
 account has one). Only Telegram user ids listed in `AUTH_ALLOWED_USERS` may
 complete the login — everyone else is rejected after the scan and their session
-is discarded. Each allowed user gets their own isolated session, **encrypted at
-rest** (AES-256-GCM with a key derived from `AUTH_TOKEN_KEY`, bound to the
-issuer and user id), and their own MCP server assembly.
+is discarded.
+
+Each authorization is an **independent session**: it gets its own encrypted
+object in the bucket and its own MCP server assembly, so one account can be
+logged in from several clients at once without them contending. Sessions are
+**encrypted at rest** with AES-256-GCM under a **split key**: the key is derived
+from *both* `AUTH_TOKEN_KEY` *and* a random per-session key that lives only
+inside the client's OAuth access/refresh token (never stored server-side). As a
+result, an at-rest dump of the bucket **plus** the secret manager cannot, on its
+own, decrypt a session — a live token is also required. (Trade-offs, stated
+plainly: this does not protect against a compromise of the running server's
+memory, and a leaked *live* access token combined with bucket read access
+exposes that one session, since the token now also carries a decryption key
+share. TLS, `Cache-Control: no-store`, and never logging tokens mitigate the
+latter.) Pre-existing sessions from older versions stay readable with the master
+key alone and are transparently upgraded to a split-key session on their next
+token refresh.
 
 ### Try it locally
 
@@ -346,8 +360,10 @@ Secret Manager, sessions in a GCS bucket. In outline:
    freshly generated 32-byte `AUTH_TOKEN_KEY`
    (`head -c 32 /dev/urandom | base64`) — and grant the service account
    `roles/secretmanager.secretAccessor` on them. The token key never leaves
-   Secret Manager in plaintext, and it is what decrypts the sessions — losing it
-   logs everyone out; leaking it exposes every session.
+   Secret Manager in plaintext. Losing it logs everyone out (sessions become
+   undecryptable). Leaking it alone no longer exposes split-key sessions — those
+   also need a live client token — but treat it as highly sensitive regardless:
+   it still mints tokens and decrypts any not-yet-upgraded legacy sessions.
 3. **Deploy** with `gcloud run deploy --source .`, wiring the non-secret env
    from [`deploy/cloudrun.env.example`](deploy/cloudrun.env.example), the two
    secrets via `--set-secrets`, and **`--max-instances=1`** (mandatory: two

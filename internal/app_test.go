@@ -89,11 +89,14 @@ func TestBuildAuthOptionsEncryptsSessions(t *testing.T) {
 	}
 
 	const user = tgid.UserID(123456789)
+	// Exercise the split-key path: an independent session id + per-session key.
+	sid := "0123456789abcdef0123456789abcdef"
+	sessionKey := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
 	plaintext := []byte("SUPER-SECRET-SESSION-BYTES")
-	if err := store.Session(user).StoreSession(t.Context(), plaintext); err != nil {
+	if err := store.Session(user, sid, sessionKey).StoreSession(t.Context(), plaintext); err != nil {
 		t.Fatalf("StoreSession: %v", err)
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, user.String()+".bin")) //nolint:gosec // path built from a test-controlled temp dir and numeric id
+	raw, err := os.ReadFile(filepath.Join(dir, user.String()+"."+sid+".bin")) //nolint:gosec // path built from a test-controlled temp dir and numeric id
 	if err != nil {
 		t.Fatalf("reading session file: %v", err)
 	}
@@ -101,7 +104,7 @@ func TestBuildAuthOptionsEncryptsSessions(t *testing.T) {
 		t.Fatal("session persisted in plaintext — the Encrypted wrapper is not applied")
 	}
 
-	got, err := store.Session(user).LoadSession(t.Context())
+	got, err := store.Session(user, sid, sessionKey).LoadSession(t.Context())
 	if err != nil || string(got) != string(plaintext) {
 		t.Errorf("round trip = (%q, %v), want (%q, nil)", got, err, plaintext)
 	}

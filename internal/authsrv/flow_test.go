@@ -402,8 +402,13 @@ func TestFullAuthorizationFlow(t *testing.T) {
 	assert.Equal(t, "client-state-1", gotState)
 	assert.True(t, strings.HasPrefix(code, prefixCode))
 
-	// The Telegram session was persisted for the logged-in user.
-	stored, err := store.Session(allowedUser).LoadSession(context.Background())
+	// The Telegram session was persisted under its own random session id and
+	// per-session key, both carried in the code.
+	cc, err := openBlob(a.sealer, codeBlob, code, a.now())
+	require.NoError(t, err)
+	require.True(t, validSessionID(cc.SessionID), "code must carry a well-formed session id")
+	require.Len(t, cc.SessionKey, sessionKeyLen)
+	stored, err := store.Session(allowedUser, cc.SessionID, cc.SessionKey).LoadSession(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, sessionBytes, stored)
 
@@ -426,6 +431,9 @@ func TestFullAuthorizationFlow(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, allowedUser, extra.ID)
 	assert.Equal(t, "durov", extra.Username)
+	// The access token carries the same independent-session identity as the code.
+	assert.Equal(t, cc.SessionID, extra.SessionID)
+	assert.Equal(t, cc.SessionKey, extra.SessionKey)
 	assert.False(t, info.Expiration.IsZero())
 
 	// Refresh grant yields a fresh pair while the session exists.
@@ -435,8 +443,10 @@ func TestFullAuthorizationFlow(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, allowedUser.String(), info2.UserID)
 
-	// Deleting the Telegram session kills the refresh grant.
-	require.NoError(t, store.Delete(context.Background(), allowedUser))
+	// Deleting this authorization's Telegram session kills the refresh grant.
+	rc, err := openBlob(a.sealer, refreshBlob, refreshed.RefreshToken, a.now())
+	require.NoError(t, err)
+	require.NoError(t, store.Delete(context.Background(), allowedUser, rc.SessionID))
 	_, oe, status := refreshGrant(t, ts, clientID, refreshed.RefreshToken)
 	require.Equal(t, http.StatusBadRequest, status)
 	assert.Equal(t, "invalid_grant", oe.Error)
@@ -650,7 +660,7 @@ func TestLoginEndpoints(t *testing.T) {
 		assert.Equal(t, "failed", pr.Status)
 		assert.Contains(t, pr.Message, "not allowed")
 
-		exists, err := store.Exists(context.Background(), forbiddenUser)
+		exists, err := store.Exists(context.Background(), forbiddenUser, "")
 		require.NoError(t, err)
 		assert.False(t, exists, "a rejected account's session must never be persisted")
 		assert.True(t, flow.wasAborted())
@@ -671,7 +681,7 @@ func TestLoginEndpoints(t *testing.T) {
 
 	t.Run("2FA password branch", func(t *testing.T) {
 		flow := newFakeFlow()
-		_, ts, store, clientID, loginID := setup(t, flow)
+		a, ts, store, clientID, loginID := setup(t, flow)
 
 		flow.needPassword("hunter2", LoginUser{ID: allowedUser, Username: "durov"}, []byte("session-2fa"))
 		pr := pollLogin(t, ts, loginID)
@@ -699,15 +709,20 @@ func TestLoginEndpoints(t *testing.T) {
 		require.Equal(t, "done", pr.Status)
 		assert.Equal(t, []string{"wrong", "hunter2"}, flow.passwords)
 
-		exists, err := store.Exists(context.Background(), allowedUser)
+		// The session was persisted under its own random session id (carried in
+		// the minted code).
+		loc, err := url.Parse(pr.Redirect)
+		require.NoError(t, err)
+		code := loc.Query().Get("code")
+		cc, err := openBlob(a.sealer, codeBlob, code, a.now())
+		require.NoError(t, err)
+		exists, err := store.Exists(context.Background(), allowedUser, cc.SessionID)
 		require.NoError(t, err)
 		assert.True(t, exists)
 
 		// The minted code is redeemable.
-		loc, err := url.Parse(pr.Redirect)
-		require.NoError(t, err)
 		verifier, _ := pkcePair()
-		_, _, status := redeemCode(t, ts, clientID, testRedirectURI, loc.Query().Get("code"), verifier)
+		_, _, status := redeemCode(t, ts, clientID, testRedirectURI, code, verifier)
 		assert.Equal(t, http.StatusOK, status)
 	})
 
@@ -897,11 +912,98 @@ func TestIdentityFromContext(t *testing.T) {
 	})
 }
 
+// TestRefreshCarriesSessionIdentity pins that a session's sid and per-session
+// key ride verbatim through every refresh, so a refreshed token keeps pointing
+// at (and decrypting) the same session object.
+func TestRefreshCarriesSessionIdentity(t *testing.T) {
+	store := sessionstore.NewMemory()
+	flow := newFakeFlow()
+	a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
+
+	clientID := registerClient(t, ts, testRedirectURI)
+	verifier, challenge := pkcePair()
+	loginID := startAuthorize(t, ts, clientID, challenge, "s")
+	code, _ := finishLogin(t, ts, loginID, flow, LoginUser{ID: allowedUser, Username: "durov"}, []byte("sess"))
+
+	tr, _, status := redeemCode(t, ts, clientID, testRedirectURI, code, verifier)
+	require.Equal(t, http.StatusOK, status)
+
+	cc, err := openBlob(a.sealer, codeBlob, code, a.now())
+	require.NoError(t, err)
+	require.True(t, validSessionID(cc.SessionID))
+
+	// Two consecutive refreshes must preserve the exact sid and key.
+	rt := tr.RefreshToken
+	for i := range 2 {
+		refreshed, _, st := refreshGrant(t, ts, clientID, rt)
+		require.Equalf(t, http.StatusOK, st, "refresh %d", i)
+
+		ac, err := openBlob(a.sealer, accessBlob, refreshed.AccessToken, a.now())
+		require.NoError(t, err)
+		assert.Equalf(t, cc.SessionID, ac.SessionID, "access sid after refresh %d", i)
+		assert.Equalf(t, cc.SessionKey, ac.SessionKey, "access key after refresh %d", i)
+
+		rc, err := openBlob(a.sealer, refreshBlob, refreshed.RefreshToken, a.now())
+		require.NoError(t, err)
+		assert.Equalf(t, cc.SessionID, rc.SessionID, "refresh sid after refresh %d", i)
+		assert.Equalf(t, cc.SessionKey, rc.SessionKey, "refresh key after refresh %d", i)
+		rt = refreshed.RefreshToken
+	}
+}
+
+// TestLegacySessionUpgradeOnRefresh pins the migration path: a pre-upgrade
+// refresh token (no sid/sk) pointing at a legacy master-only session is
+// upgraded, on refresh, to an independent split-key session — the new tokens
+// carry a fresh sid+key, a new v2 object is written, and the legacy object is
+// left in place.
+func TestLegacySessionUpgradeOnRefresh(t *testing.T) {
+	store := sessionstore.NewMemory()
+	a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
+	clientID := registerClient(t, ts, testRedirectURI)
+
+	// Seed a legacy session (empty sid) and a matching legacy refresh token.
+	require.NoError(t, store.Session(allowedUser, "", nil).StoreSession(context.Background(), []byte("legacy-session")))
+	now := a.now()
+	legacyRefresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
+		Subject:  allowedUser.String(),
+		Username: "durov",
+		ClientID: clientID,
+		IssuedAt: now.Unix(),
+		LoginAt:  now.Unix(),
+	})
+	require.NoError(t, err)
+
+	refreshed, _, status := refreshGrant(t, ts, clientID, legacyRefresh)
+	require.Equal(t, http.StatusOK, status)
+
+	// The new tokens carry a fresh independent-session identity.
+	rc, err := openBlob(a.sealer, refreshBlob, refreshed.RefreshToken, a.now())
+	require.NoError(t, err)
+	require.True(t, validSessionID(rc.SessionID), "upgraded refresh must carry a real sid")
+	require.Len(t, rc.SessionKey, sessionKeyLen)
+
+	// The upgraded session exists as its own object; the legacy one is kept.
+	exists, err := store.Exists(context.Background(), allowedUser, rc.SessionID)
+	require.NoError(t, err)
+	assert.True(t, exists, "upgraded v2 session object must be written")
+	legacyExists, err := store.Exists(context.Background(), allowedUser, "")
+	require.NoError(t, err)
+	assert.True(t, legacyExists, "legacy object must be left in place for other clients / age GC")
+
+	// The upgraded session decrypts with the new key and holds the same bytes.
+	got, err := store.Session(allowedUser, rc.SessionID, rc.SessionKey).LoadSession(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []byte("legacy-session"), got)
+}
+
 func TestNewTokenInfoForTesting(t *testing.T) {
-	info := NewTokenInfoForTesting(allowedUser, "durov", time.Now().Add(time.Hour))
+	uk := []byte("test-session-key")
+	info := NewTokenInfoForTesting(allowedUser, "durov", "deadbeef", uk, time.Now().Add(time.Hour))
 	assert.Equal(t, allowedUser.String(), info.UserID)
 	extra, ok := info.Extra[extraIdentityKey].(identityExtra)
 	require.True(t, ok)
 	assert.Equal(t, allowedUser, extra.ID)
 	assert.Equal(t, "durov", extra.Username)
+	assert.Equal(t, "deadbeef", extra.SessionID)
+	assert.Equal(t, uk, extra.SessionKey)
 }

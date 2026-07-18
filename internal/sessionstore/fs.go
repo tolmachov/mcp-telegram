@@ -13,8 +13,9 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/xdg"
 )
 
-// FS stores one file per user under dir: <dir>/<userID>.bin. Intended for
-// local development and self-hosted deployments with a persistent disk.
+// FS stores one file per authorization under dir: <dir>/<userID>.<sid>.bin (or
+// <dir>/<userID>.bin for legacy sessions with an empty sid). Intended for local
+// development and self-hosted deployments with a persistent disk.
 type FS struct {
 	dir string
 }
@@ -30,30 +31,38 @@ func NewFS(dir string) (*FS, error) {
 	return &FS{dir: dir}, nil
 }
 
-func (f *FS) path(userID tgid.UserID) string {
-	return filepath.Join(f.dir, userID.String()+".bin")
+// path maps a session to its file. An empty sid keeps the legacy per-user
+// layout. sid is server-generated hex (see authsrv.validSessionID), so it
+// cannot contain path separators or traversal sequences.
+func (f *FS) path(userID tgid.UserID, sid string) string {
+	if sid == "" {
+		return filepath.Join(f.dir, userID.String()+".bin")
+	}
+	return filepath.Join(f.dir, userID.String()+"."+sid+".bin")
 }
 
-func (f *FS) Session(userID tgid.UserID) session.Storage {
-	return fsSession{path: f.path(userID)}
+func (f *FS) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {
+	return fsSession{path: f.path(userID, sid)}
 }
 
-func (f *FS) Exists(_ context.Context, userID tgid.UserID) (bool, error) {
-	_, err := os.Stat(f.path(userID))
+func (f *FS) Exists(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
+	p := f.path(userID, sid)
+	_, err := os.Stat(p)
 	switch {
 	case err == nil:
 		return true, nil
 	case errors.Is(err, os.ErrNotExist):
 		return false, nil
 	default:
-		return false, fmt.Errorf("sessionstore: stat %s: %w", f.path(userID), err)
+		return false, fmt.Errorf("sessionstore: stat %s: %w", p, err)
 	}
 }
 
-func (f *FS) Delete(_ context.Context, userID tgid.UserID) error {
-	err := os.Remove(f.path(userID))
+func (f *FS) Delete(_ context.Context, userID tgid.UserID, sid string) error {
+	p := f.path(userID, sid)
+	err := os.Remove(p)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("sessionstore: removing %s: %w", f.path(userID), err)
+		return fmt.Errorf("sessionstore: removing %s: %w", p, err)
 	}
 	return nil
 }

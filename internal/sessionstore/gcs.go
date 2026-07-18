@@ -12,10 +12,18 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
-// GCS stores one object per user in a Cloud Storage bucket:
-// sessions/<userID>.bin. This is the production backend on Cloud Run, where
+// GCS stores one object per authorization in a Cloud Storage bucket:
+// sessions/<userID>.<sid>.bin (or sessions/<userID>.bin for legacy sessions
+// with an empty sid). This is the production backend on Cloud Run, where
 // instances have no persistent disk. Objects hold ciphertext (wrap with
 // Encrypted); bucket IAM is the outer protection layer.
+//
+// Because each authorization keeps its own object, a client that drops its
+// token without logging out leaves an object behind. There is no automatic
+// reclamation yet; an object older than the refresh-token TTL can never be
+// used again (its refresh would be rejected as expired) and is safe to delete,
+// so an age-based sweep is the intended follow-up. Set a bucket lifecycle rule
+// as an interim guard against unbounded growth.
 type GCS struct {
 	bucket *storage.BucketHandle
 }
@@ -37,30 +45,37 @@ func NewGCS(ctx context.Context, bucketName string) (*GCS, error) {
 	return &GCS{bucket: bucket}, nil
 }
 
-func objectName(userID tgid.UserID) string {
-	return "sessions/" + userID.String() + ".bin"
+// objectName maps a session to its bucket object. An empty sid keeps the
+// legacy per-user layout so pre-upgrade sessions remain readable.
+func objectName(userID tgid.UserID, sid string) string {
+	if sid == "" {
+		return "sessions/" + userID.String() + ".bin"
+	}
+	return "sessions/" + userID.String() + "." + sid + ".bin"
 }
 
-func (g *GCS) Session(userID tgid.UserID) session.Storage {
-	return gcsSession{object: g.bucket.Object(objectName(userID))}
+func (g *GCS) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {
+	return gcsSession{object: g.bucket.Object(objectName(userID, sid))}
 }
 
-func (g *GCS) Exists(ctx context.Context, userID tgid.UserID) (bool, error) {
-	_, err := g.bucket.Object(objectName(userID)).Attrs(ctx)
+func (g *GCS) Exists(ctx context.Context, userID tgid.UserID, sid string) (bool, error) {
+	name := objectName(userID, sid)
+	_, err := g.bucket.Object(name).Attrs(ctx)
 	switch {
 	case err == nil:
 		return true, nil
 	case errors.Is(err, storage.ErrObjectNotExist):
 		return false, nil
 	default:
-		return false, fmt.Errorf("sessionstore: probing %s: %w", objectName(userID), err)
+		return false, fmt.Errorf("sessionstore: probing %s: %w", name, err)
 	}
 }
 
-func (g *GCS) Delete(ctx context.Context, userID tgid.UserID) error {
-	err := g.bucket.Object(objectName(userID)).Delete(ctx)
+func (g *GCS) Delete(ctx context.Context, userID tgid.UserID, sid string) error {
+	name := objectName(userID, sid)
+	err := g.bucket.Object(name).Delete(ctx)
 	if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
-		return fmt.Errorf("sessionstore: deleting %s: %w", objectName(userID), err)
+		return fmt.Errorf("sessionstore: deleting %s: %w", name, err)
 	}
 	return nil
 }

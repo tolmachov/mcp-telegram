@@ -19,8 +19,10 @@ const extraIdentityKey = "mcp-telegram/identity"
 // identityExtra is the identity payload the verifier stores in
 // TokenInfo.Extra and Identity reads back.
 type identityExtra struct {
-	ID       tgid.UserID
-	Username string
+	ID         tgid.UserID
+	Username   string
+	SessionID  string
+	SessionKey []byte
 }
 
 // Verifier returns the auth.TokenVerifier for RequireBearerToken. It opens
@@ -54,11 +56,21 @@ func (a *AuthServer) Verifier() auth.TokenVerifier {
 			a.logger.Warn("access token rejected: user no longer allowed", "user_id", userID)
 			return nil, fmt.Errorf("%w: user not allowed", auth.ErrInvalidToken)
 		}
+		// A non-empty session id must be well-formed: it reaches the storage
+		// layer as an object-name suffix. It is server-minted, so a malformed
+		// value means a forged/corrupt token, not a legacy (empty-sid) one.
+		if c.SessionID != "" && !validSessionID(c.SessionID) {
+			a.logger.Warn("access token rejected: malformed session id", "user_id", userID)
+			return nil, fmt.Errorf("%w: not a valid access token", auth.ErrInvalidToken)
+		}
 		return &auth.TokenInfo{
 			Expiration: time.Unix(c.ExpiresAt, 0),
 			UserID:     c.Subject,
 			Extra: map[string]any{
-				extraIdentityKey: identityExtra{ID: userID, Username: c.Username},
+				extraIdentityKey: identityExtra{
+					ID: userID, Username: c.Username,
+					SessionID: c.SessionID, SessionKey: c.SessionKey,
+				},
 			},
 		}, nil
 	}
@@ -66,12 +78,20 @@ func (a *AuthServer) Verifier() auth.TokenVerifier {
 
 // UserIdentity describes the authenticated user of the current request.
 type UserIdentity struct {
-	// ID is the numeric Telegram user ID established by the QR login. Use it
-	// as the key for per-user resources (sessions, client pools).
+	// ID is the numeric Telegram user ID established by the QR login.
 	ID tgid.UserID
 	// Username is the Telegram @username captured at login (may be empty:
 	// usernames are optional and can change; ID is the stable key).
 	Username string
+	// SessionID is this authorization's session-object suffix. Empty for a
+	// legacy (pre-upgrade) session. Together with ID it keys the client pool,
+	// so multiple independent authorizations of one account each get their own
+	// assembly.
+	SessionID string
+	// SessionKey is this authorization's per-session encryption key from the
+	// token. It is passed to the session store to decrypt this session's blob
+	// (empty for a legacy master-only session). Treat as secret: never log it.
+	SessionKey []byte
 }
 
 // Identity returns the authenticated user of the request, or ok=false when
@@ -95,19 +115,25 @@ func IdentityFromTokenInfo(info *auth.TokenInfo) (*UserIdentity, bool) {
 	if !ok || extra.ID <= 0 {
 		return nil, false
 	}
-	return &UserIdentity{ID: extra.ID, Username: extra.Username}, true
+	return &UserIdentity{
+		ID: extra.ID, Username: extra.Username,
+		SessionID: extra.SessionID, SessionKey: extra.SessionKey,
+	}, true
 }
 
 // NewTokenInfoForTesting fabricates the TokenInfo this package's Verifier
 // would produce. It exists so other packages can unit-test handlers that sit
 // behind auth.RequireBearerToken (e.g. the per-user client pool) without
 // running the OAuth flow.
-func NewTokenInfoForTesting(id tgid.UserID, username string, expiry time.Time) *auth.TokenInfo {
+func NewTokenInfoForTesting(id tgid.UserID, username, sessionID string, sessionKey []byte, expiry time.Time) *auth.TokenInfo {
 	return &auth.TokenInfo{
 		UserID:     id.String(),
 		Expiration: expiry,
 		Extra: map[string]any{
-			extraIdentityKey: identityExtra{ID: id, Username: username},
+			extraIdentityKey: identityExtra{
+				ID: id, Username: username,
+				SessionID: sessionID, SessionKey: sessionKey,
+			},
 		},
 	}
 }

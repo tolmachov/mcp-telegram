@@ -1,9 +1,11 @@
 package authsrv
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -81,6 +83,7 @@ func (a *AuthServer) tokenFromCode(w http.ResponseWriter, form url.Values) {
 	a.mintTokens(w, mintInput{
 		Subject: cc.Subject, Username: cc.Username,
 		ClientID: cc.ClientID, Resource: cc.Resource,
+		SessionID: cc.SessionID, SessionKey: cc.SessionKey,
 		LoginAt: now.Unix(),
 	})
 }
@@ -120,7 +123,7 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "this Telegram account is not allowed")
 		return
 	}
-	exists, err := a.store.Exists(r.Context(), userID)
+	exists, err := a.store.Exists(r.Context(), userID, rc.SessionID)
 	if err != nil {
 		// Backend failure, not a dead grant: 503 keeps the client retrying
 		// instead of discarding a refresh token that may still be good.
@@ -134,17 +137,57 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 		return
 	}
 
+	// Migrate a legacy (master-only) session to an independent split-key session
+	// on this refresh, so protection completes within one access-token lifetime
+	// without forcing a fresh QR login. Best-effort: on any failure keep the
+	// legacy session and re-issue legacy tokens rather than break the refresh.
+	sid, sessionKey := rc.SessionID, rc.SessionKey
+	if sid == "" {
+		if upgradedSID, upgradedKey, upErr := a.upgradeLegacySession(r.Context(), userID); upErr != nil {
+			a.logger.Warn("legacy session upgrade skipped; keeping master-only session", "user_id", userID, "err", upErr)
+		} else {
+			sid, sessionKey = upgradedSID, upgradedKey
+			a.logger.Info("upgraded legacy session to split-key on refresh", "user_id", userID)
+		}
+	}
+
 	a.mintTokens(w, mintInput{
 		Subject: rc.Subject, Username: rc.Username,
 		ClientID: rc.ClientID, Resource: rc.Resource,
+		SessionID: sid, SessionKey: sessionKey,
 		LoginAt: rc.LoginAt,
 	})
+}
+
+// upgradeLegacySession copies a user's legacy master-only session blob into a
+// fresh independent split-key session (new sid + new key) and returns the new
+// credentials. The legacy object is deliberately left in place: other clients
+// may still hold legacy tokens for it, and an age-based sweep can reclaim it
+// once no unexpired refresh token could point at it.
+func (a *AuthServer) upgradeLegacySession(ctx context.Context, userID tgid.UserID) (string, []byte, error) {
+	data, err := a.store.Session(userID, "", nil).LoadSession(ctx)
+	if err != nil {
+		return "", nil, fmt.Errorf("reading legacy session: %w", err)
+	}
+	sid, key, err := newSessionCreds()
+	if err != nil {
+		return "", nil, err
+	}
+	if err := a.store.Session(userID, sid, key).StoreSession(ctx, data); err != nil {
+		return "", nil, fmt.Errorf("writing upgraded session: %w", err)
+	}
+	return sid, key, nil
 }
 
 // mintInput carries everything needed to mint an access/refresh token pair.
 type mintInput struct {
 	Subject, Username  string
 	ClientID, Resource string
+	// SessionID and SessionKey identify and decrypt the caller's own session
+	// object; they are sealed into both minted tokens (empty for legacy
+	// master-only sessions).
+	SessionID  string
+	SessionKey []byte
 	// LoginAt anchors the refresh-token TTL: it must be the ORIGINAL login
 	// time (now for the code grant, the previous token's LoginAt for the
 	// refresh grant). Passing "now" on refresh would make refresh tokens
@@ -165,6 +208,7 @@ func (a *AuthServer) mintTokens(w http.ResponseWriter, in mintInput) {
 	accessToken, err := sealBlob(a.sealer, accessBlob, accessClaims{
 		Subject: in.Subject, Username: in.Username,
 		ClientID: in.ClientID, Resource: in.Resource,
+		SessionID: in.SessionID, SessionKey: in.SessionKey,
 		IssuedAt: now.Unix(), ExpiresAt: exp.Unix(),
 	})
 	if err != nil {
@@ -175,6 +219,7 @@ func (a *AuthServer) mintTokens(w http.ResponseWriter, in mintInput) {
 	refreshToken, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
 		Subject: in.Subject, Username: in.Username,
 		ClientID: in.ClientID, Resource: in.Resource,
+		SessionID: in.SessionID, SessionKey: in.SessionKey,
 		IssuedAt: now.Unix(), LoginAt: in.LoginAt,
 	})
 	if err != nil {

@@ -22,11 +22,18 @@ const testWWWAuthenticate = `Bearer resource_metadata="https://mcp.example.com/.
 
 // poolRequest sends one request through the pool behind a stub bearer
 // verifier, so the identity reaches the pool exactly the way the production
-// RequireBearerToken middleware delivers it.
+// RequireBearerToken middleware delivers it. The session id is empty (the
+// legacy single-session case); use poolRequestSID for independent sessions.
 func poolRequest(t *testing.T, p *userPool, id tgid.UserID) *httptest.ResponseRecorder {
+	return poolRequestSID(t, p, id, "")
+}
+
+// poolRequestSID is poolRequest with an explicit per-authorization session id,
+// so tests can drive several independent sessions of one account.
+func poolRequestSID(t *testing.T, p *userPool, id tgid.UserID, sid string) *httptest.ResponseRecorder {
 	t.Helper()
 	verifier := func(_ context.Context, _ string, _ *http.Request) (*auth.TokenInfo, error) {
-		return authsrv.NewTokenInfoForTesting(id, "u", time.Now().Add(time.Hour)), nil
+		return authsrv.NewTokenInfoForTesting(id, "u", sid, nil, time.Now().Add(time.Hour)), nil
 	}
 	handler := auth.RequireBearerToken(verifier, nil)(p)
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
@@ -66,6 +73,36 @@ func TestUserPoolBuildsOncePerUser(t *testing.T) {
 	}
 	if got := builds.Load(); got != 2 {
 		t.Errorf("builder ran %d times, want 2 (one per user)", got)
+	}
+}
+
+// TestUserPoolIndependentSessionsPerUser pins the core of the independent-
+// session design: two authorizations of the SAME account (same user id,
+// distinct session ids) get two separate assemblies and both serve — no
+// contention, no forced re-login. A third request reusing the first session id
+// must hit the warm entry rather than build again.
+func TestUserPoolIndependentSessionsPerUser(t *testing.T) {
+	var builds atomic.Int64
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+		builds.Add(1)
+		return okAssembly(), nil
+	}, testWWWAuthenticate, discardLogger())
+
+	if rec := poolRequestSID(t, pool, 1, "aaaa"); rec.Code != http.StatusOK {
+		t.Fatalf("session A status = %d, want 200", rec.Code)
+	}
+	if rec := poolRequestSID(t, pool, 1, "bbbb"); rec.Code != http.StatusOK {
+		t.Fatalf("session B status = %d, want 200", rec.Code)
+	}
+	// Reusing session A hits the warm assembly, not a new build.
+	if rec := poolRequestSID(t, pool, 1, "aaaa"); rec.Code != http.StatusOK {
+		t.Fatalf("session A reuse status = %d, want 200", rec.Code)
+	}
+	if got := builds.Load(); got != 2 {
+		t.Errorf("builder ran %d times, want 2 (one per independent session)", got)
+	}
+	if pool.size() != 2 {
+		t.Errorf("pool size = %d, want 2 (two independent sessions of one account)", pool.size())
 	}
 }
 
@@ -176,7 +213,7 @@ func TestUserPoolDeadBusyAssemblyMapsTo401(t *testing.T) {
 	// Simulate a hung stream holding the entry while the client dies: the
 	// pool cannot tear it down, so new requests get the re-auth 401.
 	pool.mu.Lock()
-	pool.entries[1].inflight.Add(1)
+	pool.entries[sessionKey{id: 1}].inflight.Add(1)
 	pool.mu.Unlock()
 	dead.Store(true)
 

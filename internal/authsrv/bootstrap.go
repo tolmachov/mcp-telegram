@@ -324,7 +324,17 @@ func (a *AuthServer) finalizeLogin(ctx context.Context, w http.ResponseWriter, p
 		fail("Telegram login failed. Start over from your MCP client.")
 		return
 	}
-	if err := a.store.Session(user.ID).StoreSession(ctx, data); err != nil {
+	// Each login is an independent session: a fresh random sid (its own bucket
+	// object) and a fresh random key (folded into the session encryption, carried
+	// only in the tokens below). Concurrent logins for one account therefore do
+	// not overwrite each other.
+	sid, sessionKey, err := newSessionCreds()
+	if err != nil {
+		a.logger.Error("generating session credentials failed", "user_id", user.ID, "err", err)
+		fail("Internal error. Start over from your MCP client.")
+		return
+	}
+	if err := a.store.Session(user.ID, sid, sessionKey).StoreSession(ctx, data); err != nil {
 		a.logger.Error("storing telegram session failed", "user_id", user.ID, "err", err)
 		fail("Storing the Telegram session failed. Start over from your MCP client.")
 		return
@@ -338,6 +348,8 @@ func (a *AuthServer) finalizeLogin(ctx context.Context, w http.ResponseWriter, p
 		RedirectURI:   sc.RedirectURI,
 		CodeChallenge: sc.CodeChallenge,
 		Resource:      sc.Resource,
+		SessionID:     sid,
+		SessionKey:    sessionKey,
 		IssuedAt:      now.Unix(),
 	})
 	if err != nil {
