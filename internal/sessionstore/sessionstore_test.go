@@ -262,6 +262,39 @@ func TestFSSplitKeyNotMasterDecryptable(t *testing.T) {
 	}
 }
 
+// TestStoreRejectsMismatchedPairing pins the legacy-pairing invariant enforced
+// at the write: a legacy object name (empty sid) may only be sealed master-only
+// (empty userKey), and a suffixed object name (non-empty sid) may only be sealed
+// split-key (non-empty userKey). Either mismatch is refused before it can write
+// a blob that would be unreadable on its next load.
+func TestStoreRejectsMismatchedPairing(t *testing.T) {
+	ctx := t.Context()
+	cipher, err := NewCipher([]string{newKey(t)}, testIssuer)
+	if err != nil {
+		t.Fatalf("NewCipher: %v", err)
+	}
+	store := Encrypted(NewMemory(), cipher)
+	const user = tgid.UserID(88)
+	const sid = "0123456789abcdef0123456789abcdef"
+
+	// Legacy name + per-session key: would seal a v2 blob under the legacy name.
+	if err := store.Session(user, "", userKeyForTest(t)).StoreSession(ctx, []byte("x")); err == nil {
+		t.Error("storing a keyed session under the legacy (empty-sid) name must be refused")
+	}
+	// Suffixed name + no key: would seal a v1 blob under a suffixed name.
+	if err := store.Session(user, sid, nil).StoreSession(ctx, []byte("x")); err == nil {
+		t.Error("storing an unkeyed session under a suffixed name must be refused")
+	}
+	// Neither mismatched write may have landed.
+	refs, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(refs) != 0 {
+		t.Errorf("no object may be written on a pairing mismatch, got %d", len(refs))
+	}
+}
+
 // TestRevokeTombstone exercises the tombstone lifecycle on every real backend:
 // Revoke marks + deletes the blob, Revoked reflects it, tombstones are listed
 // by ListRevoked but NOT by List (not mistaken for sessions), and DeleteRevoked

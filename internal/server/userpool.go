@@ -271,9 +271,9 @@ func (p *userPool) entryFor(ctx context.Context, user *authsrv.UserIdentity) (*u
 	type eviction struct {
 		key   poolKey
 		entry *userEntry
-		// reason distinguishes a per-account cap eviction from a global one in
-		// logs; both close the same way.
-		perUser bool
+		// reason is the log line for this eviction (per-account vs global cap);
+		// both close identically.
+		reason string
 	}
 	var evictions []eviction
 
@@ -286,7 +286,7 @@ func (p *userPool) entryFor(ctx context.Context, user *authsrv.UserIdentity) (*u
 			p.mu.Unlock()
 			return nil, errPoolFull
 		}
-		evictions = append(evictions, eviction{ek, ee, true})
+		evictions = append(evictions, eviction{ek, ee, "evicted account's own least-recently-used assembly (per-account cap)"})
 	}
 
 	// Global cap: evict the pool-wide LRU evictable entry.
@@ -296,7 +296,7 @@ func (p *userPool) entryFor(ctx context.Context, user *authsrv.UserIdentity) (*u
 			p.mu.Unlock()
 			return nil, errPoolFull
 		}
-		evictions = append(evictions, eviction{ek, ee, false})
+		evictions = append(evictions, eviction{ek, ee, "evicted least-recently-used user assembly to make room"})
 	}
 	e := &userEntry{key: key, ready: make(chan struct{})}
 	e.inflight.Add(1)
@@ -305,11 +305,7 @@ func (p *userPool) entryFor(ctx context.Context, user *authsrv.UserIdentity) (*u
 	p.mu.Unlock()
 
 	for _, ev := range evictions {
-		if ev.perUser {
-			p.logger.Info("evicted account's own least-recently-used assembly (per-account cap)", "user", ev.key.id, "session", ev.key.sid)
-		} else {
-			p.logger.Info("evicted least-recently-used user assembly to make room", "user", ev.key.id, "session", ev.key.sid)
-		}
+		p.logger.Info(ev.reason, "user", ev.key.id, "session", ev.key.sid)
 		p.closeEntry(ev.key, ev.entry)
 	}
 

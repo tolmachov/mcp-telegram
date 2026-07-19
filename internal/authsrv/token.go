@@ -87,6 +87,14 @@ func (a *AuthServer) tokenFromCode(w http.ResponseWriter, form url.Values) {
 		a.tokenError(w, http.StatusBadRequest, "invalid_target", "unknown resource")
 		return
 	}
+	// The sid is AEAD-sealed into the code (we minted it), so a malformed value
+	// here means tampering or corruption; reject it before it can reach the
+	// storage layer, matching the refresh/revoke/verifier paths.
+	if cc.SessionID != "" && !validSessionID(cc.SessionID) {
+		a.logger.Warn("authorization code rejected: malformed session id")
+		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "invalid authorization code")
+		return
+	}
 
 	a.mintTokens(w, mintInput{
 		Subject: cc.Subject, Username: cc.Username,
@@ -215,12 +223,31 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 // re-runs the QR login.
 //
 // Concurrency and atomicity: the whole load→write→revoke sequence runs under the
-// per-account lock, so two simultaneous legacy refreshes cannot both produce a
-// copy of the same auth key — the loser observes the legacy object already gone
-// (session.ErrNotFound) and is told to log in again. If revoking the legacy
-// object fails, the just-written object is rolled back so the account is never
-// left with two live objects sharing one auth key.
+// per-account lock, so two simultaneous legacy refreshes on ONE instance cannot
+// both produce a copy of the same auth key — the loser observes the legacy
+// object already gone (session.ErrNotFound) and is told to log in again. The
+// lock is in-process; the deployment is single-instance by design (README
+// mandates --max-instances=1), so this is the atomicity boundary. If revoking
+// the legacy object fails without leaving a durable tombstone, the just-written
+// object is rolled back so the account is never left with two live objects
+// sharing one auth key.
 func (a *AuthServer) upgradeLegacySession(ctx context.Context, userID tgid.UserID) (string, []byte, error) {
+	sid, key, err := a.migrateLegacyLocked(ctx, userID)
+	if err != nil {
+		return "", nil, err
+	}
+	// Drop the warm legacy assembly best-effort — OUTSIDE the per-account lock. A
+	// slow gotd Close() must not serialize this account's other refreshes; the
+	// legacy tombstone (written under the lock) is what makes the old token dead,
+	// so this is pool cleanup, not part of the atomic store sequence.
+	a.invalidateSession(userID, "")
+	return sid, key, nil
+}
+
+// migrateLegacyLocked performs the load→write→revoke store sequence under the
+// per-account upgrade lock and returns the new session credentials. It does no
+// pool teardown (see upgradeLegacySession).
+func (a *AuthServer) migrateLegacyLocked(ctx context.Context, userID tgid.UserID) (string, []byte, error) {
 	unlock := a.lockUpgrade(userID)
 	defer unlock()
 
@@ -242,13 +269,22 @@ func (a *AuthServer) upgradeLegacySession(ctx context.Context, userID tgid.UserI
 	if err := a.store.Session(userID, sid, key).StoreSession(ctx, data); err != nil {
 		return "", nil, fmt.Errorf("writing upgraded session: %w", err)
 	}
-	// Drop the warm legacy assembly (best-effort) and tombstone the legacy
-	// session so the old legacy token is durably dead.
-	a.invalidateSession(userID, "")
 	if err := a.store.Revoke(ctx, userID, ""); err != nil {
-		// Roll back the new object: leaving BOTH live would let the legacy token
-		// upgrade again into a second holder of the same auth key. Best-effort —
-		// a surviving orphan is reclaimed by the sweeper.
+		// Revoke writes the tombstone FIRST, then deletes the blob (non-atomic).
+		// If the tombstone landed but the blob-delete failed, the legacy token is
+		// already durably dead: its next refresh hits the Revoked gate. Rolling
+		// back the new object here would strand the account on a revoked legacy
+		// session and force an unnecessary re-login — exactly what the caller's
+		// "transient, keep legacy" fallback tries to avoid. So probe the tombstone
+		// and, if it is durable, complete the upgrade instead of rolling back.
+		if revoked, rErr := a.store.Revoked(ctx, userID, ""); rErr == nil && revoked {
+			a.logger.Warn("legacy blob delete failed but tombstone is durable; completing upgrade",
+				"user_id", userID, "session", sid, "err", err)
+			return sid, key, nil
+		}
+		// No durable tombstone: roll back the new object. Leaving BOTH live would
+		// let the legacy token upgrade again into a second holder of the same auth
+		// key. Best-effort — a surviving orphan is reclaimed by the sweeper.
 		if delErr := a.store.Delete(ctx, userID, sid); delErr != nil {
 			a.logger.Error("legacy upgrade rollback failed; orphan will be swept", "user_id", userID, "session", sid, "err", delErr)
 		}

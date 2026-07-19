@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/session"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 	"github.com/stretchr/testify/assert"
@@ -897,7 +898,11 @@ func TestVerifierRejections(t *testing.T) {
 	})
 }
 
-func TestRevokeIsSpecCompliantNoOp(t *testing.T) {
+// TestRevokeUnrecognizedTokenAcknowledged pins RFC 7009 §2.2: an
+// unrecognized/garbage/empty token is acknowledged with 200 (no validity
+// oracle) and never touches storage. A recognized token whose tombstone cannot
+// be written is the ONE case that returns non-200 (503, TestRevokeStoreError).
+func TestRevokeUnrecognizedTokenAcknowledged(t *testing.T) {
 	_, ts := newTestServer(t, testConfig(t), sessionstore.NewMemory(), neverStartLogin)
 
 	for _, token := range []string{"mcp_rt_whatever", "garbage", ""} {
@@ -1075,6 +1080,169 @@ func TestLegacyUpgradeRollsBackOnRevokeFailure(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, refs, 1)
 	assert.Equal(t, "", refs[0].SID, "the rolled-back split-key copy must not survive")
+}
+
+// failRevokeStore fails every Revoke, to exercise the /revoke store-error path.
+type failRevokeStore struct {
+	*sessionstore.Memory
+}
+
+func (s *failRevokeStore) Revoke(context.Context, tgid.UserID, string) error {
+	return errors.New("simulated revoke failure")
+}
+
+// TestRevokeStoreError pins that a recognized token whose tombstone cannot be
+// written yields 503 (temporarily_unavailable), NOT 200 — answering 200 would
+// tell the client the grant is dead while the refresh keeps minting.
+func TestRevokeStoreError(t *testing.T) {
+	store := &failRevokeStore{Memory: sessionstore.NewMemory()}
+	flow := newFakeFlow()
+	a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
+	clientID := registerClient(t, ts, testRedirectURI)
+	tr, _ := loginAndRedeem(t, a, ts, flow, clientID)
+
+	status := revokeToken(t, ts, url.Values{
+		"token": {tr.RefreshToken}, "token_type_hint": {"refresh_token"},
+	})
+	assert.Equal(t, http.StatusServiceUnavailable, status,
+		"a failed tombstone write must surface as 503, not a false 200")
+}
+
+// partialRevokeStore simulates a Revoke that durably wrote the tombstone but
+// then failed (e.g. the blob-delete errored): Revoked reports true afterward,
+// yet Revoke returns an error to its caller.
+type partialRevokeStore struct {
+	*sessionstore.Memory
+	failUser tgid.UserID
+}
+
+func (s *partialRevokeStore) Revoke(ctx context.Context, userID tgid.UserID, sid string) error {
+	if userID == s.failUser && sid == "" {
+		_ = s.Memory.Revoke(ctx, userID, sid) // tombstone lands durably
+		return errors.New("simulated blob-delete failure after tombstone write")
+	}
+	return s.Memory.Revoke(ctx, userID, sid)
+}
+
+// TestLegacyUpgradeCompletesOnPartialRevoke pins that when the legacy Revoke
+// leaves a durable tombstone but still errors, the upgrade COMPLETES (returns
+// the new split-key creds) instead of rolling back — rolling back would strand
+// the account on a now-revoked legacy session and force an unnecessary re-login.
+func TestLegacyUpgradeCompletesOnPartialRevoke(t *testing.T) {
+	store := &partialRevokeStore{Memory: sessionstore.NewMemory(), failUser: allowedUser}
+	a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
+	clientID := registerClient(t, ts, testRedirectURI)
+	require.NoError(t, store.Session(allowedUser, "", nil).StoreSession(context.Background(), []byte("legacy")))
+	now := a.now()
+	legacyRefresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
+		Subject: allowedUser.String(), ClientID: clientID,
+		IssuedAt: now.Unix(), LoginAt: now.Unix(),
+	})
+	require.NoError(t, err)
+
+	refreshed, _, status := refreshGrant(t, ts, clientID, legacyRefresh)
+	require.Equal(t, http.StatusOK, status)
+	rc, err := openBlob(a.sealer, refreshBlob, refreshed.RefreshToken, a.now())
+	require.NoError(t, err)
+	assert.True(t, validSessionID(rc.SessionID),
+		"a durable tombstone must complete the upgrade to a split-key session, not fall back to legacy")
+
+	// The legacy session is durably revoked, so replaying the old legacy token
+	// is rejected — no forced re-login of the upgraded holder, but the stale
+	// legacy grant is dead.
+	revoked, err := store.Revoked(context.Background(), allowedUser, "")
+	require.NoError(t, err)
+	assert.True(t, revoked, "legacy session must remain tombstoned after the completed upgrade")
+	_, oe, status := refreshGrant(t, ts, clientID, legacyRefresh)
+	require.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "invalid_grant", oe.Error)
+}
+
+// TestVerifierRejectsMalformedSessionID pins that an access token carrying a
+// malformed (non-hex / wrong-length) sid is rejected before it can reach the
+// storage layer as an object-name suffix — a server-minted sid is always valid,
+// so a bad one means a forged/corrupt token.
+func TestVerifierRejectsMalformedSessionID(t *testing.T) {
+	a, _ := newTestServer(t, testConfig(t), sessionstore.NewMemory(), neverStartLogin)
+	now := a.now()
+	token, err := sealBlob(a.sealer, accessBlob, accessClaims{
+		Subject: allowedUser.String(), Username: "durov", ClientID: "cid",
+		SessionID: "not-a-valid-session-id", SessionKey: []byte("k"),
+		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
+	})
+	require.NoError(t, err)
+	_, err = a.Verifier()(context.Background(), token, nil)
+	assert.ErrorIs(t, err, auth.ErrInvalidToken)
+}
+
+// blockingLegacyLoadStore parks the blocked user's legacy LoadSession on a
+// channel so a test can hold that account's per-account upgrade lock while
+// probing whether a DIFFERENT account's upgrade is serialized behind it.
+type blockingLegacyLoadStore struct {
+	*sessionstore.Memory
+	blockUser tgid.UserID
+	entered   chan struct{}
+	release   chan struct{}
+}
+
+func (s *blockingLegacyLoadStore) Session(userID tgid.UserID, sid string, key []byte) session.Storage {
+	inner := s.Memory.Session(userID, sid, key)
+	if userID == s.blockUser && sid == "" {
+		return blockingLoad{Storage: inner, entered: s.entered, release: s.release}
+	}
+	return inner
+}
+
+type blockingLoad struct {
+	session.Storage
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b blockingLoad) LoadSession(ctx context.Context) ([]byte, error) {
+	close(b.entered)
+	<-b.release
+	return b.Storage.LoadSession(ctx)
+}
+
+// TestCrossUserUpgradeNotSerialized pins that the upgrade lock is per-account,
+// not global: while one account is parked mid-upgrade (holding its own lock), a
+// different account's upgrade completes. A global lock would deadlock here,
+// which the timeout converts into a failure.
+func TestCrossUserUpgradeNotSerialized(t *testing.T) {
+	const otherUser tgid.UserID = 222222
+	store := &blockingLegacyLoadStore{
+		Memory:    sessionstore.NewMemory(),
+		blockUser: allowedUser,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	a, _ := newTestServer(t, testConfig(t), store, neverStartLogin)
+	ctx := context.Background()
+	require.NoError(t, store.Session(allowedUser, "", nil).StoreSession(ctx, []byte("legacy-a")))
+	require.NoError(t, store.Session(otherUser, "", nil).StoreSession(ctx, []byte("legacy-b")))
+
+	aDone := make(chan error, 1)
+	go func() {
+		_, _, err := a.upgradeLegacySession(ctx, allowedUser)
+		aDone <- err
+	}()
+	<-store.entered // allowedUser is parked inside LoadSession, holding its lock
+
+	bDone := make(chan error, 1)
+	go func() {
+		_, _, err := a.upgradeLegacySession(ctx, otherUser)
+		bDone <- err
+	}()
+	select {
+	case err := <-bDone:
+		require.NoError(t, err, "a different account's upgrade must complete while another is mid-upgrade")
+	case <-time.After(2 * time.Second):
+		t.Fatal("cross-user upgrade blocked on another account's lock — the upgrade lock is global, not per-account")
+	}
+
+	close(store.release) // let allowedUser finish
+	require.NoError(t, <-aDone)
 }
 
 // TestConcurrentLegacyUpgrade pins that concurrent refreshes of the same legacy

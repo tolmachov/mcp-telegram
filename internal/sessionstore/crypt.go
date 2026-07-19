@@ -236,6 +236,7 @@ func (s *encryptedStore) Session(userID tgid.UserID, sid string, userKey []byte)
 		inner:   s.inner.Session(userID, sid, nil),
 		cipher:  s.cipher,
 		userID:  userID,
+		sid:     sid,
 		userKey: userKey,
 	}
 }
@@ -300,6 +301,7 @@ type encryptedSession struct {
 	inner   session.Storage
 	cipher  *Cipher
 	userID  tgid.UserID
+	sid     string
 	userKey []byte
 }
 
@@ -323,6 +325,18 @@ func (s *encryptedSession) LoadSession(ctx context.Context) ([]byte, error) {
 }
 
 func (s *encryptedSession) StoreSession(ctx context.Context, data []byte) error {
+	// Legacy-pairing invariant, enforced at the write: a legacy session (empty
+	// sid) is master-only (empty userKey) and a suffixed session (non-empty sid)
+	// is split-key (non-empty userKey) — the two are always minted together, so a
+	// mismatch is an upstream programming error. Refuse to persist it rather than
+	// seal a v2 blob under the legacy object name (or a v1 blob under a suffixed
+	// name), which would silently strand the session as ErrCorruptSession on its
+	// next read. Reads are left to fail naturally as ErrCorruptSession, which also
+	// covers the legitimate "attacker probes a v2 blob master-only" path.
+	if (s.sid == "") != (len(s.userKey) == 0) {
+		return fmt.Errorf(
+			"sessionstore: refusing to store session with mismatched id/key pairing (both must be empty for legacy, both set otherwise)")
+	}
 	blob, err := s.cipher.seal(s.userID, s.userKey, data)
 	if err != nil {
 		return err

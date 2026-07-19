@@ -324,12 +324,16 @@ inside the client's OAuth access/refresh token (never stored server-side). As a
 result, an at-rest dump of the bucket **plus** the secret manager cannot, on its
 own, decrypt a session — a live token is also required. (Trade-offs, stated
 plainly: this does not protect against a compromise of the running server's
-memory, and a leaked *live* access token combined with bucket read access
-exposes that one session, since the token now also carries a decryption key
-share. TLS, `Cache-Control: no-store`, and never logging tokens mitigate the
-latter.) Pre-existing sessions from older versions stay readable with the master
-key alone and are transparently upgraded to a split-key session on their next
-token refresh.
+memory. And because the per-session key share travels inside the token, an
+attacker who holds the bucket **and** the master key **and** captures **one**
+access token can decrypt that single session — and thereby extract its
+persistent MTProto auth key, which outlives the ≤55-minute token and keeps
+working until the session is revoked or logged out. That exposure is confined to
+the one captured session; other sessions stay protected. TLS,
+`Cache-Control: no-store` on token/revoke responses, and never logging tokens
+narrow the capture window.) Pre-existing sessions from older versions stay
+readable with the master key alone and are transparently upgraded to a split-key
+session on their next token refresh.
 
 Session lifecycle is managed automatically: `POST /revoke` (RFC 7009) with an
 access or refresh token durably marks that authorization revoked (a tombstone

@@ -109,3 +109,23 @@ func TestSweepExpiredTombstones(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, fresh, "fresh tombstone must survive to keep rejecting live tokens")
 }
+
+// panicListStore panics from List, standing in for a store backend that faults
+// (or hits a bug) mid-sweep.
+type panicListStore struct {
+	*sessionstore.Memory
+}
+
+func (panicListStore) List(context.Context) ([]sessionstore.SessionRef, error) {
+	panic("simulated backend panic during List")
+}
+
+// TestSweepSurvivesPanickingBackend pins that a panic from the store during a
+// sweep is recovered, so one bad entry (or a backend bug) cannot unwind the
+// sweeper goroutine and crash the whole auth-server process.
+func TestSweepSurvivesPanickingBackend(t *testing.T) {
+	store := panicListStore{Memory: sessionstore.NewMemory()}
+	a, _ := newTestServer(t, testConfig(t), store, neverStartLogin)
+	assert.NotPanics(t, func() { a.runSweep(context.Background()) },
+		"a panicking backend must be recovered, not propagated out of the sweep")
+}

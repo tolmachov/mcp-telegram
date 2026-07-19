@@ -24,9 +24,12 @@ import (
 //     auth.LogOut on revoke is a possible follow-up.
 //
 // Possession of a decryptable token is sufficient authorization to revoke it
-// (§2.1 — all our clients are public); expiry does not block revocation. Every
-// response is 200 (§2.2 requires that even for invalid tokens, so there is no
-// validity oracle); the reason class is logged server-side, never the token.
+// (§2.1 — all our clients are public); expiry does not block revocation. A
+// recognized token whose tombstone cannot be written answers 503
+// temporarily_unavailable (§2.2.1) so the client retries instead of assuming
+// the grant is dead; every other outcome — including an unrecognized/invalid
+// token — is 200, so there is no validity oracle. The reason class is logged
+// server-side, never the token.
 func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	r.Body = http.MaxBytesReader(w, r.Body, maxFormBody)
@@ -75,10 +78,12 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	// token remains valid until it expires (<= accessTokenTTL); revocation stops
 	// renewal, matching the short-lived-access / revocable-refresh model.
 	if err := a.store.Revoke(r.Context(), userID, sid); err != nil {
-		// The client cannot retry meaningfully and must not learn store
-		// internals; log for the operator.
+		// The tombstone is the reliable part of revocation; if it cannot be
+		// written the grant is still live, so we must NOT answer 200 (which the
+		// client reads as "the token is dead"). Signal a retryable failure per
+		// §2.2.1 and log the class for the operator, never the token.
 		a.logger.Error("revocation could not be recorded", "user_id", userID, "session", sid, "err", err)
-		ok()
+		a.tokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "revocation could not be recorded, retry")
 		return
 	}
 	// Best-effort: drop the pooled assembly so the connection is freed promptly.

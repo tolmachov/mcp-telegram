@@ -180,9 +180,21 @@ func (a *AuthServer) janitor(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			a.sweepExpiredPending()
+			a.runPendingSweep()
 		}
 	}
+}
+
+// runPendingSweep executes one pending-login sweep, isolating it from a panic
+// (e.g. a misbehaving LoginFlow.Abort) so one bad flow cannot unwind the
+// goroutine and crash the auth-server process.
+func (a *AuthServer) runPendingSweep() {
+	defer func() {
+		if r := recover(); r != nil {
+			a.logger.Error("pending-login sweep panicked; recovered", "panic", r)
+		}
+	}()
+	a.sweepExpiredPending()
 }
 
 // handleLoginQR serves the current tg://login URL of a pending login as a

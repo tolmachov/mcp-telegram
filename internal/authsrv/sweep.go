@@ -29,11 +29,24 @@ func (a *AuthServer) sessionSweeper(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			a.sweepOrphanSessions(ctx)
-			a.sweepExpiredTombstones(ctx)
+			a.runSweep(ctx)
 			t.Reset(sweepInterval)
 		}
 	}
+}
+
+// runSweep executes one sweep iteration, isolating it from a panicking store
+// backend: a bad entry (or a backend bug surfacing as a panic during
+// List/Delete) is logged and the goroutine survives to the next tick instead of
+// unwinding and crashing the whole auth-server process.
+func (a *AuthServer) runSweep(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			a.logger.Error("session sweep panicked; recovered", "panic", r)
+		}
+	}()
+	a.sweepOrphanSessions(ctx)
+	a.sweepExpiredTombstones(ctx)
 }
 
 // sweepOrphanSessions deletes every stored session whose blob is older than

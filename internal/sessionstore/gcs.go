@@ -59,10 +59,15 @@ func (g *GCS) Session(userID tgid.UserID, sid string, _ []byte) session.Storage 
 
 func (g *GCS) Exists(ctx context.Context, userID tgid.UserID, sid string) (bool, error) {
 	name := objectName(userID, sid)
-	_, err := g.bucket.Object(name).Attrs(ctx)
+	attrs, err := g.bucket.Object(name).Attrs(ctx)
 	switch {
 	case err == nil:
-		return true, nil
+		// A 0-byte session object is treated as absent to match LoadSession,
+		// which maps an empty read to session.ErrNotFound. Without this a
+		// truncated blob would pass the refresh Exists gate yet fail the client
+		// build. (Tombstones are deliberately 0-byte and use their own Attrs
+		// probe in Revoked, so this only affects session blobs.)
+		return attrs.Size > 0, nil
 	case errors.Is(err, storage.ErrObjectNotExist):
 		return false, nil
 	default:
@@ -184,9 +189,16 @@ func (s gcsSession) LoadSession(ctx context.Context) ([]byte, error) {
 }
 
 func (s gcsSession) StoreSession(ctx context.Context, data []byte) error {
-	w := s.object.NewWriter(ctx)
+	// Give the writer its own cancelable context so a failed Write can ABORT the
+	// upload rather than commit it. storage.Writer.Close finalizes the object;
+	// calling it after a partial write could publish a truncated/0-byte blob.
+	// Canceling the context makes Close return without finalizing.
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	w := s.object.NewWriter(wctx)
 	if _, err := w.Write(data); err != nil {
-		_ = w.Close()
+		cancel()
+		_ = w.Close() // aborts the upload; error is expected and irrelevant here
 		return fmt.Errorf("sessionstore: writing %s: %w", s.object.ObjectName(), err)
 	}
 	if err := w.Close(); err != nil {
