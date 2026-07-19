@@ -328,6 +328,55 @@ func TestUserPoolDeadBusyAssemblyMapsTo401(t *testing.T) {
 	}
 }
 
+// TestUserPoolDeadBusyClosedOnRelease pins the fix for the dead-but-busy leak:
+// when a dead client still has an in-flight holder, a new request removes the
+// entry from the map and flags it, so the last release() tears it down promptly
+// instead of leaving it to the 15-minute idle janitor.
+func TestUserPoolDeadBusyClosedOnRelease(t *testing.T) {
+	var closes atomic.Int64
+	dead := &atomic.Bool{}
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+		return builtAssembly{
+			Handler: okHandler(),
+			Closer:  closerFunc(func() error { closes.Add(1); return nil }),
+			Health: func() error {
+				if dead.Load() {
+					return errors.New("client run loop exited")
+				}
+				return nil
+			},
+		}, nil
+	}, testWWWAuthenticate, discardLogger())
+
+	if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
+		t.Fatalf("first request status = %d, want 200", rec.Code)
+	}
+	// A hung request holds the entry; capture its ref before the client dies.
+	pool.mu.Lock()
+	e := pool.entries[poolKey{id: 1}]
+	e.inflight.Add(1)
+	pool.mu.Unlock()
+	dead.Store(true)
+
+	// A new request sees the dead-but-busy entry: 401, and it removes the entry
+	// from the map and flags it for teardown.
+	if rec := poolRequest(t, pool, 1); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 for a dead-but-busy assembly", rec.Code)
+	}
+	if pool.size() != 0 {
+		t.Errorf("dead-but-busy entry must be removed from the map; size = %d, want 0", pool.size())
+	}
+	if got := closes.Load(); got != 0 {
+		t.Errorf("entry closed %d times while still held; want 0 (deferred to release)", got)
+	}
+	// The hung request finally releases → the dead assembly is torn down now,
+	// not deferred to idle-evict.
+	pool.release(e)
+	if got := closes.Load(); got != 1 {
+		t.Errorf("dead-but-busy entry closed %d times after release; want 1", got)
+	}
+}
+
 func TestUserPoolEvictIdleClosesAssembly(t *testing.T) {
 	var closed atomic.Bool
 	now := time.Now()

@@ -117,9 +117,21 @@ func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 			return builtAssembly{}, fmt.Errorf("connecting Telegram client for user %s: %w", user.ID, err)
 		}
 
+		// Once the client is connected, any failure — including a PANIC in the
+		// wiring below (provider/watcher construction) that runBuild's recover
+		// turns into a build error — must close it, or the pool leaks a live
+		// MTProto connection (its Closer is never published). committed flips to
+		// true only on the successful return; until then these deferred guards
+		// tear down whatever has been started.
+		committed := false
+		defer func() {
+			if !committed {
+				_ = running.Close()
+			}
+		}()
+
 		asm, err := s.buildAssembly(running.Client())
 		if err != nil {
-			_ = running.Close()
 			return builtAssembly{}, err
 		}
 
@@ -137,6 +149,11 @@ func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 		// Per-user pinned-chat watcher, torn down with the assembly. The 5s
 		// abandon bound mirrors runHappy's shutdown path.
 		watchCtx, cancelWatch := context.WithCancel(ctx)
+		defer func() {
+			if !committed {
+				cancelWatch()
+			}
+		}()
 		pinnedProvider := resources.NewPinnedChatsProvider(running.API(), asm.msgProvider, s.logger, asm.pinnedServers...)
 		pinnedDone := pinnedProvider.WatchInBackground(watchCtx, s.pinnedRefresh)
 		closers = append(closers, closerFunc(func() error {
@@ -152,6 +169,7 @@ func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 		}))
 		closers = append(closers, closerFunc(running.Close))
 
+		committed = true
 		return builtAssembly{
 			Handler: handler,
 			Closer:  closers,

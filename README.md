@@ -317,7 +317,10 @@ is discarded.
 
 Each authorization is an **independent session**: it gets its own encrypted
 object in the bucket and its own MCP server assembly, so one account can be
-logged in from several clients at once without them contending. Sessions are
+logged in from several clients at once without them contending. The server keeps
+up to a few of an account's assemblies warm concurrently; an account actively
+switching between more sessions than that is not rejected but pays a brief
+Telegram reconnect when an idle one is rebuilt on demand. Sessions are
 **encrypted at rest** with AES-256-GCM under a **split key**: the key is derived
 from *both* `AUTH_TOKEN_KEY` *and* a random per-session key that lives only
 inside the client's OAuth access/refresh token (never stored server-side). As a

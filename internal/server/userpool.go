@@ -35,6 +35,14 @@ const (
 	// otherwise fill every global slot and LRU-evict other users' live
 	// assemblies. This confines that churn to the account causing it while
 	// staying well above normal multi-client use.
+	//
+	// Exceeding it is NOT a hard rejection: a request for an over-cap session
+	// evicts that same account's least-recently-used assembly and rebuilds the
+	// requested one (a fresh TCP + MTProto handshake). An account round-robining
+	// across more than this many sessions therefore pays a reconnect per switch.
+	// 4 is chosen to sit above realistic device counts so that cost is not hit in
+	// normal use; raise it if a deployment genuinely runs more clients per
+	// account concurrently.
 	userPoolMaxPerUser = 4
 	// userPoolJanitorInterval is how often idle entries are collected.
 	userPoolJanitorInterval = time.Minute
@@ -237,6 +245,14 @@ func (p *userPool) entryFor(ctx context.Context, user *authsrv.UserIdentity) (*u
 		// client re-authenticates and retries.
 		if dead := e.deadReason(); dead != nil {
 			if !e.evictable() {
+				// Dead but still held by in-flight requests. Remove it so no new
+				// request attaches, and flag it so the LAST in-flight release()
+				// tears the dead assembly down promptly — otherwise it lingers
+				// until a future request for this key or the idle janitor. This
+				// request holds no inflight ref of its own (the increment lives in
+				// the else branch), so the flag targets the actual holders.
+				delete(p.entries, key)
+				e.closeRequested.Store(true)
 				p.mu.Unlock()
 				p.logger.Warn("pooled Telegram client is down but still in use; forcing re-login", "user", key.id, "session", key.sid, "reason", dead)
 				return nil, fmt.Errorf("pooled Telegram client is down: %w", tgclient.ErrSessionUnauthorized)
@@ -509,11 +525,17 @@ func (p *userPool) Close() error {
 
 	var errs []error
 	for _, e := range entries {
+		// Flag every entry, including ones still building. A build that completes
+		// after this snapshot publishes a live client that Close would otherwise
+		// leak (its creating request is blocked in the synchronous runBuild; on
+		// return its release() sees the flag and closes via closeOnce). Done
+		// entries are force-closed below regardless.
+		e.closeRequested.Store(true)
 		if !e.done() {
 			continue
 		}
-		// Route through closeOnce so an entry a concurrent EvictSession already
-		// closed is never Close()d twice.
+		// Route through closeOnce so an entry a concurrent EvictSession or a
+		// post-build release() already closed is never Close()d twice.
 		e.closeOnce.Do(func() {
 			if e.closer != nil {
 				if err := e.closer.Close(); err != nil {

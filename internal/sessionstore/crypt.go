@@ -35,6 +35,12 @@ const sessionBlobV2 = 0x02
 
 const masterKeyLen = 32
 
+// userKeyLen is the required length of a v2 per-session key (matches the key
+// authsrv mints). Enforced in aeadFor so a short/low-entropy key can never seal
+// or open a v2 blob — the split-key protection must not silently degrade if an
+// upstream bug ever passes a malformed key.
+const userKeyLen = 32
+
 // ErrCorruptSession is returned by LoadSession when a stored blob exists but
 // cannot be decrypted (a rotated-away key, an issuer/AAD mismatch, a
 // truncated object, or tampering). It is deliberately distinct from
@@ -141,6 +147,9 @@ func (c *Cipher) aeadFor(k *cryptKey, userKey []byte) (cipher.AEAD, error) {
 	if len(userKey) == 0 {
 		return k.v1AEAD, nil
 	}
+	if len(userKey) != userKeyLen {
+		return nil, fmt.Errorf("sessionstore: v2 session key must be %d bytes, got %d", userKeyLen, len(userKey))
+	}
 	aeadKey, err := hkdf.Key(sha256.New, k.master, userKey, hkdfInfoSessionV2, 32)
 	if err != nil {
 		return nil, fmt.Errorf("deriving v2 AEAD key: %w", err)
@@ -231,7 +240,25 @@ type encryptedStore struct {
 	cipher *Cipher
 }
 
+// validStoreSID guards the store boundary: a non-empty sid becomes an
+// object-name / file-path suffix, so a malformed one (callers should already
+// have rejected it) must never reach a backend. Empty sid is the legacy
+// per-user object. This is defense-in-depth — every production caller validates
+// upstream — against a future path that forwards a token sid unchecked.
+func validStoreSID(sid string) bool { return sid == "" || ValidSID(sid) }
+
+// brokenSession is returned by Session for an invalid sid; every operation
+// fails with the same error so the mismatch surfaces immediately instead of
+// building a path from unvalidated input.
+type brokenSession struct{ err error }
+
+func (b brokenSession) LoadSession(context.Context) ([]byte, error) { return nil, b.err }
+func (b brokenSession) StoreSession(context.Context, []byte) error  { return b.err }
+
 func (s *encryptedStore) Session(userID tgid.UserID, sid string, userKey []byte) session.Storage {
+	if !validStoreSID(sid) {
+		return brokenSession{err: fmt.Errorf("sessionstore: invalid session id")}
+	}
 	return &encryptedSession{
 		inner:   s.inner.Session(userID, sid, nil),
 		cipher:  s.cipher,
@@ -242,6 +269,9 @@ func (s *encryptedStore) Session(userID tgid.UserID, sid string, userKey []byte)
 }
 
 func (s *encryptedStore) Exists(ctx context.Context, userID tgid.UserID, sid string) (bool, error) {
+	if !validStoreSID(sid) {
+		return false, fmt.Errorf("sessionstore: invalid session id")
+	}
 	ok, err := s.inner.Exists(ctx, userID, sid)
 	if err != nil {
 		return false, fmt.Errorf("encrypted store: %w", err)
@@ -250,6 +280,9 @@ func (s *encryptedStore) Exists(ctx context.Context, userID tgid.UserID, sid str
 }
 
 func (s *encryptedStore) Delete(ctx context.Context, userID tgid.UserID, sid string) error {
+	if !validStoreSID(sid) {
+		return fmt.Errorf("sessionstore: invalid session id")
+	}
 	if err := s.inner.Delete(ctx, userID, sid); err != nil {
 		return fmt.Errorf("encrypted store: %w", err)
 	}
@@ -268,6 +301,9 @@ func (s *encryptedStore) List(ctx context.Context) ([]SessionRef, error) {
 // Encrypted wrapper delegates the tombstone methods straight through.
 
 func (s *encryptedStore) Revoke(ctx context.Context, userID tgid.UserID, sid string) error {
+	if !validStoreSID(sid) {
+		return fmt.Errorf("sessionstore: invalid session id")
+	}
 	if err := s.inner.Revoke(ctx, userID, sid); err != nil {
 		return fmt.Errorf("encrypted store: %w", err)
 	}
@@ -275,6 +311,9 @@ func (s *encryptedStore) Revoke(ctx context.Context, userID tgid.UserID, sid str
 }
 
 func (s *encryptedStore) Revoked(ctx context.Context, userID tgid.UserID, sid string) (bool, error) {
+	if !validStoreSID(sid) {
+		return false, fmt.Errorf("sessionstore: invalid session id")
+	}
 	ok, err := s.inner.Revoked(ctx, userID, sid)
 	if err != nil {
 		return false, fmt.Errorf("encrypted store: %w", err)
@@ -291,6 +330,9 @@ func (s *encryptedStore) ListRevoked(ctx context.Context) ([]SessionRef, error) 
 }
 
 func (s *encryptedStore) DeleteRevoked(ctx context.Context, userID tgid.UserID, sid string) error {
+	if !validStoreSID(sid) {
+		return fmt.Errorf("sessionstore: invalid session id")
+	}
 	if err := s.inner.DeleteRevoked(ctx, userID, sid); err != nil {
 		return fmt.Errorf("encrypted store: %w", err)
 	}

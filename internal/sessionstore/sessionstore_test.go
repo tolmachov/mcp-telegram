@@ -295,6 +295,71 @@ func TestStoreRejectsMismatchedPairing(t *testing.T) {
 	}
 }
 
+// TestCipherRejectsWrongLengthUserKey pins that a non-empty v2 key must be
+// exactly userKeyLen bytes: a short/oversized key fails closed on both seal and
+// open rather than silently sealing a weak split-key blob.
+func TestCipherRejectsWrongLengthUserKey(t *testing.T) {
+	c, err := NewCipher([]string{newKey(t)}, testIssuer)
+	if err != nil {
+		t.Fatalf("NewCipher: %v", err)
+	}
+	const user = tgid.UserID(91)
+	for _, bad := range [][]byte{make([]byte, 1), make([]byte, 16), make([]byte, 31), make([]byte, 33)} {
+		if _, err := c.seal(user, bad, []byte("x")); err == nil {
+			t.Errorf("seal with a %d-byte user key must be refused", len(bad))
+		}
+	}
+	// A blob sealed with a correct key must not open under a wrong-length key.
+	good := userKeyForTest(t)
+	blob, err := c.seal(user, good, []byte("mtproto"))
+	if err != nil {
+		t.Fatalf("seal with a valid key: %v", err)
+	}
+	if _, err := c.open(user, make([]byte, 16), blob); err == nil {
+		t.Error("open with a wrong-length user key must be refused")
+	}
+}
+
+// TestEncryptedStoreRejectsInvalidSID pins the store-boundary guard: a non-empty
+// sid that is not a valid session id is refused by every method that turns it
+// into an object name, so a malformed value can never build a storage path.
+func TestEncryptedStoreRejectsInvalidSID(t *testing.T) {
+	ctx := t.Context()
+	cipher, err := NewCipher([]string{newKey(t)}, testIssuer)
+	if err != nil {
+		t.Fatalf("NewCipher: %v", err)
+	}
+	store := Encrypted(NewMemory(), cipher)
+	const user = tgid.UserID(92)
+	const bad = "../escape" // non-empty, not ValidSID
+
+	if _, err := store.Session(user, bad, userKeyForTest(t)).LoadSession(ctx); err == nil {
+		t.Error("Session(invalid sid).LoadSession must fail")
+	}
+	if err := store.Session(user, bad, userKeyForTest(t)).StoreSession(ctx, []byte("x")); err == nil {
+		t.Error("Session(invalid sid).StoreSession must fail")
+	}
+	if _, err := store.Exists(ctx, user, bad); err == nil {
+		t.Error("Exists(invalid sid) must fail")
+	}
+	if err := store.Delete(ctx, user, bad); err == nil {
+		t.Error("Delete(invalid sid) must fail")
+	}
+	if err := store.Revoke(ctx, user, bad); err == nil {
+		t.Error("Revoke(invalid sid) must fail")
+	}
+	if _, err := store.Revoked(ctx, user, bad); err == nil {
+		t.Error("Revoked(invalid sid) must fail")
+	}
+	// The legacy empty sid and a well-formed sid remain accepted.
+	if _, err := store.Exists(ctx, user, ""); err != nil {
+		t.Errorf("Exists(legacy empty sid) must be accepted: %v", err)
+	}
+	if _, err := store.Exists(ctx, user, "0123456789abcdef0123456789abcdef"); err != nil {
+		t.Errorf("Exists(valid sid) must be accepted: %v", err)
+	}
+}
+
 // TestRevokeTombstone exercises the tombstone lifecycle on every real backend:
 // Revoke marks + deletes the blob, Revoked reflects it, tombstones are listed
 // by ListRevoked but NOT by List (not mistaken for sessions), and DeleteRevoked

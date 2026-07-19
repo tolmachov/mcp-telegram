@@ -277,6 +277,13 @@ func (a *AuthServer) migrateLegacyLocked(ctx context.Context, userID tgid.UserID
 		// session and force an unnecessary re-login — exactly what the caller's
 		// "transient, keep legacy" fallback tries to avoid. So probe the tombstone
 		// and, if it is durable, complete the upgrade instead of rolling back.
+		//
+		// This complete-vs-rollback decision assumes the store is read-your-writes
+		// consistent on tombstones: Revoked() must observe a tombstone Revoke()
+		// just wrote. GCS object metadata (Attrs) is strongly consistent, so this
+		// holds. On an eventually-consistent tombstone backend a false-negative
+		// Revoked() here would roll back a genuinely-revoked upgrade (safe, but a
+		// spurious re-login) — such a backend must not be used for tombstones.
 		if revoked, rErr := a.store.Revoked(ctx, userID, ""); rErr == nil && revoked {
 			a.logger.Warn("legacy blob delete failed but tombstone is durable; completing upgrade",
 				"user_id", userID, "session", sid, "err", err)
