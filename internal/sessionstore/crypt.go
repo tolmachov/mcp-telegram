@@ -251,6 +251,10 @@ type encryptedStore struct {
 // upstream — against a future path that forwards a token sid unchecked.
 func validStoreSID(sid string) bool { return sid == "" || ValidSID(sid) }
 
+// errInvalidStoreSID is returned by every encryptedStore method when a caller
+// presents a malformed non-empty sid (see validStoreSID).
+var errInvalidStoreSID = errors.New("sessionstore: invalid session id")
+
 // brokenSession is returned by Session for an invalid sid; every operation
 // fails with the same error so the mismatch surfaces immediately instead of
 // building a path from unvalidated input.
@@ -261,7 +265,7 @@ func (b brokenSession) StoreSession(context.Context, []byte) error  { return b.e
 
 func (s *encryptedStore) Session(userID tgid.UserID, sid string, userKey []byte) session.Storage {
 	if !validStoreSID(sid) {
-		return brokenSession{err: fmt.Errorf("sessionstore: invalid session id")}
+		return brokenSession{err: errInvalidStoreSID}
 	}
 	return &encryptedSession{
 		inner:   s.inner.Session(userID, sid, nil),
@@ -274,7 +278,7 @@ func (s *encryptedStore) Session(userID tgid.UserID, sid string, userKey []byte)
 
 func (s *encryptedStore) Exists(ctx context.Context, userID tgid.UserID, sid string) (bool, error) {
 	if !validStoreSID(sid) {
-		return false, fmt.Errorf("sessionstore: invalid session id")
+		return false, errInvalidStoreSID
 	}
 	ok, err := s.inner.Exists(ctx, userID, sid)
 	if err != nil {
@@ -285,7 +289,7 @@ func (s *encryptedStore) Exists(ctx context.Context, userID tgid.UserID, sid str
 
 func (s *encryptedStore) Delete(ctx context.Context, userID tgid.UserID, sid string) error {
 	if !validStoreSID(sid) {
-		return fmt.Errorf("sessionstore: invalid session id")
+		return errInvalidStoreSID
 	}
 	if err := s.inner.Delete(ctx, userID, sid); err != nil {
 		return fmt.Errorf("encrypted store: %w", err)
@@ -306,7 +310,7 @@ func (s *encryptedStore) List(ctx context.Context) ([]SessionRef, error) {
 
 func (s *encryptedStore) Revoke(ctx context.Context, userID tgid.UserID, sid string) error {
 	if !validStoreSID(sid) {
-		return fmt.Errorf("sessionstore: invalid session id")
+		return errInvalidStoreSID
 	}
 	if err := s.inner.Revoke(ctx, userID, sid); err != nil {
 		return fmt.Errorf("encrypted store: %w", err)
@@ -316,7 +320,7 @@ func (s *encryptedStore) Revoke(ctx context.Context, userID tgid.UserID, sid str
 
 func (s *encryptedStore) Revoked(ctx context.Context, userID tgid.UserID, sid string) (bool, error) {
 	if !validStoreSID(sid) {
-		return false, fmt.Errorf("sessionstore: invalid session id")
+		return false, errInvalidStoreSID
 	}
 	ok, err := s.inner.Revoked(ctx, userID, sid)
 	if err != nil {
@@ -335,7 +339,7 @@ func (s *encryptedStore) ListRevoked(ctx context.Context) ([]SessionRef, error) 
 
 func (s *encryptedStore) DeleteRevoked(ctx context.Context, userID tgid.UserID, sid string) error {
 	if !validStoreSID(sid) {
-		return fmt.Errorf("sessionstore: invalid session id")
+		return errInvalidStoreSID
 	}
 	if err := s.inner.DeleteRevoked(ctx, userID, sid); err != nil {
 		return fmt.Errorf("encrypted store: %w", err)

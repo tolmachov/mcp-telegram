@@ -51,7 +51,7 @@ const (
 // errPoolFull is returned when the pool is at capacity with no idle entry.
 var errPoolFull = errors.New("user pool is full")
 
-// builtAssembly is the result of one per-user build. Handler serves MCP;
+// builtAssembly is the result of one per-authorization build. Handler serves MCP;
 // Closer tears the assembly down on eviction (disconnecting the client);
 // Health is a liveness probe returning nil while the assembly can serve and
 // the fatal error once its Telegram client's Run loop has exited (session
@@ -65,7 +65,7 @@ type builtAssembly struct {
 	Health  func() error
 }
 
-// userHandlerBuilder builds the complete per-user HTTP assembly: MCP
+// userHandlerBuilder builds the complete per-authorization HTTP assembly: MCP
 // server(s) whose tools run on the user's own Telegram session.
 type userHandlerBuilder func(ctx context.Context, user *authsrv.UserIdentity) (builtAssembly, error)
 
@@ -347,7 +347,7 @@ func (p *userPool) entryFor(ctx context.Context, user *authsrv.UserIdentity) (*u
 	if err := p.runBuild(e, user); err != nil {
 		return e, err
 	}
-	p.logger.Info("built per-user MCP assembly", "user", user.ID, "pool_size", p.size())
+	p.logger.Info("built MCP assembly", "user", user.ID, "session", key.sid, "pool_size", p.size())
 	return e, nil
 }
 

@@ -1,5 +1,5 @@
-// Package sessionstore persists per-user Telegram (MTProto) sessions for the
-// multi-user HTTP mode. Each authorization gets its own opaque session blob,
+// Package sessionstore persists per-authorization Telegram (MTProto) sessions
+// for the multi-user HTTP mode. Each authorization gets its own opaque session blob,
 // keyed by the numeric Telegram user ID plus a random per-authorization
 // session id (sid), so one account may hold several independent sessions at
 // once (one per logged-in client) instead of fighting over a single object.

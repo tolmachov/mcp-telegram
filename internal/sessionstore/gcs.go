@@ -47,6 +47,13 @@ func NewGCS(ctx context.Context, bucketName string) (*GCS, error) {
 	return &GCS{bucket: bucket}, nil
 }
 
+const (
+	sessionPrefix = "sessions/"
+	// revokedPrefix namespaces revocation tombstones. The gotd client only ever
+	// writes under sessionPrefix, so a tombstone here survives any blob re-store.
+	revokedPrefix = "revoked/"
+)
+
 // objectName maps a session to its bucket object. An empty sid keeps the
 // legacy per-user layout so pre-upgrade sessions remain readable.
 func objectName(userID tgid.UserID, sid string) string {
@@ -83,13 +90,6 @@ func (g *GCS) Delete(ctx context.Context, userID tgid.UserID, sid string) error 
 	}
 	return nil
 }
-
-const (
-	sessionPrefix = "sessions/"
-	// revokedPrefix namespaces revocation tombstones. The gotd client only ever
-	// writes under sessionPrefix, so a tombstone here survives any blob re-store.
-	revokedPrefix = "revoked/"
-)
 
 func (g *GCS) List(ctx context.Context) ([]SessionRef, error) {
 	return g.listPrefix(ctx, sessionPrefix)

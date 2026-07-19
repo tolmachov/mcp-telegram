@@ -90,8 +90,8 @@ func (a *AuthServer) lockUpgrade(userID tgid.UserID) func() {
 }
 
 // New validates cfg and builds the authorization server. store persists the
-// per-user Telegram sessions produced by successful QR logins (and gates the
-// refresh grant); startLogin launches one QR login flow per /authorize.
+// per-authorization Telegram sessions produced by successful QR logins (and
+// gates the refresh grant); startLogin launches one QR login flow per /authorize.
 // Callers must Close the returned server to stop the pending-login janitor
 // and abort in-flight logins.
 func New(cfg *Config, logger *slog.Logger, store sessionstore.Store, startLogin StartLoginFunc) (*AuthServer, error) {
