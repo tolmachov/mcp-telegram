@@ -377,6 +377,51 @@ func TestUserPoolDeadBusyClosedOnRelease(t *testing.T) {
 	}
 }
 
+// TestUserPoolDeadBusyCloseNoLeakOnRaceOrder deterministically pins the fix for
+// the dead-but-busy zero-close. The leak window is a single interleaving: the
+// last holder's release() decrements inflight to 0 and reads the close flag as
+// unset in the instant AFTER entryFor decides the entry is busy but BEFORE
+// entryFor stores the flag. A probabilistic stress test can't reliably hit that
+// window (the two ops sat a map-delete apart), so we use entryFor's test hook to
+// interpose release() at exactly that point. Pre-fix, neither side closes and the
+// map-detached entry leaks; post-fix, entryFor re-reads inflight after the store
+// and closes it.
+func TestUserPoolDeadBusyCloseNoLeakOnRaceOrder(t *testing.T) {
+	var closes atomic.Int64
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+		return builtAssembly{}, errors.New("no rebuild in this test")
+	}, testWWWAuthenticate, discardLogger())
+
+	key := poolKey{id: 1}
+	errDead := errors.New("client run loop exited")
+	e := &userEntry{key: key, ready: make(chan struct{})}
+	e.finish(builtAssembly{
+		Handler: okHandler(),
+		Closer:  closerFunc(func() error { closes.Add(1); return nil }),
+		Health:  func() error { return errDead },
+	})
+	e.inflight.Store(1) // the hung in-flight holder
+	pool.mu.Lock()
+	pool.entries[key] = e
+	pool.mu.Unlock()
+
+	// The holder releases at the worst possible moment: after entryFor has
+	// committed to the dead-but-busy branch, before it stores the close flag.
+	// release() sees the flag unset and does not close, so the close must come
+	// from entryFor's post-store recheck.
+	pool.testHookDeadBusyBeforeStore = func() { pool.release(e) }
+
+	if _, err := pool.entryFor(t.Context(), &authsrv.UserIdentity{ID: 1}); !errors.Is(err, tgclient.ErrSessionUnauthorized) {
+		t.Fatalf("entryFor on a dead-but-busy entry: err = %v, want ErrSessionUnauthorized", err)
+	}
+	if got := closes.Load(); got != 1 {
+		t.Fatalf("dead entry closed %d times, want exactly 1 (0 = the leak this test pins, >1 = double close)", got)
+	}
+	if pool.size() != 0 {
+		t.Errorf("entry must be removed from the map; size = %d, want 0", pool.size())
+	}
+}
+
 func TestUserPoolEvictIdleClosesAssembly(t *testing.T) {
 	var closed atomic.Bool
 	now := time.Now()

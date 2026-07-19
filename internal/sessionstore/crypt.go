@@ -180,7 +180,11 @@ func (c *Cipher) seal(userID tgid.UserID, userKey, plaintext []byte) ([]byte, er
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("generating nonce: %w", err)
 	}
-	buf := make([]byte, 0, 2+len(nonce)+len(plaintext)+aead.Overhead())
+	header := 1 // keyID
+	if v2 {
+		header = 2 // version byte + keyID
+	}
+	buf := make([]byte, 0, header+len(nonce)+len(plaintext)+aead.Overhead())
 	if v2 {
 		buf = append(buf, sessionBlobV2)
 	}

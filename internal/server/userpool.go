@@ -170,6 +170,12 @@ type userPool struct {
 	// clients discover the OAuth metadata and re-run the login flow, matching
 	// the header RequireBearerToken sends on token failures.
 	wwwAuthenticate string
+	// testHookDeadBusyBeforeStore, when non-nil, is invoked in the dead-but-busy
+	// eviction branch of entryFor immediately before closeRequested is stored.
+	// It exists solely to let a test deterministically interpose the holder's
+	// release() at the one instant that would expose a zero-close if the
+	// post-store inflight recheck were ever removed. Always nil in production.
+	testHookDeadBusyBeforeStore func()
 }
 
 func newUserPool(baseCtx context.Context, build userHandlerBuilder, wwwAuthenticate string, logger *slog.Logger) *userPool {
@@ -252,8 +258,21 @@ func (p *userPool) entryFor(ctx context.Context, user *authsrv.UserIdentity) (*u
 				// request holds no inflight ref of its own (the increment lives in
 				// the else branch), so the flag targets the actual holders.
 				delete(p.entries, key)
-				e.closeRequested.Store(true)
 				p.mu.Unlock()
+				// Store the flag, THEN re-read inflight — the same order as
+				// EvictSession and release, so with seq-cst atomics exactly one of
+				// this branch and the last release() runs closeEntry (closeOnce
+				// guards a tie). Without this recheck a release() that decremented to
+				// 0 before our Store would observe the old flag and skip the close,
+				// permanently leaking the now map-detached dead entry (its Closer,
+				// hence the pinned-chat watcher goroutine, would never run).
+				if p.testHookDeadBusyBeforeStore != nil {
+					p.testHookDeadBusyBeforeStore()
+				}
+				e.closeRequested.Store(true)
+				if e.done() && e.inflight.Load() == 0 {
+					p.closeEntry(key, e)
+				}
 				p.logger.Warn("pooled Telegram client is down but still in use; forcing re-login", "user", key.id, "session", key.sid, "reason", dead)
 				return nil, fmt.Errorf("pooled Telegram client is down: %w", tgclient.ErrSessionUnauthorized)
 			}

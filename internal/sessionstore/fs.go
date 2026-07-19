@@ -58,10 +58,14 @@ func (f *FS) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {
 
 func (f *FS) Exists(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
 	p := f.path(userID, sid)
-	_, err := os.Stat(p)
+	info, err := os.Stat(p)
 	switch {
 	case err == nil:
-		return true, nil
+		// A 0-byte session file is treated as absent to match LoadSession (which
+		// maps an empty read to session.ErrNotFound) and the GCS backend (which
+		// probes attrs.Size > 0). Both backends must agree so the refresh Exists
+		// gate never passes a session the client build would then reject.
+		return info.Size() > 0, nil
 	case errors.Is(err, os.ErrNotExist):
 		return false, nil
 	default:

@@ -157,6 +157,28 @@ func TestFSStore(t *testing.T) {
 	}
 }
 
+// TestFSExistsZeroByteAbsent pins FS/GCS parity: a 0-byte session file reads as
+// absent, matching LoadSession (empty -> session.ErrNotFound) and GCS.Exists
+// (attrs.Size > 0). Without it the refresh Exists gate could pass a session the
+// client build would then reject.
+func TestFSExistsZeroByteAbsent(t *testing.T) {
+	ctx := t.Context()
+	fs, err := NewFS(filepath.Join(t.TempDir(), "sessions"))
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	const user = tgid.UserID(100)
+	if err := os.WriteFile(fs.path(user, ""), nil, 0o600); err != nil {
+		t.Fatalf("seeding 0-byte session file: %v", err)
+	}
+	if ok, err := fs.Exists(ctx, user, ""); err != nil || ok {
+		t.Errorf("Exists on a 0-byte session file = (%v, %v), want (false, nil)", ok, err)
+	}
+	if _, err := fs.Session(user, "", nil).LoadSession(ctx); !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("LoadSession on a 0-byte file: err = %v, want session.ErrNotFound", err)
+	}
+}
+
 func TestEncryptedStore(t *testing.T) {
 	ctx := t.Context()
 	cipher, err := NewCipher([]string{newKey(t)}, testIssuer)
