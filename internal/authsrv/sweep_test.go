@@ -110,6 +110,42 @@ func TestSweepExpiredTombstones(t *testing.T) {
 	assert.True(t, fresh, "fresh tombstone must survive to keep rejecting live tokens")
 }
 
+// TestSweepTombstoneRespectsConfiguredTTL pins the tombstone cutoff on BOTH
+// sides of refreshTokenTTL + sweepMargin. The two-sided boundary matters more
+// here than for session blobs: a tombstone reclaimed early (say after an hour)
+// would re-open the exact resurrection hole tombstones exist to close — a warm
+// client re-stores the blob, the tombstone is gone, and a revoked refresh token
+// works again. TestSweepExpiredTombstones alone cannot catch that mutation (its
+// fresh tombstone is only a minute old at sweep time).
+func TestSweepTombstoneRespectsConfiguredTTL(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store := sessionstore.NewMemory()
+	store.Now = func() time.Time { return base }
+	const sid = "0123456789abcdef0123456789abcdef"
+	require.NoError(t, store.Revoke(ctx, allowedUser, sid))
+
+	cfg := testConfig(t)
+	cfg.RefreshTokenTTL = 24 * time.Hour
+	a, _ := newTestServer(t, cfg, store, neverStartLogin)
+
+	// Just inside the cutoff: the tombstone must survive — a refresh token from
+	// the revoked grant could still be presented until LoginAt+TTL, and the
+	// margin absorbs clock skew on top.
+	a.now = func() time.Time { return base.Add(cfg.RefreshTokenTTL + sweepMargin - time.Minute) }
+	a.sweepExpiredTombstones(ctx)
+	revoked, err := store.Revoked(ctx, allowedUser, sid)
+	require.NoError(t, err)
+	assert.True(t, revoked, "tombstone inside the cutoff must survive to keep rejecting live tokens")
+
+	// Just past it: reclaimed.
+	a.now = func() time.Time { return base.Add(cfg.RefreshTokenTTL + sweepMargin + time.Minute) }
+	a.sweepExpiredTombstones(ctx)
+	revoked, err = store.Revoked(ctx, allowedUser, sid)
+	require.NoError(t, err)
+	assert.False(t, revoked, "tombstone past the cutoff must be reclaimed")
+}
+
 // panicListStore panics from List, standing in for a store backend that faults
 // (or hits a bug) mid-sweep.
 type panicListStore struct {

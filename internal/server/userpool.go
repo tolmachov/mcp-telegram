@@ -46,6 +46,8 @@ const (
 	userPoolMaxPerUser = 4
 	// userPoolJanitorInterval is how often idle entries are collected.
 	userPoolJanitorInterval = time.Minute
+	// userPoolEvictGrace is the default evictGrace (see the userPool field).
+	userPoolEvictGrace = time.Minute
 )
 
 // errPoolFull is returned when the pool is at capacity with no idle entry.
@@ -170,6 +172,15 @@ type userPool struct {
 	// clients discover the OAuth metadata and re-run the login flow, matching
 	// the header RequireBearerToken sends on token failures.
 	wwwAuthenticate string
+	// evictGrace bounds how long a busy live assembly survives EvictSession
+	// before it is force-closed. The deferred close normally waits for the last
+	// in-flight release(), but a long-lived MCP stream can hold an evicted
+	// assembly for hours — and after a legacy upgrade the old and new session
+	// objects share one MTProto auth key, so an unbounded overlap of two live
+	// clients risks Telegram killing the key (AUTH_KEY_DUPLICATED), taking the
+	// freshly upgraded session with it. Cutting a revoked/migrated grant's
+	// streams after a short grace is the intended behavior, not collateral.
+	evictGrace time.Duration
 	// testHookDeadBusyBeforeStore, when non-nil, is invoked in the dead-but-busy
 	// eviction branch of entryFor immediately before closeRequested is stored.
 	// It exists solely to let a test deterministically interpose the holder's
@@ -187,6 +198,7 @@ func newUserPool(baseCtx context.Context, build userHandlerBuilder, wwwAuthentic
 		now:             time.Now,
 		logger:          logger,
 		wwwAuthenticate: wwwAuthenticate,
+		evictGrace:      userPoolEvictGrace,
 	}
 }
 
@@ -446,11 +458,15 @@ func (p *userPool) countForUserLocked(id tgid.UserID) int {
 // EvictSession drops the pooled assembly for one (userID, sid) session so its
 // connection is freed after a revoke or legacy upgrade. It is best-effort
 // cleanup, NOT the correctness mechanism: revocation is guaranteed by the
-// durable tombstone (the refresh gate checks Revoked), so a live client that
-// keeps running until its in-flight stream ends is harmless. It removes the
-// entry from the map (no new request can attach) and closes it now if built and
-// idle, else defers the close to the last in-flight request's release — an
-// assembly is never Close()d out from under an active request.
+// durable tombstone (the refresh gate checks Revoked). It removes the entry
+// from the map (no new request can attach) and closes it now if built and
+// idle, else defers the close to the last in-flight request's release — but
+// only up to evictGrace: a built assembly still held past the grace (a
+// long-lived MCP stream on a revoked or just-migrated grant) is force-closed
+// by a timer, cutting the stream. That bound is deliberate: after a legacy
+// upgrade the old and new session objects share one MTProto auth key, and an
+// unbounded overlap of two live clients risks AUTH_KEY_DUPLICATED killing the
+// upgraded session too; for a revoke, promptly ending service is the point.
 func (p *userPool) EvictSession(userID tgid.UserID, sid string) {
 	key := poolKey{id: userID, sid: sid}
 	p.mu.Lock()
@@ -472,6 +488,15 @@ func (p *userPool) EvictSession(userID tgid.UserID, sid string) {
 	e.closeRequested.Store(true)
 	if e.done() && e.inflight.Load() == 0 {
 		p.closeEntry(key, e)
+	} else if e.done() {
+		// Built but still held: bound the deferred close with a grace timer.
+		// closeEntry is idempotent (closeOnce), so racing the last release() is
+		// safe. The timer is armed ONLY for done entries: closeEntry consumes
+		// closeOnce even when closer is nil, so firing it on a still-building
+		// entry would burn the once and the real closer would never run. A
+		// building entry needs no timer anyway — its creator holds an inflight
+		// ref for the whole synchronous build and its release() sees the flag.
+		time.AfterFunc(p.evictGrace, func() { p.closeEntry(key, e) })
 	}
 }
 

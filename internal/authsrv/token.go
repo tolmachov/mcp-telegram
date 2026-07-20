@@ -214,9 +214,13 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 //     gate's Revoked(userID, "") check rejects it, so a replayed or un-rotated
 //     legacy token cannot mint tokens or spawn another copy — even if a live
 //     legacy client re-stores (resurrects) the legacy blob.
-//   - Two live gotd clients briefly running on the same auth key (the new copy
-//     plus a still-warm legacy assembly) is a migration-only, one-time overlap;
-//     the pooled legacy assembly is dropped best-effort and idle-evicts.
+//   - Two live gotd clients running on the same auth key (the new copy plus a
+//     still-warm legacy assembly) is a migration-only, one-time overlap. The
+//     pooled legacy assembly is dropped via invalidateSession; if in-flight
+//     streams keep it busy, the pool force-closes it after its eviction grace,
+//     so the overlap is bounded — an unbounded overlap would risk Telegram
+//     killing the shared auth key (AUTH_KEY_DUPLICATED), taking the freshly
+//     upgraded session with it.
 //
 // Trade-off: the FIRST legacy client to refresh wins the upgrade; any other
 // legacy client of the same account then fails its next refresh (Revoked) and

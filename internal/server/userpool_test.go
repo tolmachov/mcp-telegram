@@ -422,6 +422,155 @@ func TestUserPoolDeadBusyCloseNoLeakOnRaceOrder(t *testing.T) {
 	}
 }
 
+// TestUserPoolBuilderPanic pins runBuild's recover path: a panicking builder
+// must surface as a 503 to the requester, unblock a concurrent waiter with the
+// same error, leave the pool empty (no cached poisoned entry), and let the next
+// request trigger a fresh build.
+func TestUserPoolBuilderPanic(t *testing.T) {
+	var calls atomic.Int64
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-release
+			panic("simulated builder panic")
+		}
+		return okAssembly(), nil
+	}, testWWWAuthenticate, discardLogger())
+
+	codes := make(chan int, 2)
+	go func() { codes <- poolRequest(t, pool, 1).Code }()
+	<-entered // the build is in flight; the entry is published as not-done
+	go func() { codes <- poolRequest(t, pool, 1).Code }()
+	close(release) // let the builder panic
+
+	for range 2 {
+		if code := <-codes; code != http.StatusServiceUnavailable {
+			t.Fatalf("request during a panicking build: status = %d, want 503", code)
+		}
+	}
+	if pool.size() != 0 {
+		t.Errorf("panicked build must not stay cached; size = %d, want 0", pool.size())
+	}
+	if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
+		t.Errorf("request after a panicked build: status = %d, want 200 (fresh rebuild)", rec.Code)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("builder ran %d times, want 2 (panicked once, rebuilt once)", got)
+	}
+}
+
+// TestUserPoolCloseDuringBuild pins the shutdown handoff for an in-flight
+// build: Close() flags the not-yet-done entry and returns without closing it;
+// when the build completes and publishes a live Closer, the creator's release()
+// observes the flag and tears it down — exactly once (the closeOnce tie between
+// that release and any other teardown path must not double-close).
+func TestUserPoolCloseDuringBuild(t *testing.T) {
+	var closes atomic.Int64
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+		close(entered)
+		<-release
+		return builtAssembly{
+			Handler: okHandler(),
+			Closer:  closerFunc(func() error { closes.Add(1); return nil }),
+		}, nil
+	}, testWWWAuthenticate, discardLogger())
+
+	done := make(chan int, 1)
+	go func() { done <- poolRequest(t, pool, 1).Code }()
+	<-entered
+
+	if err := pool.Close(); err != nil {
+		t.Fatalf("Close during an in-flight build: %v", err)
+	}
+	if got := closes.Load(); got != 0 {
+		t.Fatalf("Close must not tear down a still-building entry (closer not published yet); closes = %d", got)
+	}
+
+	close(release) // build completes AFTER shutdown snapshotted the map
+	<-done
+	if got := closes.Load(); got != 1 {
+		t.Errorf("build completing after Close: closer ran %d times, want exactly 1 (0 = shutdown leak)", got)
+	}
+}
+
+// TestUserPoolEvictSessionGraceForceClose pins the eviction grace bound: a
+// built assembly still held by a hung in-flight request past evictGrace is
+// force-closed by the timer (bounding the post-upgrade auth-key overlap), and
+// the eventual release() does not double-close. It also pins the guard that a
+// still-BUILDING entry never gets a timer close: firing closeEntry before the
+// closer is published would burn closeOnce with a nil closer and leak the real
+// one forever.
+func TestUserPoolEvictSessionGraceForceClose(t *testing.T) {
+	t.Run("busy built entry force-closed after grace", func(t *testing.T) {
+		var closes atomic.Int64
+		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+			return builtAssembly{
+				Handler: okHandler(),
+				Closer:  closerFunc(func() error { closes.Add(1); return nil }),
+			}, nil
+		}, testWWWAuthenticate, discardLogger())
+		pool.evictGrace = 10 * time.Millisecond
+
+		if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
+			t.Fatalf("first request status = %d, want 200", rec.Code)
+		}
+		pool.mu.Lock()
+		e := pool.entries[poolKey{id: 1}]
+		e.inflight.Add(1) // a hung stream that never releases in time
+		pool.mu.Unlock()
+
+		pool.EvictSession(1, "")
+		if got := closes.Load(); got != 0 {
+			t.Fatalf("busy entry closed synchronously (%d); the close must wait for release or the grace timer", got)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for closes.Load() == 0 && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if got := closes.Load(); got != 1 {
+			t.Fatalf("grace timer did not force-close the held assembly; closes = %d, want 1", got)
+		}
+		// The hung holder finally releases: closeOnce absorbs the tie.
+		pool.release(e)
+		if got := closes.Load(); got != 1 {
+			t.Errorf("release after the timer close double-closed; closes = %d, want 1", got)
+		}
+	})
+
+	t.Run("building entry is closed by its creator, not a timer", func(t *testing.T) {
+		var closes atomic.Int64
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+			close(entered)
+			<-release
+			return builtAssembly{
+				Handler: okHandler(),
+				Closer:  closerFunc(func() error { closes.Add(1); return nil }),
+			}, nil
+		}, testWWWAuthenticate, discardLogger())
+		pool.evictGrace = 10 * time.Millisecond
+
+		done := make(chan int, 1)
+		go func() { done <- poolRequest(t, pool, 1).Code }()
+		<-entered
+
+		pool.EvictSession(1, "") // entry is not done: no timer may be armed
+		// Give a wrongly-armed timer ample time to fire on the nil closer and
+		// burn closeOnce — the pinned bug would then make closes stay 0 forever.
+		time.Sleep(100 * time.Millisecond)
+		close(release)
+		<-done
+		if got := closes.Load(); got != 1 {
+			t.Errorf("creator's release must close the flagged build exactly once; closes = %d, want 1 (0 = closeOnce burned by a premature timer)", got)
+		}
+	})
+}
+
 func TestUserPoolEvictIdleClosesAssembly(t *testing.T) {
 	var closed atomic.Bool
 	now := time.Now()

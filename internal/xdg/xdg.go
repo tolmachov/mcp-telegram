@@ -99,15 +99,18 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode, tmpPattern stri
 // fsyncDir flushes a directory's own metadata (the entries created/renamed
 // within it) to stable storage.
 func fsyncDir(dir string) error {
-	d, err := os.Open(dir)
+	d, err := os.Open(dir) //nolint:gosec // G304: dir is the internal state directory (XDG-derived), not request input.
 	if err != nil {
-		return err
+		return fmt.Errorf("opening directory: %w", err)
 	}
 	if err := d.Sync(); err != nil {
 		_ = d.Close()
-		return err
+		return fmt.Errorf("fsyncing directory: %w", err)
 	}
-	return d.Close()
+	if err := d.Close(); err != nil {
+		return fmt.Errorf("closing directory: %w", err)
+	}
+	return nil
 }
 
 func closeTempFile(f *os.File, stage string) {

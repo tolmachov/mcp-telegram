@@ -83,6 +83,8 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		// client reads as "the token is dead"). Signal a retryable failure per
 		// §2.2.1 and log the class for the operator, never the token.
 		a.logger.Error("revocation could not be recorded", "user_id", userID, "session", sid, "err", err)
+		// RFC 7009 §2.2.1: the 503 may carry Retry-After to pace client retries.
+		w.Header().Set("Retry-After", "60")
 		a.tokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "revocation could not be recorded, retry")
 		return
 	}

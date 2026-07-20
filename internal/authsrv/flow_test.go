@@ -1108,6 +1108,55 @@ func TestRevokeStoreError(t *testing.T) {
 		"a failed tombstone write must surface as 503, not a false 200")
 }
 
+// failRevokedProbeStore errors from Revoked, simulating a backend blip during
+// the refresh gate's tombstone probe.
+type failRevokedProbeStore struct {
+	*sessionstore.Memory
+}
+
+func (s *failRevokedProbeStore) Revoked(context.Context, tgid.UserID, string) (bool, error) {
+	return false, errors.New("simulated tombstone probe failure")
+}
+
+// failExistsProbeStore errors from Exists, simulating a backend blip during the
+// refresh gate's session-existence probe.
+type failExistsProbeStore struct {
+	*sessionstore.Memory
+}
+
+func (s *failExistsProbeStore) Exists(context.Context, tgid.UserID, string) (bool, error) {
+	return false, errors.New("simulated existence probe failure")
+}
+
+// TestRefreshStoreErrorIs503 pins that a transient store failure during the
+// refresh gate answers 503 temporarily_unavailable — NOT 400 invalid_grant,
+// which clients treat as terminal and would make a backend blip burn a
+// perfectly good refresh token (forcing a needless QR re-login).
+func TestRefreshStoreErrorIs503(t *testing.T) {
+	const sid = "0123456789abcdef0123456789abcdef"
+	for name, store := range map[string]sessionstore.Store{
+		"revoked probe fails": &failRevokedProbeStore{Memory: sessionstore.NewMemory()},
+		"exists probe fails":  &failExistsProbeStore{Memory: sessionstore.NewMemory()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
+			clientID := registerClient(t, ts, testRedirectURI)
+			now := a.now()
+			refresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
+				Subject: allowedUser.String(), ClientID: clientID,
+				SessionID: sid, SessionKey: make([]byte, 32),
+				IssuedAt: now.Unix(), LoginAt: now.Unix(),
+			})
+			require.NoError(t, err)
+
+			_, oe, status := refreshGrant(t, ts, clientID, refresh)
+			require.Equal(t, http.StatusServiceUnavailable, status,
+				"a store failure must be retryable, not burn the refresh token")
+			assert.Equal(t, "temporarily_unavailable", oe.Error)
+		})
+	}
+}
+
 // partialRevokeStore simulates a Revoke that durably wrote the tombstone but
 // then failed (e.g. the blob-delete errored): Revoked reports true afterward,
 // yet Revoke returns an error to its caller.
@@ -1202,7 +1251,7 @@ type blockingLoad struct {
 func (b blockingLoad) LoadSession(ctx context.Context) ([]byte, error) {
 	close(b.entered)
 	<-b.release
-	return b.Storage.LoadSession(ctx)
+	return b.Storage.LoadSession(ctx) //nolint:wrapcheck // test double passes the storage error through unchanged (callers errors.Is on it)
 }
 
 // TestCrossUserUpgradeNotSerialized pins that the upgrade lock is per-account,

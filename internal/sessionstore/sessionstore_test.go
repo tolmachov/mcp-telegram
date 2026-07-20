@@ -179,6 +179,38 @@ func TestFSExistsZeroByteAbsent(t *testing.T) {
 	}
 }
 
+// TestListSkipsNonCanonicalNames pins the sweeper-safety invariant that List
+// only attributes objects this package itself could have written. tgid.Parse
+// accepts non-canonical spellings ("07", "+7") that sessionBase never emits;
+// without the round-trip check a foreign 07.bin would alias to user 7, and the
+// sweeper — aging the foreign file but deleting by canonical name — would
+// destroy the live 7.bin (or, mirrored under revoked/, a real tombstone).
+func TestListSkipsNonCanonicalNames(t *testing.T) {
+	ctx := t.Context()
+	dir := filepath.Join(t.TempDir(), "sessions")
+	fs, err := NewFS(dir)
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	const user = tgid.UserID(7)
+	if err := fs.Session(user, "", nil).StoreSession(ctx, []byte("live")); err != nil {
+		t.Fatalf("StoreSession: %v", err)
+	}
+	for _, foreign := range []string{"07.bin", "+7.bin"} {
+		if err := os.WriteFile(filepath.Join(dir, foreign), []byte("foreign"), 0o600); err != nil {
+			t.Fatalf("seeding %s: %v", foreign, err)
+		}
+	}
+
+	refs, err := fs.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(refs) != 1 || refs[0].UserID != user || refs[0].SID != "" {
+		t.Errorf("List = %+v, want exactly the canonical {7, \"\"} ref (non-canonical names must be skipped)", refs)
+	}
+}
+
 func TestEncryptedStore(t *testing.T) {
 	ctx := t.Context()
 	cipher, err := NewCipher([]string{newKey(t)}, testIssuer)
@@ -594,6 +626,26 @@ func TestCipherV2SplitKey(t *testing.T) {
 	// Empty key (legacy path) on a v2 blob: must not decrypt.
 	if _, err := c.open(user, nil, blob); !errors.Is(err, ErrCorruptSession) {
 		t.Errorf("open v2 with empty key: err = %v, want ErrCorruptSession", err)
+	}
+}
+
+// TestCipherV2WrongUserRejected pins the v2 AAD's userID binding on its own:
+// the SAME per-session key opening another user's blob must fail. The v2 key
+// derivation does not involve the user id at all, so only the AAD stands
+// between a copied blob and a cross-user decrypt — dropping userID from the v2
+// AAD would pass every other test.
+func TestCipherV2WrongUserRejected(t *testing.T) {
+	c, err := NewCipher([]string{newKey(t)}, testIssuer)
+	if err != nil {
+		t.Fatalf("NewCipher: %v", err)
+	}
+	uk := userKeyForTest(t)
+	blob, err := c.seal(tgid.UserID(42), uk, []byte("mtproto-session"))
+	if err != nil {
+		t.Fatalf("seal v2: %v", err)
+	}
+	if _, err := c.open(tgid.UserID(43), uk, blob); !errors.Is(err, ErrCorruptSession) {
+		t.Errorf("open user 42's v2 blob as user 43 with the same key: err = %v, want ErrCorruptSession", err)
 	}
 }
 

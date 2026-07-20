@@ -58,11 +58,13 @@ func sessionBase(userID tgid.UserID, sid string) string {
 }
 
 // SessionRef identifies one stored session and when its blob was last
-// written. UpdatedAt is the storage-layer modification time (object mtime),
-// which is always >= the LoginAt of any token bound to the session — login,
-// upgrade-on-refresh, and every gotd re-store all write the blob. The orphan
-// sweeper relies on that invariant: a blob older than the refresh-token TTL
-// cannot be reached by any live grant.
+// written. UpdatedAt is the storage-layer modification time (object mtime).
+// Login, upgrade-on-refresh, and every gotd re-store all write the blob, so
+// mtime tracks the newest grant bound to the session — except at login, where
+// the blob is written BEFORE the authorization code is redeemed, so mtime may
+// lag that grant's LoginAt by up to codeTTL (60s). The orphan sweeper relies
+// on this: a blob older than refresh-token TTL + sweepMargin cannot be reached
+// by any live grant (the 24h margin dwarfs the 60s login lag).
 type SessionRef struct {
 	UserID tgid.UserID
 	// SID is the per-authorization session id; "" for the legacy per-user
@@ -134,6 +136,14 @@ func parseSessionBase(base string) (userID tgid.UserID, sid string, ok bool) {
 	}
 	id, err := tgid.Parse(idPart)
 	if err != nil {
+		return 0, "", false
+	}
+	// Round-trip check: tgid.Parse accepts non-canonical spellings ("07", "+7")
+	// that sessionBase never emits. Without this, a foreign file like 07.bin
+	// would alias to user 7 and the sweeper would delete the CANONICAL 7.bin (or
+	// its tombstone) instead of skipping the foreign object — breaking the "only
+	// delete what this package could have written" invariant.
+	if idPart != id.String() {
 		return 0, "", false
 	}
 	return id, sidPart, true
