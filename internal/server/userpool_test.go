@@ -20,6 +20,20 @@ import (
 
 const testWWWAuthenticate = `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"`
 
+// waitFor polls cond until it holds or a short deadline elapses, failing the
+// test on timeout. Used to synchronize on concurrent pool state (e.g. a waiter
+// attaching to an in-flight build) without racy fixed sleeps.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met within deadline")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // poolRequest sends one request through the pool behind a stub bearer
 // verifier, so the identity reaches the pool exactly the way the production
 // RequireBearerToken middleware delivers it. The session id is empty (the
@@ -443,6 +457,20 @@ func TestUserPoolBuilderPanic(t *testing.T) {
 	go func() { codes <- poolRequest(t, pool, 1).Code }()
 	<-entered // the build is in flight; the entry is published as not-done
 	go func() { codes <- poolRequest(t, pool, 1).Code }()
+
+	// Wait until the second request has attached to the in-flight entry as a
+	// waiter (creator + waiter = inflight 2) before releasing the panic.
+	// Otherwise the builder can panic and delete the entry before the second
+	// request finds it, so that request starts a fresh build and returns 200 —
+	// a race that made this test flaky rather than a production bug.
+	key := poolKeyFor(&authsrv.UserIdentity{ID: 1})
+	waitFor(t, func() bool {
+		pool.mu.Lock()
+		defer pool.mu.Unlock()
+		e := pool.entries[key]
+		return e != nil && e.inflight.Load() == 2
+	})
+
 	close(release) // let the builder panic
 
 	for range 2 {
