@@ -32,7 +32,7 @@ func runMiddleware(t *testing.T, level slog.Leveler, userID tgid.UserID, method 
 	if userID > 0 {
 		if ctr, ok := req.(*mcp.CallToolRequest); ok {
 			ctr.Extra = &mcp.RequestExtra{
-				TokenInfo: authsrv.NewTokenInfoForTesting(userID, "durov", time.Now().Add(time.Hour)),
+				TokenInfo: authsrv.NewTokenInfoForTesting(userID, "durov", "", nil, time.Now().Add(time.Hour)),
 			}
 		}
 	}

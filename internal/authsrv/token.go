@@ -1,15 +1,25 @@
 package authsrv
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 
+	"github.com/gotd/td/session"
+
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
+
+// errLegacyAlreadyUpgraded reports that a concurrent (or prior) refresh already
+// migrated this account's legacy session, so the presented legacy token is now
+// stale and its holder must log in again.
+var errLegacyAlreadyUpgraded = errors.New("legacy session already upgraded")
 
 // tokenResponse is the RFC 6749 §5.1 success payload.
 type tokenResponse struct {
@@ -77,10 +87,19 @@ func (a *AuthServer) tokenFromCode(w http.ResponseWriter, form url.Values) {
 		a.tokenError(w, http.StatusBadRequest, "invalid_target", "unknown resource")
 		return
 	}
+	// The sid is AEAD-sealed into the code (we minted it), so a malformed value
+	// here means tampering or corruption; reject it before it can reach the
+	// storage layer, matching the refresh/revoke/verifier paths.
+	if cc.SessionID != "" && !validSessionID(cc.SessionID) {
+		a.logger.Warn("authorization code rejected: malformed session id")
+		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "invalid authorization code")
+		return
+	}
 
 	a.mintTokens(w, mintInput{
 		Subject: cc.Subject, Username: cc.Username,
 		ClientID: cc.ClientID, Resource: cc.Resource,
+		SessionID: cc.SessionID, SessionKey: cc.SessionKey,
 		LoginAt: now.Unix(),
 	})
 }
@@ -112,6 +131,14 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "invalid refresh token")
 		return
 	}
+	// A non-empty sid from the token becomes a storage object-name/path suffix
+	// below; reject a malformed one here (a forged/corrupt token) so it can never
+	// reach the storage layer.
+	if rc.SessionID != "" && !validSessionID(rc.SessionID) {
+		a.logger.Warn("refresh rejected: malformed session id", "user_id", userID)
+		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "invalid refresh token")
+		return
+	}
 	// Enforce the allowlist at the token endpoint too, so a removed user
 	// stops minting fresh tokens instead of relying solely on the verifier
 	// rejecting them at use.
@@ -120,7 +147,20 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "this Telegram account is not allowed")
 		return
 	}
-	exists, err := a.store.Exists(r.Context(), userID)
+	// Revocation gate: durable and independent of the blob, so a live client
+	// that re-stored (resurrected) the deleted blob cannot un-revoke the grant.
+	revoked, err := a.store.Revoked(r.Context(), userID, rc.SessionID)
+	if err != nil {
+		a.logger.Error("revocation check failed on refresh", "user_id", userID, "err", err)
+		a.tokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "session check failed, try again")
+		return
+	}
+	if revoked {
+		a.logger.Warn("refresh rejected: session revoked", "user_id", userID)
+		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "session revoked, log in again")
+		return
+	}
+	exists, err := a.store.Exists(r.Context(), userID, rc.SessionID)
 	if err != nil {
 		// Backend failure, not a dead grant: 503 keeps the client retrying
 		// instead of discarding a refresh token that may still be good.
@@ -134,17 +174,145 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 		return
 	}
 
+	// Migrate a legacy (master-only) session to an independent split-key session
+	// on this refresh, so protection completes within one access-token lifetime
+	// without forcing a fresh QR login.
+	sid, sessionKey := rc.SessionID, rc.SessionKey
+	if sid == "" {
+		upgradedSID, upgradedKey, upErr := a.upgradeLegacySession(r.Context(), userID)
+		switch {
+		case errors.Is(upErr, errLegacyAlreadyUpgraded):
+			// The legacy object is gone (a concurrent refresh won the upgrade, or
+			// it was revoked/swept); this legacy token is stale.
+			a.logger.Info("legacy refresh rejected: session already migrated or deleted", "user_id", userID)
+			a.tokenError(w, http.StatusBadRequest, "invalid_grant", "session migrated, log in again")
+			return
+		case upErr != nil:
+			// Transient failure: keep the (still-present) legacy session and
+			// re-issue legacy tokens rather than break the refresh.
+			a.logger.Warn("legacy session upgrade skipped; keeping master-only session", "user_id", userID, "err", upErr)
+		default:
+			sid, sessionKey = upgradedSID, upgradedKey
+			a.logger.Info("upgraded legacy session to split-key on refresh", "user_id", userID)
+		}
+	}
+
 	a.mintTokens(w, mintInput{
 		Subject: rc.Subject, Username: rc.Username,
 		ClientID: rc.ClientID, Resource: rc.Resource,
+		SessionID: sid, SessionKey: sessionKey,
 		LoginAt: rc.LoginAt,
 	})
+}
+
+// upgradeLegacySession MOVES a user's legacy master-only session into a fresh
+// independent split-key session: it copies the blob to a new (sid, key) object,
+// then REVOKES the legacy session (tombstone + delete). Tombstoning the legacy
+// session (rather than a bare delete) is load-bearing:
+//
+//   - The old stateless legacy refresh token is durably invalidated: the refresh
+//     gate's Revoked(userID, "") check rejects it, so a replayed or un-rotated
+//     legacy token cannot mint tokens or spawn another copy — even if a live
+//     legacy client re-stores (resurrects) the legacy blob.
+//   - Two live gotd clients running on the same auth key (the new copy plus a
+//     still-warm legacy assembly) is a migration-only, one-time overlap. The
+//     pooled legacy assembly is dropped via invalidateSession; if in-flight
+//     streams keep it busy, the pool force-closes it after its eviction grace,
+//     so the overlap is bounded — an unbounded overlap would risk Telegram
+//     killing the shared auth key (AUTH_KEY_DUPLICATED), taking the freshly
+//     upgraded session with it.
+//
+// Trade-off: the FIRST legacy client to refresh wins the upgrade; any other
+// legacy client of the same account then fails its next refresh (Revoked) and
+// re-runs the QR login.
+//
+// Concurrency and atomicity: the whole load→write→revoke sequence runs under the
+// per-account lock, so two simultaneous legacy refreshes on ONE instance cannot
+// both produce a copy of the same auth key — the loser observes the legacy
+// object already gone (session.ErrNotFound) and is told to log in again. The
+// lock is in-process; the deployment is single-instance by design (README
+// mandates --max-instances=1), so this is the atomicity boundary. If revoking
+// the legacy object fails without leaving a durable tombstone, the just-written
+// object is rolled back so the account is never left with two live objects
+// sharing one auth key.
+func (a *AuthServer) upgradeLegacySession(ctx context.Context, userID tgid.UserID) (string, []byte, error) {
+	sid, key, err := a.migrateLegacyLocked(ctx, userID)
+	if err != nil {
+		return "", nil, err
+	}
+	// Drop the warm legacy assembly best-effort — OUTSIDE the per-account lock. A
+	// slow gotd Close() must not serialize this account's other refreshes; the
+	// legacy tombstone (written under the lock) is what makes the old token dead,
+	// so this is pool cleanup, not part of the atomic store sequence.
+	a.invalidateSession(userID, "")
+	return sid, key, nil
+}
+
+// migrateLegacyLocked performs the load→write→revoke store sequence under the
+// per-account upgrade lock and returns the new session credentials. It does no
+// pool teardown (see upgradeLegacySession).
+func (a *AuthServer) migrateLegacyLocked(ctx context.Context, userID tgid.UserID) (string, []byte, error) {
+	unlock := a.lockUpgrade(userID)
+	defer unlock()
+
+	data, err := a.store.Session(userID, "", nil).LoadSession(ctx)
+	if errors.Is(err, session.ErrNotFound) {
+		// Under the per-account lock, a missing legacy object means it was
+		// already migrated by a prior/concurrent refresh (or deleted by
+		// revoke/logout/sweep) — either way this legacy token is stale and its
+		// holder must log in again.
+		return "", nil, errLegacyAlreadyUpgraded
+	}
+	if err != nil {
+		return "", nil, fmt.Errorf("reading legacy session: %w", err)
+	}
+	sid, key, err := newSessionCreds()
+	if err != nil {
+		return "", nil, err
+	}
+	if err := a.store.Session(userID, sid, key).StoreSession(ctx, data); err != nil {
+		return "", nil, fmt.Errorf("writing upgraded session: %w", err)
+	}
+	if err := a.store.Revoke(ctx, userID, ""); err != nil {
+		// Revoke writes the tombstone FIRST, then deletes the blob (non-atomic).
+		// If the tombstone landed but the blob-delete failed, the legacy token is
+		// already durably dead: its next refresh hits the Revoked gate. Rolling
+		// back the new object here would strand the account on a revoked legacy
+		// session and force an unnecessary re-login — exactly what the caller's
+		// "transient, keep legacy" fallback tries to avoid. So probe the tombstone
+		// and, if it is durable, complete the upgrade instead of rolling back.
+		//
+		// This complete-vs-rollback decision assumes the store is read-your-writes
+		// consistent on tombstones: Revoked() must observe a tombstone Revoke()
+		// just wrote. GCS object metadata (Attrs) is strongly consistent, so this
+		// holds. On an eventually-consistent tombstone backend a false-negative
+		// Revoked() here would roll back a genuinely-revoked upgrade (safe, but a
+		// spurious re-login) — such a backend must not be used for tombstones.
+		if revoked, rErr := a.store.Revoked(ctx, userID, ""); rErr == nil && revoked {
+			a.logger.Warn("legacy blob delete failed but tombstone is durable; completing upgrade",
+				"user_id", userID, "session", sid, "err", err)
+			return sid, key, nil
+		}
+		// No durable tombstone: roll back the new object. Leaving BOTH live would
+		// let the legacy token upgrade again into a second holder of the same auth
+		// key. Best-effort — a surviving orphan is reclaimed by the sweeper.
+		if delErr := a.store.Delete(ctx, userID, sid); delErr != nil {
+			a.logger.Error("legacy upgrade rollback failed; orphan will be swept", "user_id", userID, "session", sid, "err", delErr)
+		}
+		return "", nil, fmt.Errorf("revoking legacy object: %w", err)
+	}
+	return sid, key, nil
 }
 
 // mintInput carries everything needed to mint an access/refresh token pair.
 type mintInput struct {
 	Subject, Username  string
 	ClientID, Resource string
+	// SessionID and SessionKey identify and decrypt the caller's own session
+	// object; they are sealed into both minted tokens (empty for legacy
+	// master-only sessions).
+	SessionID  string
+	SessionKey []byte
 	// LoginAt anchors the refresh-token TTL: it must be the ORIGINAL login
 	// time (now for the code grant, the previous token's LoginAt for the
 	// refresh grant). Passing "now" on refresh would make refresh tokens
@@ -165,6 +333,7 @@ func (a *AuthServer) mintTokens(w http.ResponseWriter, in mintInput) {
 	accessToken, err := sealBlob(a.sealer, accessBlob, accessClaims{
 		Subject: in.Subject, Username: in.Username,
 		ClientID: in.ClientID, Resource: in.Resource,
+		SessionID: in.SessionID, SessionKey: in.SessionKey,
 		IssuedAt: now.Unix(), ExpiresAt: exp.Unix(),
 	})
 	if err != nil {
@@ -175,6 +344,7 @@ func (a *AuthServer) mintTokens(w http.ResponseWriter, in mintInput) {
 	refreshToken, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
 		Subject: in.Subject, Username: in.Username,
 		ClientID: in.ClientID, Resource: in.Resource,
+		SessionID: in.SessionID, SessionKey: in.SessionKey,
 		IssuedAt: now.Unix(), LoginAt: in.LoginAt,
 	})
 	if err != nil {

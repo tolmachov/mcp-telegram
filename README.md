@@ -313,9 +313,51 @@ which shows a **QR code**. You scan it with the Telegram app (Settings → Devic
 are and becomes your working session (a 2FA-password prompt appears if your
 account has one). Only Telegram user ids listed in `AUTH_ALLOWED_USERS` may
 complete the login — everyone else is rejected after the scan and their session
-is discarded. Each allowed user gets their own isolated session, **encrypted at
-rest** (AES-256-GCM with a key derived from `AUTH_TOKEN_KEY`, bound to the
-issuer and user id), and their own MCP server assembly.
+is discarded.
+
+Each authorization is an **independent session**: it gets its own encrypted
+object in the bucket and its own MCP server assembly, so one account can be
+logged in from several clients at once without them contending. The server keeps
+up to a few of an account's assemblies warm concurrently; an account actively
+switching between more sessions than that is not rejected but pays a brief
+Telegram reconnect when an idle one is rebuilt on demand. Sessions are
+**encrypted at rest** with AES-256-GCM under a **split key**: the key is derived
+from *both* `AUTH_TOKEN_KEY` *and* a random per-session key that lives only
+inside the client's OAuth access/refresh token (never stored server-side). As a
+result, an at-rest dump of the bucket **plus** the secret manager cannot, on its
+own, decrypt a session — a live token is also required. (Trade-offs, stated
+plainly: this does not protect against a compromise of the running server's
+memory. And because the per-session key share travels inside the token, an
+attacker who holds the bucket **and** the master key **and** captures **one**
+access token can decrypt that single session — and thereby extract its
+persistent MTProto auth key, which outlives the ≤55-minute token and keeps
+working until the session is revoked or logged out. That exposure is confined to
+the one captured session; other sessions stay protected. TLS,
+`Cache-Control: no-store` on token/revoke responses, and never logging tokens
+narrow the capture window.) Pre-existing sessions from older versions stay
+readable with the master key alone and are transparently upgraded to a split-key
+session on their next token refresh.
+
+Session lifecycle is managed automatically: `POST /revoke` (RFC 7009) with an
+access or refresh token durably marks that authorization revoked (a tombstone
+stored where the Telegram client never writes) and deletes its session. The
+refresh grant dies immediately and stays dead — even if a still-live client
+re-stores the session object, the refresh check consults the tombstone, so
+revocation cannot be undone by a resurrected blob. An already-issued access
+token remains valid until it expires (≤55 minutes): revocation reliably stops
+renewal, matching the standard short-lived-access / revocable-refresh model.
+Revocation does not terminate the Telegram-side device authorization (it stays
+in Settings → Devices until Telegram expires it). Sessions abandoned without
+revocation — and old tombstones — are reclaimed by a background sweep once older
+than the refresh-token TTL plus a day, past which no refresh token for the
+session can still be valid.
+
+Legacy (pre-split-key) sessions are upgraded on their next token refresh by
+*moving* the session to a fresh split-key object and revoking the old legacy
+session. Consequently, if one account was logged in from several clients before
+upgrading, the first client to refresh wins the upgrade and the others re-run
+the QR login on their next refresh — this avoids ever running two Telegram
+clients on one auth key (which would trip `AUTH_KEY_DUPLICATED`).
 
 ### Try it locally
 
@@ -346,8 +388,10 @@ Secret Manager, sessions in a GCS bucket. In outline:
    freshly generated 32-byte `AUTH_TOKEN_KEY`
    (`head -c 32 /dev/urandom | base64`) — and grant the service account
    `roles/secretmanager.secretAccessor` on them. The token key never leaves
-   Secret Manager in plaintext, and it is what decrypts the sessions — losing it
-   logs everyone out; leaking it exposes every session.
+   Secret Manager in plaintext. Losing it logs everyone out (sessions become
+   undecryptable). Leaking it alone no longer exposes split-key sessions — those
+   also need a live client token — but treat it as highly sensitive regardless:
+   it still mints tokens and decrypts any not-yet-upgraded legacy sessions.
 3. **Deploy** with `gcloud run deploy --source .`, wiring the non-secret env
    from [`deploy/cloudrun.env.example`](deploy/cloudrun.env.example), the two
    secrets via `--set-secrets`, and **`--max-instances=1`** (mandatory: two

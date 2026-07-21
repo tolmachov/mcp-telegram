@@ -2,8 +2,6 @@ package authsrv
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -79,11 +77,7 @@ func (p *pendingLogin) tryConsume() bool {
 
 // newLoginID returns a 128-bit random hex login identifier.
 func newLoginID() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("generating login id: %w", err)
-	}
-	return hex.EncodeToString(b), nil
+	return randomHex(16)
 }
 
 // addPending registers a login flow under a fresh random id. It fails with
@@ -186,9 +180,21 @@ func (a *AuthServer) janitor(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			a.sweepExpiredPending()
+			a.runPendingSweep()
 		}
 	}
+}
+
+// runPendingSweep executes one pending-login sweep, isolating it from a panic
+// (e.g. a misbehaving LoginFlow.Abort) so one bad flow cannot unwind the
+// goroutine and crash the auth-server process.
+func (a *AuthServer) runPendingSweep() {
+	defer func() {
+		if r := recover(); r != nil {
+			a.logger.Error("pending-login sweep panicked; recovered", "panic", r)
+		}
+	}()
+	a.sweepExpiredPending()
 }
 
 // handleLoginQR serves the current tg://login URL of a pending login as a
@@ -324,7 +330,17 @@ func (a *AuthServer) finalizeLogin(ctx context.Context, w http.ResponseWriter, p
 		fail("Telegram login failed. Start over from your MCP client.")
 		return
 	}
-	if err := a.store.Session(user.ID).StoreSession(ctx, data); err != nil {
+	// Each login is an independent session: a fresh random sid (its own bucket
+	// object) and a fresh random key (folded into the session encryption, carried
+	// only in the tokens below). Concurrent logins for one account therefore do
+	// not overwrite each other.
+	sid, sessionKey, err := newSessionCreds()
+	if err != nil {
+		a.logger.Error("generating session credentials failed", "user_id", user.ID, "err", err)
+		fail("Internal error. Start over from your MCP client.")
+		return
+	}
+	if err := a.store.Session(user.ID, sid, sessionKey).StoreSession(ctx, data); err != nil {
 		a.logger.Error("storing telegram session failed", "user_id", user.ID, "err", err)
 		fail("Storing the Telegram session failed. Start over from your MCP client.")
 		return
@@ -338,6 +354,8 @@ func (a *AuthServer) finalizeLogin(ctx context.Context, w http.ResponseWriter, p
 		RedirectURI:   sc.RedirectURI,
 		CodeChallenge: sc.CodeChallenge,
 		Resource:      sc.Resource,
+		SessionID:     sid,
+		SessionKey:    sessionKey,
 		IssuedAt:      now.Unix(),
 	})
 	if err != nil {

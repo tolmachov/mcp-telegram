@@ -85,6 +85,31 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode, tmpPattern stri
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("renaming temp file into place: %w", err)
 	}
+	// fsync the parent directory so the rename itself is durable. Without this,
+	// the file's data is synced but the directory entry can still be lost on a
+	// crash/power-loss, silently reverting to the old file (or none). This
+	// matters most for revocation tombstones, where a lost rename would
+	// resurrect a revoked session.
+	if err := fsyncDir(dir); err != nil {
+		return fmt.Errorf("syncing directory %s: %w", dir, err)
+	}
+	return nil
+}
+
+// fsyncDir flushes a directory's own metadata (the entries created/renamed
+// within it) to stable storage.
+func fsyncDir(dir string) error {
+	d, err := os.Open(dir) //nolint:gosec // G304: dir is the internal state directory (XDG-derived), not request input.
+	if err != nil {
+		return fmt.Errorf("opening directory: %w", err)
+	}
+	if err := d.Sync(); err != nil {
+		_ = d.Close()
+		return fmt.Errorf("fsyncing directory: %w", err)
+	}
+	if err := d.Close(); err != nil {
+		return fmt.Errorf("closing directory: %w", err)
+	}
 	return nil
 }
 
