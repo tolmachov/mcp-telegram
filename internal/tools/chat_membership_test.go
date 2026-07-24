@@ -2,8 +2,12 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
+	"github.com/gotd/td/bin"
+	"github.com/gotd/td/tg"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -93,4 +97,73 @@ func TestLeaveChatResolvePeerRejectsInvite(t *testing.T) {
 			assert.Contains(t, toolResultText(errRes), "does not accept invite links")
 		})
 	}
+}
+
+// leaveChatInvoker resolves a public @username to a channel and counts how many
+// times channels.leaveChannel was actually invoked, so a test can prove whether
+// LeaveChat reached the API or bailed out at the confirmation gate.
+type leaveChatInvoker struct {
+	channelID  int64
+	accessHash int64
+	leaveCalls int
+}
+
+func (f *leaveChatInvoker) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
+	switch input.(type) {
+	case *tg.ContactsResolveUsernameRequest:
+		resolved := output.(*tg.ContactsResolvedPeer)
+		resolved.Peer = &tg.PeerChannel{ChannelID: f.channelID}
+		resolved.Chats = []tg.ChatClass{&tg.Channel{
+			ID:         f.channelID,
+			AccessHash: f.accessHash,
+			Title:      "Test Channel",
+		}}
+		return nil
+	case *tg.ChannelsLeaveChannelRequest:
+		f.leaveCalls++
+		output.(*tg.UpdatesBox).Updates = &tg.Updates{}
+		return nil
+	default:
+		return fmt.Errorf("leaveChatInvoker: unexpected request %T", input)
+	}
+}
+
+// TestLeaveChatConfirmBypassesElicitation verifies the confirm gate:
+//   - Confirm=true skips confirmDestructive and reaches channels.leaveChannel,
+//     even with a nil session (which the elicitation path could never satisfy).
+//   - Confirm=false with no session bails out at the confirmation gate and never
+//     hits the API, so the account is not left behind the user's back.
+func TestLeaveChatConfirmBypassesElicitation(t *testing.T) {
+	newHandler := func() (*LeaveChatHandler, *leaveChatInvoker) {
+		inv := &leaveChatInvoker{channelID: 555, accessHash: 999}
+		return NewLeaveChatHandler(tg.NewClient(inv)), inv
+	}
+
+	t.Run("confirm true leaves without elicitation", func(t *testing.T) {
+		h, inv := newHandler()
+		errRes, out, err := h.handle(context.Background(), &mcp.CallToolRequest{}, LeaveChatInput{
+			Chat:    "@testchan",
+			Confirm: true,
+		})
+		require.NoError(t, err)
+		require.Nil(t, errRes)
+		require.NotNil(t, out)
+		assert.Equal(t, statusLeft, out.Status)
+		assert.Equal(t, "channel", out.Kind)
+		assert.Equal(t, int64(555), out.ChatID)
+		assert.Equal(t, 1, inv.leaveCalls, "confirm=true must reach channels.leaveChannel")
+	})
+
+	t.Run("confirm false without session cancels before the API", func(t *testing.T) {
+		h, inv := newHandler()
+		errRes, out, err := h.handle(context.Background(), &mcp.CallToolRequest{}, LeaveChatInput{
+			Chat:    "@testchan",
+			Confirm: false,
+		})
+		require.NoError(t, err)
+		require.Nil(t, out)
+		require.NotNil(t, errRes)
+		assert.True(t, errRes.IsError)
+		assert.Equal(t, 0, inv.leaveCalls, "an unconfirmed leave must never hit the API")
+	})
 }

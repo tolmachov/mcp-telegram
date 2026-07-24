@@ -22,6 +22,7 @@ const (
 	statusActionRequired = "action_required"
 	statusLeft           = "left"
 	statusNotMember      = "not_member"
+	statusCancelled      = "cancelled"
 )
 
 // chat-reference kinds returned by classifyChatRef.
@@ -72,12 +73,13 @@ type JoinChatResult struct {
 
 // LeaveChatInput is the input for the LeaveChat tool.
 type LeaveChatInput struct {
-	Chat string `json:"chat" jsonschema:"Public @username or numeric chat ID of a chat you are currently a member of"`
+	Chat    string `json:"chat" jsonschema:"Public @username or numeric chat ID of a chat you are currently a member of"`
+	Confirm bool   `json:"confirm,omitempty" jsonschema:"Set to true to proceed with leaving. Leaving is destructive (rejoining a private chat needs a fresh invite link), so only set this after the user has confirmed. When false/omitted, the host may present its own confirmation prompt, and in non-interactive clients the call is cancelled without leaving."`
 }
 
 // LeaveChatResult is the typed output of LeaveChat.
 type LeaveChatResult struct {
-	Status string `json:"status"` // "left" | "not_member"
+	Status string `json:"status"` // "left" | "not_member" | "cancelled"
 	Chat   string `json:"chat"`
 	ChatID int64  `json:"chat_id,omitempty"`
 	Kind   string `json:"kind,omitempty"` // "channel" | "chat" (supergroups report as "channel")
@@ -218,14 +220,25 @@ func (h *LeaveChatHandler) handle(ctx context.Context, req *mcp.CallToolRequest,
 		return errResult(fmt.Sprintf("%q is a private (one-to-one) chat, not a group or channel — there's nothing to leave. Use DeleteMessage or your client to clear the conversation instead.", chat)), nil, nil
 	}
 
-	confirmed, err := confirmDestructive(ctx, req, fmt.Sprintf(
-		"Leave chat %q? You'll lose access; rejoining a private chat requires a fresh invite link.", chat,
-	))
-	if err != nil {
-		return errResult(fmt.Sprintf("confirmation failed: %v", err)), nil, nil
-	}
-	if !confirmed {
-		return textResult("Cancelled by user. You're still a member of the chat."), nil, nil
+	// in.Confirm lets the caller confirm in-band (per Server.Instructions, the
+	// model asks the user before destructive actions). This is the only path
+	// that works in non-interactive clients, where the elicitation form below
+	// can never be accepted. Fall back to elicitation only when confirm is unset.
+	if !in.Confirm {
+		confirmed, err := confirmDestructive(ctx, req, fmt.Sprintf(
+			"Leave chat %q? You'll lose access; rejoining a private chat requires a fresh invite link.", chat,
+		))
+		if err != nil {
+			return errResult(fmt.Sprintf("confirmation failed: %v", err)), nil, nil
+		}
+		if !confirmed {
+			// Return a populated result (not a bare text result with a nil typed
+			// output): the SDK fills StructuredContent from the zero value of a nil
+			// pointer output, so a text-only cancel surfaces as an empty
+			// {"chat":"","status":""} that masks the reason. An explicit
+			// "cancelled" status keeps the outcome legible.
+			return nil, &LeaveChatResult{Status: statusCancelled, Chat: chat}, nil
+		}
 	}
 
 	if isChannel {
