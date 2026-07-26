@@ -147,6 +147,13 @@ func peerKeyOf(p tg.PeerClass) peerLookupKey {
 	return peerLookupKey{}
 }
 
+// dialogPeer is satisfied by both *tg.Dialog and *tg.DialogFolder. As of gotd
+// v0.161.0 tg.DialogClass no longer exposes GetPeer, though both concrete types
+// still implement it.
+type dialogPeer interface {
+	GetPeer() tg.PeerClass
+}
+
 // GetChats retrieves a list of all chats.
 //
 // It paginates messages.getDialogs manually rather than via gotd's
@@ -246,7 +253,10 @@ func GetChats(ctx context.Context, client *tg.Client, onProgress ProgressFunc) (
 		}
 
 		// Advance the offset to the last dialog of the page.
-		lastPeer := dialogs[len(dialogs)-1].GetPeer()
+		var lastPeer tg.PeerClass
+		if dp, ok := dialogs[len(dialogs)-1].(dialogPeer); ok {
+			lastPeer = dp.GetPeer()
+		}
 		lastPeerKey := peerKeyOf(lastPeer)
 		if m, ok := msgByPeer[lastPeerKey]; ok {
 			offsetID = m.GetID()

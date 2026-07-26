@@ -61,14 +61,14 @@ type JoinChatInput struct {
 // best-effort: some join responses carry no chat updates (e.g. an invite-link
 // join, or a web-view join result), in which case they are omitted. When the
 // join is gated behind an in-app web view (verification/captcha), Status is
-// "action_required" and ActionURL holds the URL the user must open to finish.
+// "action_required" and Detail explains what the user must do to finish.
 type JoinChatResult struct {
-	Status    string `json:"status"` // "joined" | "already_member" | "requested" | "action_required"
-	Chat      string `json:"chat"`
-	ChatID    int64  `json:"chat_id,omitempty"`
-	Title     string `json:"title,omitempty"`
-	Kind      string `json:"kind,omitempty"` // "channel" | "supergroup" | "chat"
-	ActionURL string `json:"action_url,omitempty"`
+	Status string `json:"status"` // "joined" | "already_member" | "requested" | "action_required"
+	Chat   string `json:"chat"`
+	ChatID int64  `json:"chat_id,omitempty"`
+	Title  string `json:"title,omitempty"`
+	Kind   string `json:"kind,omitempty"` // "channel" | "supergroup" | "chat"
+	Detail string `json:"detail,omitempty"`
 }
 
 // LeaveChatInput is the input for the LeaveChat tool.
@@ -89,7 +89,7 @@ type LeaveChatResult struct {
 func (h *JoinChatHandler) Register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "JoinChat",
-		Description: "Join a Telegram channel, group, or supergroup. Accepts a public @username, a numeric chat ID, or an invite link (t.me/+hash or t.me/joinchat/hash) for private chats. Joining is reversible — use LeaveChat to undo. Some chats require admin approval; in that case the result status is \"requested\" rather than \"joined\". If joining is gated behind an in-app verification step, the status is \"action_required\" and the result includes an action_url the user must open to finish. Legacy basic groups can only be joined via an invite link.",
+		Description: "Join a Telegram channel, group, or supergroup. Accepts a public @username, a numeric chat ID, or an invite link (t.me/+hash or t.me/joinchat/hash) for private chats. Joining is reversible — use LeaveChat to undo. Some chats require admin approval; in that case the result status is \"requested\" rather than \"joined\". If joining is gated behind an in-app verification step, the status is \"action_required\" and detail explains what the user must do in an official Telegram client to finish. Legacy basic groups can only be joined via an invite link.",
 		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},
 	}, h.handle)
 }
@@ -406,8 +406,10 @@ func resolveChannelByUsername(ctx context.Context, client *tg.Client, username s
 // joinResultFrom builds a JoinChatResult from the join response. The Ok variant
 // carries chat updates we mine for metadata. The WebView variant means the join
 // did NOT complete — Telegram requires the user to finish an in-app web view
-// (verification/captcha) — so we downgrade the status to "action_required" and
-// surface the URL instead of falsely reporting a successful join.
+// (verification/captcha) — so we downgrade the status to "action_required"
+// instead of falsely reporting a successful join. The response used to carry the
+// web view URL; since the schema behind gotd v0.161.0 it only carries the bot and
+// query IDs, so there is nothing to hand back but an explanation.
 func joinResultFrom(chat, status string, res tg.MessagesChatInviteJoinResultClass) *JoinChatResult {
 	out := &JoinChatResult{Status: status, Chat: chat}
 	switch r := res.(type) {
@@ -417,7 +419,8 @@ func joinResultFrom(chat, status string, res tg.MessagesChatInviteJoinResultClas
 		}
 	case *tg.MessagesChatInviteJoinResultWebView:
 		out.Status = statusActionRequired
-		out.ActionURL = r.Webview.URL
+		out.Detail = "Telegram gated this join behind an in-app web view (verification/captcha). " +
+			"Open the chat or invite link in an official Telegram client and complete it there."
 	}
 	return out
 }
