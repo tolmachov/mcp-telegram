@@ -1,15 +1,15 @@
 package server
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gotd/td/telegram"
@@ -48,19 +48,15 @@ func (s *Server) stdioTransport() *mcp.IOTransport {
 
 const happyInstructions = "Use SearchChats or GetChats to find chat IDs before calling other tools. Chat IDs are numeric. If you only have a username, use ResolveUsername to get the chat ID. When the user asks to message someone, always confirm the recipient before sending. When the user asks to summarize, digest, or recap a chat, call SummarizeChat rather than fetching messages with GetMessages and summarizing them yourself — it summarizes long histories server-side without loading every message into context."
 
-// Surfaced as a JSON-RPC error on initialize so hosts render a connection
-// error — the alternative (a silently-green server with no tools) is the
-// failure mode this whole ceremony exists to avoid.
+// The blocked-startup messages. Over stdio they become the login-required
+// server's instructions and tool description (so the model reads them) and
+// the tool's own re-check detail; over HTTP and on a TTY they are printed as
+// the process's exit error.
 //
 //nolint:gosec // G101: this is a user-facing help string naming the env vars, not a credential.
 const missingCredentialsMessage = "mcp-telegram is not configured: TELEGRAM_API_ID and TELEGRAM_API_HASH are required. Set them via environment variables, a .env file, CLI flags (--api-id / --api-hash), or `mcp-telegram config set api-id <id>` / `mcp-telegram config set api-hash <hash>`. You can obtain an API ID/Hash from https://my.telegram.org."
 
-const notLoggedInMessage = "mcp-telegram is not logged in to Telegram. Run `mcp-telegram login --phone <+countrycode…>` in a terminal to authenticate, then restart this MCP server."
-
-// -32002 is in the JSON-RPC server-defined range (-32000 to -32099 per
-// §5.1), so hosts can distinguish "server not ready" from the standard
-// parse/invalid-request/internal-error codes.
-const initErrorCode = -32002
+const notLoggedInMessage = "mcp-telegram is not logged in to Telegram — the stored session is missing, expired, or was revoked from Telegram's Devices/Active sessions list. Run `mcp-telegram login --phone <+countrycode…>` in a terminal to authenticate, then " + reconnectHint
 
 // Options configures New. Only Config is required; Version is recommended
 // (propagated to mcp.Implementation.Version). Stdin/Stdout/ErrOut default
@@ -105,6 +101,15 @@ type Server struct {
 	stdin          io.Reader
 	stdout         io.Writer
 	errOut         io.Writer
+
+	// authProbeFn is the live authorization re-check the login-required tool
+	// performs, injectable so the tool's states can be exercised without a
+	// Telegram connection (and, on darwin, without a Keychain prompt). New
+	// points it at Server.authProbe; only tests replace it.
+	authProbeFn func(context.Context) (account string, authorized bool, err error)
+	// probeMu serializes authProbe — see its doc comment for why concurrent
+	// probes on one stored session are a hazard rather than just waste.
+	probeMu sync.Mutex
 }
 
 // New creates a new MCP server from an Options bundle.
@@ -164,7 +169,7 @@ func New(opts Options) (*Server, error) {
 	logger := slog.New(logging.NewHandler(opts.ErrOut, logFormat, level, "mcp-telegram", opts.Version)).
 		With("component", "mcp-telegram")
 
-	return &Server{
+	srv := &Server{
 		logger:         logger,
 		version:        opts.Version,
 		tgConfig:       opts.Config,
@@ -181,20 +186,26 @@ func New(opts Options) (*Server, error) {
 		stdin:          opts.Stdin,
 		stdout:         opts.Stdout,
 		errOut:         opts.ErrOut,
-	}, nil
+	}
+	srv.authProbeFn = srv.authProbe
+	return srv, nil
 }
 
-// Run starts the MCP server over stdio. When Telegram is unavailable
-// (missing credentials, client construction failure, or not-logged-in), Run
-// returns a non-nil error after writing a JSON-RPC error on the initialize
-// request — the caller (main) turns that into a non-zero exit. This is what
-// hosts like Claude Desktop actually render to the user; silently
-// registering a stub tool would leave the server visible-but-useless in the
-// UI, which is the failure mode we're trying to avoid.
+// Run starts the MCP server on the configured transport (stdio or streamable
+// HTTP). When Telegram cannot be reached at all — missing credentials, client
+// construction failure, a connect-phase failure, a failed auth check, or a
+// session that is simply not authorized — the stdio path comes up in
+// login-required mode instead of failing: a server exposing one loudly-named
+// tool that reports the problem, plus instructions that say the same thing to
+// the model. See runLoginRequired for why that beats failing the connection.
+//
+// Over HTTP there is no MCP peer to tell, so those conditions still fail the
+// process; in auth mode only the missing-credentials one can arise, because
+// the per-user clients are connected lazily by the pool.
 func (s *Server) Run(ctx context.Context) error {
 	if s.tgConfig.APIID == 0 || s.tgConfig.APIHash == "" {
-		s.logger.Warn("refusing to start", "reason", "missing Telegram API credentials")
-		return s.startupError(ctx, missingCredentialsMessage)
+		s.logger.Warn("no Telegram access", "reason", "missing Telegram API credentials")
+		return s.startBlocked(ctx, missingCredentialsMessage)
 	}
 
 	// The auth mode has no ambient single-account client: each user's client
@@ -206,31 +217,77 @@ func (s *Server) Run(ctx context.Context) error {
 	client, waiter, err := tgclient.CreateClient(s.tgConfig, s.floodWaitLogger())
 	if err != nil {
 		msg := fmt.Sprintf("mcp-telegram: failed to construct Telegram client: %v. Verify TELEGRAM_API_ID/HASH and the session file; `mcp-telegram logout` followed by `mcp-telegram login` often recovers a corrupt session.", err)
-		s.logger.Error("refusing to start", "reason", "telegram client construction failed", "err", err)
-		return s.startupError(ctx, msg)
+		s.logger.Error("no Telegram access", "reason", "telegram client construction failed", "err", err)
+		return s.startBlocked(ctx, msg)
 	}
 
+	// A blocked condition detected by our own callback is reported by
+	// returning a *blockedError rather than serving from inside client.Run:
+	// that unwinds the Telegram connection first, so the login-required server
+	// does not hold a pointless connection open for the life of the MCP
+	// session.
+	//
+	// served flips immediately before runHappy takes over, which is what makes
+	// finishRun's phase test meaningful — see its doc comment. Both joins
+	// (floodwait's waiter and gotd's errgroup) already establish the
+	// happens-before, so a plain bool would be correct; atomic.Bool is
+	// deliberate belt-and-braces on the one flag that decides whether a hard
+	// failure gets downgraded to a degraded-but-running server.
+	var served atomic.Bool
 	err = waiter.Run(ctx, func(ctx context.Context) error {
 		return client.Run(ctx, func(ctx context.Context) error {
 			status, err := client.Auth().Status(ctx)
 			if err != nil {
 				msg := fmt.Sprintf("mcp-telegram: Telegram auth check failed: %v. Verify network connectivity and retry; if the error persists, `mcp-telegram logout` followed by `mcp-telegram login` may recover.", err)
-				s.logger.Error("refusing to start", "reason", "auth check failed", "err", err)
-				return s.startupError(ctx, msg)
+				s.logger.Error("no Telegram access", "reason", "auth check failed", "err", err)
+				return &blockedError{message: msg}
 			}
 
 			if !status.Authorized {
-				s.logger.Warn("refusing to start", "reason", "not authorized; login required")
-				return s.startupError(ctx, notLoggedInMessage)
+				s.logger.Warn("no Telegram access", "reason", "not authorized; login required")
+				return &blockedError{message: notLoggedInMessage}
 			}
 
+			served.Store(true)
 			return s.runHappy(ctx, client)
 		})
 	})
-	if err != nil {
+	return s.finishRun(ctx, err, served.Load())
+}
+
+// finishRun decides whether an error out of the Telegram client run is a
+// blocked *startup* — which stdio answers with login-required mode — or a
+// genuine serve-loop failure, which is always fatal.
+//
+// The test is the phase, not the error type. Classifying by *blockedError
+// alone would cover only the two conditions our own callback can detect, and
+// gotd never runs that callback for a whole class of failures: the callback
+// fires on <-c.ready.Ready(), while restoreConnection ("corrupted key") returns
+// before the errgroup starts, and reconnectUntilClosed turns
+// AUTH_KEY_UNREGISTERED / SESSION_EXPIRED / AUTH_KEY_DUPLICATED / any 401 into
+// backoff.Permanent (telegram/connect.go:94-106) in a sibling goroutine. Those
+// are exactly the revoked-session cases notLoggedInMessage promises to handle,
+// so routing them to a hard exit would leave the host showing the bare
+// connection failure this whole mode exists to eliminate.
+//
+// (A session revoked from Telegram's Devices list often surfaces the friendlier
+// way instead — auth.Status maps a 401 on users.getUsers to Status{} with no
+// error, so the callback does run and produces a *blockedError. Both routes
+// have to land in the same place.)
+func (s *Server) finishRun(ctx context.Context, err error, served bool) error {
+	if err == nil {
+		return nil
+	}
+	if served {
 		return fmt.Errorf("running server: %w", err)
 	}
-	return nil
+	var blocked *blockedError
+	if errors.As(err, &blocked) {
+		return s.startBlocked(ctx, blocked.message)
+	}
+	msg := fmt.Sprintf("mcp-telegram: could not connect to Telegram: %v. If this is a network problem, verify connectivity and retry; if the stored session was revoked or is corrupt, `mcp-telegram logout` followed by `mcp-telegram login` recovers it.", err)
+	s.logger.Error("no Telegram access", "reason", "connect phase failed before the auth check ran", "err", err)
+	return s.startBlocked(ctx, msg)
 }
 
 // floodWaitLogger surfaces flood waits to the logs in a way that makes the
@@ -439,107 +496,26 @@ func (s *Server) buildHandlers(api *tg.Client, msgProvider *messages.Provider, c
 	return full, research
 }
 
-// startupError reports an unrecoverable startup failure in the way the active
-// transport can deliver it. Over stdio the message is written as a JSON-RPC
-// error on the initialize request — that is what MCP hosts like Claude
-// Desktop render to the user. Over HTTP there is no MCP peer yet (nothing is
-// listening), so fail fast with a plain error: the process exits non-zero and
-// the operator/platform (e.g. Cloud Run) sees an unhealthy start instead of a
-// listener that accepts connections it can never serve.
-func (s *Server) startupError(ctx context.Context, message string) error {
-	if s.transport == TransportHTTP {
+// startBlocked reports a condition that leaves the process without Telegram
+// access, in the way the active transport can actually deliver it.
+//
+// Over stdio the server comes up in login-required mode (see
+// runLoginRequired): the host shows a connected server whose single tool and
+// instructions name the problem. Over HTTP there is no MCP peer to tell —
+// nothing is listening yet — so fail fast with a plain error: the process
+// exits non-zero and the operator/platform (e.g. Cloud Run) sees an unhealthy
+// start instead of a listener that accepts connections it can never serve.
+//
+// Running the binary by hand in a terminal short-circuits too. There is no
+// MCP client on the other end of a TTY, so serving frames nobody will send
+// would just hang; returning the message lets urfave/cli print it to stderr
+// and exit — which is also what makes `mcp-telegram run` usable as a manual
+// smoke test.
+func (s *Server) startBlocked(ctx context.Context, message string) error {
+	if s.transport == TransportHTTP || isTTY(s.stdin) {
 		return errors.New(message)
 	}
-	return s.replyInitError(ctx, message)
-}
-
-// replyInitError reads newline-delimited JSON-RPC frames from stdin until it
-// sees an `initialize` request, then writes a JSON-RPC error response echoing
-// the request's id and returns. Per MCP lifecycle, `initialize` is the only
-// valid frame at this stage — `notifications/initialized` comes after the
-// initialize response — but we drop any other frames leniently.
-//
-// This bypasses the SDK on purpose: the official Go SDK's Server auto-handles
-// initialize and has no hook for replacing the response with an error, but
-// returning a JSON-RPC error on initialize is exactly what the spec's
-// Lifecycle document recommends for unrecoverable startup failures. Pulling
-// off a single frame and responding by hand is a small amount of code and
-// keeps the SDK surface clean for the happy path.
-//
-// When stdin is a TTY (the operator is running the binary directly rather
-// than an MCP host spawning it), we short-circuit: there's no peer to receive
-// the JSON-RPC error, and waiting for an initialize frame that will never
-// arrive would hang the process through Ctrl-C. Returning the message as a
-// plain Go error lets urfave/cli print it to stderr and exit cleanly.
-func (s *Server) replyInitError(ctx context.Context, message string) error {
-	if isTTY(s.stdin) {
-		return errors.New(message)
-	}
-
-	type frame struct {
-		line []byte
-		err  error
-	}
-	// The reader goroutine may outlive this function: if ctx is cancelled
-	// while it's parked inside bufio.Reader.ReadBytes (no ctx deadline), it
-	// stays alive until stdin closes. That's a bounded leak in production
-	// (main exits and reaps it) and unblocks in tests when the pipe writer
-	// closes. Don't close s.stdin here — it may be os.Stdin shared with the
-	// rest of the process.
-	ch := make(chan frame)
-	go func() {
-		reader := bufio.NewReader(s.stdin)
-		for {
-			line, err := reader.ReadBytes('\n')
-			if len(line) > 0 {
-				select {
-				case ch <- frame{line: line}:
-				case <-ctx.Done():
-					return
-				}
-			}
-			if err != nil {
-				select {
-				case ch <- frame{err: err}:
-				case <-ctx.Done():
-				}
-				return
-			}
-		}
-	}()
-
-	// Warn-level logs (below) surface protocol violations at the default Info
-	// threshold, so an operator debugging "why did my host time out" sees them.
-	for {
-		select {
-		case <-ctx.Done():
-			// The host disconnected (or was killed) before sending initialize,
-			// so the pending error message never made it out. Log it so an
-			// operator sees *why* startup aborted, not just the bare ctx.Err.
-			s.logger.Warn("startup aborted before initialize received", "pending_error", message, "err", ctx.Err())
-			return ctx.Err()
-		case f := <-ch:
-			if f.err != nil {
-				if errors.Is(f.err, io.EOF) {
-					return io.ErrUnexpectedEOF
-				}
-				return fmt.Errorf("reading initialize request: %w", f.err)
-			}
-			var req struct {
-				JSONRPC string          `json:"jsonrpc"`
-				ID      json.RawMessage `json:"id"`
-				Method  string          `json:"method"`
-			}
-			if err := json.Unmarshal(f.line, &req); err != nil {
-				s.logger.Warn("dropping unparseable pre-initialize frame", "err", err)
-				continue
-			}
-			if req.Method == "initialize" && len(req.ID) > 0 {
-				return s.writeInitErrorResponse(req.ID, message)
-			}
-			s.logger.Warn("dropping non-initialize pre-initialize frame", "method", req.Method)
-		}
-	}
+	return s.runLoginRequired(ctx, message)
 }
 
 func isTTY(r io.Reader) bool {
@@ -552,49 +528,4 @@ func isTTY(r io.Reader) bool {
 		return false
 	}
 	return stat.Mode()&os.ModeCharDevice != 0
-}
-
-// writeInitErrorResponse emits a single JSON-RPC error frame and returns a
-// non-nil error so the process exits non-zero, which is what hosts watch
-// for to decide "server failed to start".
-func (s *Server) writeInitErrorResponse(id json.RawMessage, message string) error {
-	resp := struct {
-		JSONRPC string          `json:"jsonrpc"`
-		ID      json.RawMessage `json:"id"`
-		Error   struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}{
-		JSONRPC: "2.0",
-		ID:      id,
-	}
-	resp.Error.Code = initErrorCode
-	resp.Error.Message = message
-
-	encoded, err := json.Marshal(resp)
-	if err != nil {
-		s.logger.Error("marshalling init error", "err", err)
-		return fmt.Errorf("marshalling init error: %w", err)
-	}
-	encoded = append(encoded, '\n')
-
-	// Loop until fully written: io.Writer contract permits short writes with
-	// err==nil, and a truncated frame would reach the host as the exact
-	// "Server disconnected" this function exists to avoid. Guard against
-	// pathological `n==0 && err==nil` writers so we fail loudly instead of
-	// spinning forever.
-	for written := 0; written < len(encoded); {
-		n, werr := s.stdout.Write(encoded[written:])
-		if werr != nil {
-			s.logger.Error("writing init error frame", "err", werr, "bytes_written", written+n)
-			return fmt.Errorf("writing init error: %w", werr)
-		}
-		if n == 0 {
-			s.logger.Error("init error frame writer made no progress", "bytes_written", written)
-			return fmt.Errorf("writing init error: writer made no progress")
-		}
-		written += n
-	}
-	return fmt.Errorf("mcp-telegram refused to start: %s", message)
 }

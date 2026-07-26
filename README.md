@@ -106,6 +106,10 @@ handles (`"42"` for regular, `"s:42"` for scheduled) — copy them back
 verbatim from tool outputs to follow-up calls, never parse or construct
 them manually.
 
+If your client shows a single tool called `TelegramLoginRequired` and none of
+the tools below, the server is up but Telegram is not authorized — see
+[When Telegram Isn't Authorized](#when-telegram-isnt-authorized).
+
 | Tool | Description |
 |------|-------------|
 | `GetMe` | Get current user information |
@@ -407,6 +411,30 @@ to connect claude.ai / Claude Desktop / Claude Code are in
 ## Destructive Actions
 
 Tools like `DeleteMessage` request user confirmation via [MCP elicitation](https://modelcontextprotocol.io/docs/concepts/elicitation) before proceeding. If your MCP client does not support elicitation, the server proceeds automatically without a confirmation dialog.
+
+## When Telegram Isn't Authorized
+
+Telegram sessions expire and can be revoked from **Settings → Devices → Active sessions** on any of your devices. When that happens — or when `api-id`/`api-hash` are missing — the server does **not** fail its MCP connection. Over stdio it comes up in **login-required mode**:
+
+- the host shows the server as connected, exposing a single tool named **`TelegramLoginRequired`** and no Telegram tools at all;
+- the server instructions tell the model Telegram is unavailable and what the fix is, so the first Telegram request you make gets answered with the real reason instead of a generic failure;
+- calling `TelegramLoginRequired` re-checks the live state and reports `not_configured`, `login_required`, `check_failed`, or `authorized_pending_reconnect` — the last one meaning you logged in elsewhere and only need to reconnect the server.
+
+The fix is the usual one. Use the path your host actually launches — the binary is typically wired in by absolute path and not on `$PATH`, which is why the tool's `fix_command` field hands back a paste-ready command with the real path already filled in:
+
+```bash
+/path/to/mcp-telegram login --phone +1234567890
+# then reconnect the MCP server (in Claude Code: /mcp → select this server → Reconnect)
+```
+
+This is deliberate. A stdio server that refuses its MCP connection is rendered by hosts as a bare "failed" entry with the reason buried in a log file, indistinguishable from a bad binary path — so the diagnosis is delivered as server content instead, which is the only channel a stdio server has. Two paths keep fail-fast behaviour, because they have no MCP peer to tell:
+
+- the **HTTP transport** — the process exits non-zero so Cloud Run sees an unhealthy start rather than a listener it can never serve;
+- **stdin attached to a TTY**, i.e. you ran `mcp-telegram run` yourself — the message goes to stderr and the process exits, which is what makes that command usable as a manual smoke test.
+
+Note the boundary is the TTY, not "a human started it": with stdin piped or redirected from a file, `mcp-telegram run` serves login-required mode and exits **0** on EOF. Scripted health checks should call `mcp-telegram login`/`config list`, or assert on the tool list, rather than on `run`'s exit status.
+
+In **remote (HTTP) mode** none of this applies: a dead per-user session is answered with `401` plus a `WWW-Authenticate` challenge, which sends the MCP client back through OAuth and its QR login to mint a fresh session — no restart, no CLI.
 
 ## Session Storage
 

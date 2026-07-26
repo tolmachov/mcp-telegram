@@ -134,10 +134,10 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					// Credential validation is intentionally NOT performed here.
-					// Server.Run handles missing/invalid credentials by writing
-					// a JSON-RPC error on the initialize request, which is what
-					// MCP hosts like Claude Desktop render to the user. Exiting
-					// the process here would just look like "Server disconnected".
+					// Server.Run handles missing/invalid credentials itself: over
+					// stdio it serves login-required mode, which names the problem
+					// in the server's own instructions and tool list. Exiting the
+					// process here would just look like "Server disconnected".
 					// login/logout still pre-flight-validate because they are
 					// interactive commands without an MCP peer to report to.
 					cfg := &tgclient.Config{
