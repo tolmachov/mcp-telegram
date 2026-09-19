@@ -10,7 +10,7 @@ require (
 	github.com/gotd/td v0.161.0
 	github.com/keybase/go-keychain v0.0.1
 	github.com/lithammer/fuzzysearch v1.1.8
-	github.com/mark3labs/mcp-go v0.55.1
+	github.com/mark3labs/mcp-go v1.1.0
 	github.com/modelcontextprotocol/experimental-ext-variants/go/sdk v0.0.0-20260529081704-cfc05d6f5eb8
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/stretchr/testify v1.12.1
