@@ -21,7 +21,8 @@
 - **Chat Management**: List, search, mute/unmute chats, organize into folders
 - **Messages**: Read, search, inspect context, send, draft, schedule, link-resolve, and backup messages
 - **AI Summarization**: Summarize chat conversations using multiple LLM providers
-- **Secure**: Session stored in macOS Keychain (file-based storage on Linux/Windows)
+- **Secure storage**: separate versioned Keychain items on macOS; atomic `0600`
+  session/config files in a `0700` state directory on Linux and Windows
 - **Two transports**: local **stdio** (single account) or remote **streamable HTTP** with an embedded OAuth 2.1 server and per-user Telegram QR login — multi-user and deployable to Cloud Run (see [Remote (HTTP) Mode](#remote-http-mode))
 
 ## Installation
@@ -48,18 +49,19 @@ make
 
 ### 2. Configure Environment
 
-Store credentials (macOS Keychain; plaintext JSON at `~/.local/state/mcp-telegram/config.json` with `0600` perms on Linux/Windows):
+Store credentials (one versioned Keychain item per value on macOS; one atomic
+`0600` file per value in a `0700` state directory on Linux/Windows):
 
 ```bash
 mcp-telegram config set api-id 123456789
 mcp-telegram config set api-hash abcd1234efgh5678
 ```
 
-Or use a `.env` file:
+Or export the current environment names explicitly:
 
 ```bash
-cp .env.example .env
-# Edit .env with your credentials
+export MCP_TELEGRAM_API_ID=123456789
+export MCP_TELEGRAM_API_HASH=abcd1234efgh5678
 ```
 
 ### 3. Login to Telegram
@@ -68,7 +70,8 @@ cp .env.example .env
 mcp-telegram login --phone +1234567890
 ```
 
-You'll be prompted for a verification code sent to your Telegram.
+You'll be prompted for the verification code sent by Telegram and, when the
+account has two-step verification enabled, its 2FA password.
 
 ### 4. Configure MCP Client
 
@@ -83,8 +86,8 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
       "command": "mcp-telegram",
       "args": ["run"],
       "env": {
-        "TELEGRAM_API_ID": "your_api_id",
-        "TELEGRAM_API_HASH": "your_api_hash"
+        "MCP_TELEGRAM_API_ID": "your_api_id",
+        "MCP_TELEGRAM_API_HASH": "your_api_hash"
       }
     }
   }
@@ -97,11 +100,13 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 claude mcp add telegram -- /path/to/mcp-telegram run
 ```
 
-Set environment variables in your `.env` file or pass them via `--env`.
+Set process environment variables or pass them through your MCP host. Local
+`.env` files are not loaded automatically.
 
 ## Available Tools
 
-29 tools exposed to MCP clients. Messages are identified by opaque string
+The `full` stdio surface exposes 29 tools (`full` over HTTP exposes 28 because
+filesystem backup is local-only). Messages are identified by opaque string
 handles (`"42"` for regular, `"s:42"` for scheduled) — copy them back
 verbatim from tool outputs to follow-up calls, never parse or construct
 them manually.
@@ -114,7 +119,7 @@ the tools below, the server is up but Telegram is not authorized — see
 |------|-------------|
 | `GetMe` | Get current user information |
 | `GetChats` | List all chats, groups, and channels |
-| `SearchChats` | Fuzzy search for chats by name |
+| `SearchChats` | Search local/global chats by title, username, or numeric ID, ranked with one normalized distance score |
 | `GetChatInfo` | Get detailed information about a chat |
 | `GetMessages` | Get messages from a chat (set `include_scheduled=true` to also list pending scheduled messages in a separate field) |
 | `SearchMessages` | Search within one chat by substring, with optional date / sender / media / thread filters |
@@ -122,25 +127,41 @@ the tools below, the server is up but Telegram is not authorized — see
 | `GetMessageContext` | Get messages around a specific anchor message in chronological order |
 | `GetReplies` | Get the messages of a reply thread / comment section under a root message |
 | `GetForumTopics` | List a forum supergroup's topics with opaque cursor-based pagination |
-| `SendMessage` | Send, reply, schedule, or draft a message. `mode` = `send` (default) / `schedule` / `draft`; `reply_to_message_id` works with any mode; `schedule_at` is RFC3339 |
-| `EditMessage` | Edit a message; for scheduled handles, `schedule_at` reschedules delivery in the same call |
-| `DeleteMessages` | Delete up to 100 messages per call with a per-message outcome (`deleted` / `not_found` / `forbidden`); `"s:<id>"` handles cancel pending scheduled messages |
-| `ForwardMessage` | Forward a delivered message (scheduled handles are rejected) |
+| `SendMessage` | Send, reply, schedule, or draft a message. `mode` = `send` (default) / `schedule` / `draft`; `reply_to_message_id` works with any mode; `schedule_at` is RFC3339; text is limited to 4096 UTF-16 code units |
+| `EditMessage` | Edit a message within the same 4096 UTF-16 limit; for scheduled handles, `schedule_at` reschedules delivery in the same call |
+| `DeleteMessages` | Delete up to 100 same-kind messages per call with per-message `deleted` / `not_found` / `forbidden` outcomes; `"s:<id>"` handles cancel scheduled messages; requires `confirm: true` |
+| `ForwardMessage` | Forward a delivered message; scheduled handles are rejected and `confirm: true` is required |
 | `SetReaction` | Set or clear your emoji reactions on a message (empty list clears) |
 | `JoinChat` | Join a channel/group/supergroup by @username, numeric ID, or invite link (`t.me/+hash`) |
-| `LeaveChat` | Leave a channel/group/supergroup by @username or numeric ID (asks for confirmation) |
+| `LeaveChat` | Leave a channel/group/supergroup by @username or numeric ID (requires `confirm: true`) |
 | `ResolveMessageLink` | Parse `t.me` / `tg://` message links into `chat_id`, `message_id`, and `topic_message_id` for forum links |
 | `MarkAsRead` | Mark one or more chats as read |
-| `BackupMessages` | Export messages to a text file. Filters mirror the read tools: `from_date` (inclusive) / `to_date` (exclusive) / `limit` |
+| `BackupMessages` | Local stdio only: atomically export messages under a server-configured path. Never exposed over HTTP |
 | `ResolveUsername` | Resolve @username to user/chat info |
 | `SetChatMute` | Mute or unmute chat notifications (`muted` bool + optional `duration_seconds`) |
-| `SummarizeChat` | AI-powered chat summarization via sampling / Gemini / Ollama / Anthropic |
+| `SummarizeChat` | AI-powered summarization via sampling / Gemini / Ollama / Anthropic; processes at most `max_messages` (default 2000, hard maximum 10000) and reports truncation/partial status |
 | `GetMedia` | Download photo media from a media resource URI; returns MCP image content |
 | `GetFolders` | List chat folders (dialog filters) with their ID, title, flags, and included/excluded/pinned chat IDs |
 | `CreateFolder` | Create a folder from a title plus chats and/or category flags (e.g. `include_groups`) |
-| `DeleteFolder` | Delete a folder by ID; chats are untouched (asks for confirmation) |
+| `DeleteFolder` | Delete a folder by ID; chats are untouched (requires `confirm: true`) |
 | `AddChatsToFolder` | Add chats/groups/channels to a folder by ID (@username or numeric ID) |
 | `RemoveChatsFromFolder` | Remove chats/groups/channels from a folder by ID |
+
+### Pagination, dates, and identifiers
+
+- `GetMessages`, `SearchMessages`, and `GetReplies` accept filters only on the
+  first call. For the next page, copy `next_cursor` into `cursor` and omit every
+  other field. `GetForumTopics` follows the same cursor-only continuation rule.
+- `before_message_id` is an optional first-page anchor, distinct from the
+  continuation cursor. Scheduled handles cannot be pagination anchors.
+- Cursors are opaque and versioned. Do not decode, modify, or construct them;
+  cursors from older or newer incompatible schemas are rejected.
+- Message date windows are consistently `[from_date, to_date)`:
+  `from_date` is inclusive and `to_date` is exclusive. Both are RFC3339; an
+  empty or reversed window is a validation error. To include a calendar day,
+  use midnight of the following day as `to_date`.
+- IDs returned in message DTOs and pinned resources use the same opaque string
+  handle format. Pass them back exactly as returned.
 
 ## Server Variants
 
@@ -152,11 +173,11 @@ picks one. Clients that don't understand the extension transparently get the
 
 | Variant | Status | Tools | For |
 |---------|--------|-------|-----|
-| `full` | stable (default) | all 29, full descriptions | interactive research + administration with a human |
-| `compact` | stable | all 29, descriptions trimmed to the first sentence (~50% smaller) | autonomous agents on a tight context budget |
-| `research` | experimental | 16 Telegram read-only tools, descriptions trimmed like `compact` (search, fetch, summarize, export to a local file — no send/edit/delete/forward/react, mark-as-read, join/leave, mute, or folder edits) | read-heavy context-loading agents |
+| `full` | stable (default) | all available tools (29 over stdio, 28 over HTTP), full descriptions | interactive research + administration with a human |
+| `compact` | stable | all available tools (29 over stdio, 28 over HTTP), descriptions trimmed to the first sentence (~50% smaller) | autonomous agents on a tight context budget |
+| `research` | experimental | Telegram read-only tools, descriptions trimmed like `compact` (search, fetch, summarize — no filesystem backup or Telegram mutations) | read-heavy context-loading agents; summarization may send chat data to the configured external LLM |
 
-Pin a single variant with `--variant` (or `TELEGRAM_VARIANT`) for clients that
+Pin a single variant with `--variant` (or `MCP_VARIANT`) for clients that
 can't negotiate — e.g. `--variant research` exposes only the read-only subset:
 
 ```bash
@@ -218,6 +239,10 @@ Here are some example prompts you can use with AI assistants:
 - "Resolve this Telegram message link and show me the thread context"
 
 ### Backup & Export
+
+These examples apply only to local stdio `full`/`compact` mode; HTTP and the
+`research` variant never expose filesystem backup:
+
 - "Backup my conversation with [contact] to a file"
 - "Export the last week of messages from [group]"
 - "Backup media-only updates too so nothing is silently skipped"
@@ -231,11 +256,27 @@ The `SummarizeChat` tool supports multiple LLM providers:
 - **gemini**: Google Gemini API
 - **anthropic**: Anthropic Claude API
 
+`max_messages` defaults to 2000 and cannot exceed 10000. Fetching is bounded
+and paged in batches of 100; if a later Telegram page fails, the tool summarizes
+the messages already fetched and marks the result as degraded. Every response
+includes `messages_processed` and `truncated`, with `partial` and `warning` when
+applicable.
+
+Chat messages are serialized as untrusted JSON data, separate from the system
+instructions, goal, and previous rolling summary. The server explicitly marks
+Telegram content as untrusted and tells the provider not to execute instructions
+found inside it. Sampling sends selected text to the MCP client's LLM; Gemini
+and Anthropic send it to their APIs; Ollama sends it to the configured URL,
+which may itself be remote. Providers may log, retain, or bill for content under
+their own policies. Retryable `429`/`5xx` responses are attempted at most three
+times with backoff and `Retry-After`, without exceeding the MCP request
+deadline.
+
 Configure via environment variables:
 
 ```bash
-SUMMARIZE_PROVIDER=ollama  # or: sampling, gemini, anthropic
-SUMMARIZE_MODEL=           # provider-specific model name
+MCP_SUMMARIZE_PROVIDER=ollama  # or: sampling, gemini, anthropic
+MCP_SUMMARIZE_MODEL=           # provider-specific model name
 ```
 
 ## Commands
@@ -263,33 +304,49 @@ mcp-telegram config delete api-id
 
 Allowed keys: `api-id`, `api-hash`, `anthropic`, `gemini`.
 
-Credentials resolve in this priority order (higher wins): CLI flags (`--api-id`, `--api-hash`) → environment variables (including `.env`) → secure store values set via `config set`. This lets you keep stable values in the keychain and override per-run from the command line without editing the store.
+`logout` always closes the local client and removes the local session. If
+Telegram is offline, the command reports the remote logout failure together
+with any local cleanup failure instead of leaving the local credential behind.
+
+For storable credentials, configuration resolves in this priority order: CLI
+flags → process environment → secure store → defaults. Other runtime settings
+resolve as CLI flags → process environment → defaults. The binary never reads
+`.env` files and never mutates the process environment.
 
 ## Configuration Options
 
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
-| `TELEGRAM_API_ID` | Telegram API ID | Required |
-| `TELEGRAM_API_HASH` | Telegram API Hash | Required |
-| `TELEGRAM_ALLOWED_PATHS` | Allowed directories for backups | OS app data dir |
-| `SUMMARIZE_PROVIDER` | LLM provider for summarization | `sampling` (experimental) |
-| `SUMMARIZE_MODEL` | Model name | Provider default |
-| `SUMMARIZE_BATCH_TOKENS` | Tokens per summarization batch | `8000` |
-| `OLLAMA_URL` | Ollama API URL | `http://localhost:11434` |
-| `GEMINI_API_KEY` | Google Gemini API key | - |
-| `ANTHROPIC_API_KEY` | Anthropic API key | - |
-| `TELEGRAM_MEDIA_MAX_BYTES` | Max bytes `GetMedia` will download per call (cap to avoid OOM on large attachments) | `52428800` (50 MiB) |
-| `TELEGRAM_RATE_LIMIT_RPS` | RPS ceiling for history-fetching calls to Telegram. Exceeding Telegram's FLOOD_WAIT thresholds pauses all tools. | `0` (safe built-in default) |
-| `TELEGRAM_PINNED_REFRESH_SECONDS` | Polling interval (seconds) for the pinned-chat resource watcher. `0` disables the watcher. | `30` |
-| `TELEGRAM_FLOOD_WAIT_MAX_SECONDS` | Max seconds to wait out a Telegram `FLOOD_WAIT` before failing fast with a retry-after hint. Keep below your MCP client's tool-call timeout (Claude Desktop ≈ 240s). | `60` |
+| `MCP_TELEGRAM_API_ID` | Telegram API ID | Required for login/HTTP; missing stdio credentials expose login-required mode |
+| `MCP_TELEGRAM_API_HASH` | Telegram API Hash | Required for login/HTTP; missing stdio credentials expose login-required mode |
+| `MCP_TELEGRAM_ALLOWED_PATHS` | Server-owned backup roots; client MCP roots are ignored | OS state backup dir in stdio `full`/`compact`; unused in HTTP/research |
+| `MCP_SUMMARIZE_PROVIDER` | LLM provider for summarization | `sampling` |
+| `MCP_SUMMARIZE_MODEL` | Model name | Provider default |
+| `MCP_SUMMARIZE_BATCH_TOKENS` | Tokens per summarization batch | `8000` |
+| `MCP_SUMMARIZE_OLLAMA_URL` | Ollama API URL | `http://localhost:11434` |
+| `MCP_SUMMARIZE_GEMINI_API_KEY` | Google Gemini API key | - |
+| `MCP_SUMMARIZE_ANTHROPIC_API_KEY` | Anthropic API key | - |
+| `MCP_TELEGRAM_MEDIA_MAX_BYTES` | Max bytes `GetMedia` downloads | `52428800` |
+| `MCP_TELEGRAM_RATE_LIMIT_RPS` | Telegram history RPS ceiling | `1` when unset or `0` |
+| `MCP_TELEGRAM_PINNED_REFRESH_SECONDS` | Pinned resource polling interval | `30` |
+| `MCP_TELEGRAM_FLOOD_WAIT_MAX_SECONDS` | Maximum handled `FLOOD_WAIT` | `60` |
+| `MCP_VARIANT` | Pin `full`, `compact`, or `research`; empty enables negotiation | empty |
 | `MCP_TRANSPORT` | MCP transport: `stdio` or `http` (streamable HTTP) | `stdio` |
-| `MCP_HTTP_ADDR` | Listen address for the HTTP transport | `:8080` |
-| `MCP_AUTH` | HTTP authorization mode: `none` or `telegram` | `none` |
-| `AUTH_ISSUER_URL` | Public base URL (OAuth issuer); required with `MCP_AUTH=telegram` | - |
-| `AUTH_ALLOWED_USERS` | Comma-separated Telegram user ids allowed to log in, or `*` alone to allow any account (only as private as the URL; cannot be mixed with ids); required with `MCP_AUTH=telegram` | - |
-| `AUTH_TOKEN_KEY` | Base64 32-byte master key(s) for tokens + session encryption (comma-separated for rotation); required with `MCP_AUTH=telegram` | - |
-| `AUTH_ALLOWED_REDIRECTS` | Extra exact-match HTTPS OAuth redirect URIs (loopback and claude.ai/claude.com are always allowed) | - |
-| `AUTH_SESSION_BUCKET` / `AUTH_SESSION_DIR` | Where per-user Telegram sessions live (GCS bucket or local dir; exactly one with `MCP_AUTH=telegram`) | - |
+| `MCP_HTTP_ADDR` | Explicit listen address for HTTP; when unset on Cloud Run, the server binds to injected `:$PORT` | `127.0.0.1:8080` |
+| `MCP_LOG_FORMAT` | `text` or GCP-compatible structured `json` | `text` for stdio, `json` for HTTP |
+| `MCP_LOG_LEVEL` | `debug`, `info`, `warn`, or `error` | `info` |
+| `MCP_AUTH_ISSUER_URL` | Public OAuth issuer/resource URL; required for HTTP | - |
+| `MCP_AUTH_ALLOWED_USERS` | Allowed Telegram user IDs, or `*` alone | - |
+| `MCP_AUTH_TOKEN_KEYS` | Base64 32-byte master keys, first seals and all verify | - |
+| `MCP_AUTH_ALLOWED_REDIRECTS` | Extra exact HTTPS redirect URIs | - |
+| `MCP_AUTH_TRUSTED_PROXY_HOPS` | Trusted rightmost proxy hops; zero ignores forwarding headers | `0` |
+| `MCP_AUTH_SESSION_BUCKET` / `MCP_AUTH_SESSION_DIR` | Exactly one HTTP session backend | - |
+
+`.env.example` is documentation only. Export values in the actual server
+process, pass flags, or use `config set` for supported credentials. On Cloud
+Run, `K_SERVICE` causes the application to validate and consume the platform's
+injected `PORT`; do not put `$PORT` inside `MCP_HTTP_ADDR` because Cloud Run does
+not expand environment-variable references there.
 
 ## Remote (HTTP) Mode
 
@@ -302,8 +359,8 @@ Telegram account — over the network.
 | | stdio (default) | streamable HTTP |
 |---|---|---|
 | Transport | stdio pipe | HTTP on one endpoint (`POST` for requests, `GET` for the SSE stream) |
-| Users | single account on the host | many, isolated per Telegram user |
-| Auth | none (local trust) | embedded OAuth 2.1 + Telegram QR login |
+| Users | single account on the host | many, isolated per OAuth authorization |
+| Auth | local process boundary; no OAuth | mandatory embedded OAuth 2.1 + Telegram QR login |
 | Session storage | Keychain / local file | encrypted per-user blobs in a GCS bucket or a directory |
 | Use for | local desktop clients | a shared or hosted server |
 
@@ -315,18 +372,18 @@ Registration + PKCE); when a client connects it opens the authorization page,
 which shows a **QR code**. You scan it with the Telegram app (Settings → Devices
 → Link Desktop Device), and the resulting MTProto session both proves who you
 are and becomes your working session (a 2FA-password prompt appears if your
-account has one). Only Telegram user ids listed in `AUTH_ALLOWED_USERS` may
+account has one). Only Telegram user ids listed in `MCP_AUTH_ALLOWED_USERS` may
 complete the login — everyone else is rejected after the scan and their session
 is discarded.
 
 Each authorization is an **independent session**: it gets its own encrypted
-object in the bucket and its own MCP server assembly, so one account can be
-logged in from several clients at once without them contending. The server keeps
-up to a few of an account's assemblies warm concurrently; an account actively
-switching between more sessions than that is not rejected but pays a brief
-Telegram reconnect when an idle one is rebuilt on demand. Sessions are
+record in the selected backend and its own MCP server assembly, so one account
+can be logged in from several clients at once without them contending. The
+server keeps up to four assemblies per account and 25 globally. An account
+actively switching among more than four authorizations is not rejected, but its
+least-recently-used assembly is evicted and rebuilt on demand. Sessions are
 **encrypted at rest** with AES-256-GCM under a **split key**: the key is derived
-from *both* `AUTH_TOKEN_KEY` *and* a random per-session key that lives only
+from *both* `MCP_AUTH_TOKEN_KEYS` *and* a random per-session key that lives only
 inside the client's OAuth access/refresh token (never stored server-side). As a
 result, an at-rest dump of the bucket **plus** the secret manager cannot, on its
 own, decrypt a session — a live token is also required. (Trade-offs, stated
@@ -338,9 +395,7 @@ persistent MTProto auth key, which outlives the ≤55-minute token and keeps
 working until the session is revoked or logged out. That exposure is confined to
 the one captured session; other sessions stay protected. TLS,
 `Cache-Control: no-store` on token/revoke responses, and never logging tokens
-narrow the capture window.) Pre-existing sessions from older versions stay
-readable with the master key alone and are transparently upgraded to a split-key
-session on their next token refresh.
+narrow the capture window.) Old session formats are intentionally unreadable.
 
 Session lifecycle is managed automatically: `POST /revoke` (RFC 7009) with an
 access or refresh token durably marks that authorization revoked (a tombstone
@@ -356,19 +411,25 @@ revocation — and old tombstones — are reclaimed by a background sweep once o
 than the refresh-token TTL plus a day, past which no refresh token for the
 session can still be valid.
 
-Legacy (pre-split-key) sessions are upgraded on their next token refresh by
-*moving* the session to a fresh split-key object and revoking the old legacy
-session. Consequently, if one account was logged in from several clients before
-upgrading, the first client to refresh wins the upgrade and the others re-run
-the QR login on their next refresh — this avoids ever running two Telegram
-clients on one auth key (which would trip `AUTH_KEY_DUPLICATED`).
+Authorization codes are durable single-use grants. Refresh tokens rotate by
+atomic family generation; reuse of an older generation revokes the entire
+family, Telegram session, and live pooled client. Backend failures return `503`
+without consuming or rotating a grant.
+
+The HTTP boundary limits MCP bodies to 1 MiB, headers to 32 KiB, and concurrent
+requests (including SSE streams) to 128. Header/read/idle timeouts are
+10s/30s/60s; MCP sessions expire after 10 minutes. Creating sessionless MCP
+sessions is limited per Telegram user to 10 per minute with burst 3. By default
+`MCP_AUTH_TRUSTED_PROXY_HOPS=0`, so forwarded-address headers are ignored;
+configure a positive value only when the complete trusted proxy chain is known.
+Origin protection remains enabled around the authenticated MCP endpoint to
+block cross-origin and DNS-rebinding requests.
 
 ### Try it locally
 
 ```bash
 # Issuer on loopback may use plain http:
-mcp-telegram run --transport http --http-addr :8080 \
-  --auth telegram \
+mcp-telegram run --transport http --http-addr 127.0.0.1:8080 \
   --auth-issuer-url http://localhost:8080 \
   --auth-allowed-users 123456789 \
   --auth-token-key "$(head -c 32 /dev/urandom | base64)" \
@@ -376,8 +437,8 @@ mcp-telegram run --transport http --http-addr :8080 \
 ```
 
 Then point an MCP client at `http://localhost:8080/` and complete the browser
-flow. `--auth none` (the default for HTTP) serves plain streamable HTTP with no
-authentication — only safe behind a trusted proxy. Use `*` as the sole entry in
+flow. HTTP cannot start without OAuth configuration and exactly one durable
+session backend. Use `*` as the sole entry in
 `--auth-allowed-users` to allow **any** Telegram account (the deployment is then
 only as private as its URL; `*` cannot be combined with specific ids).
 
@@ -389,20 +450,25 @@ Secret Manager, sessions in a GCS bucket. In outline:
 1. **Create a bucket** for the encrypted per-user sessions and a dedicated
    service account with `roles/storage.objectAdmin` on just that bucket.
 2. **Store two secrets** in Secret Manager — the Telegram `api_hash` and a
-   freshly generated 32-byte `AUTH_TOKEN_KEY`
+   freshly generated 32-byte `MCP_AUTH_TOKEN_KEYS`
    (`head -c 32 /dev/urandom | base64`) — and grant the service account
    `roles/secretmanager.secretAccessor` on them. The token key never leaves
    Secret Manager in plaintext. Losing it logs everyone out (sessions become
    undecryptable). Leaking it alone no longer exposes split-key sessions — those
    also need a live client token — but treat it as highly sensitive regardless:
-   it still mints tokens and decrypts any not-yet-upgraded legacy sessions.
+   it can mint tokens and decrypt current sessions when combined with their
+   per-authorization token key.
 3. **Deploy** with `gcloud run deploy --source .`, wiring the non-secret env
    from [`deploy/cloudrun.env.example`](deploy/cloudrun.env.example), the two
    secrets via `--set-secrets`, and **`--max-instances=1`** (mandatory: two
    instances loading the same MTProto session trip Telegram's
    `AUTH_KEY_DUPLICATED` and forcibly log every user out).
-4. **Set `AUTH_ISSUER_URL`** to the service URL and redeploy — tokens and
+4. **Set `MCP_AUTH_ISSUER_URL`** to the service URL and redeploy — tokens and
    session encryption are bound to the issuer value.
+
+Do not set `MCP_HTTP_ADDR=:8080` for Cloud Run. The platform injects `PORT`, and
+the application binds to `:$PORT` when `K_SERVICE` is present. An explicitly set
+`MCP_HTTP_ADDR` remains an override for non-Cloud-Run environments.
 
 Copy-paste commands, the exact IAM bindings, the token/revocation model, and how
 to connect claude.ai / Claude Desktop / Claude Code are in
@@ -410,7 +476,9 @@ to connect claude.ai / Claude Desktop / Claude Code are in
 
 ## Destructive Actions
 
-`DeleteMessages`, `ForwardMessage`, `DeleteFolder` and `LeaveChat` take a `confirm` input. With `confirm: true` (set by the model after the user agreed) they proceed directly — the only path that works in non-interactive clients. Otherwise they request confirmation via [MCP elicitation](https://modelcontextprotocol.io/docs/concepts/elicitation); a declined or unanswerable prompt returns `status: "cancelled"` and changes nothing. If your MCP client does not support elicitation, the server proceeds without a confirmation dialog.
+`DeleteMessages`, `DeleteFolder`, `LeaveChat`, and `ForwardMessage` require an
+explicit `confirm: true`. Missing confirmation always fails closed, regardless
+of the client's elicitation capabilities.
 
 ## When Telegram Isn't Authorized
 
@@ -436,14 +504,57 @@ Note the boundary is the TTY, not "a human started it": with stdin piped or redi
 
 In **remote (HTTP) mode** none of this applies: a dead per-user session is answered with `401` plus a `WWW-Authenticate` challenge, which sends the MCP client back through OAuth and its QR login to mint a fresh session — no restart, no CLI.
 
-## Session Storage
+## Session, Config, and Backup Storage
 
-- **macOS**: Stored securely in Keychain.
-- **Linux/Windows**: Stored in `~/.local/state/mcp-telegram/session.json` with `0600` file permissions. The file is **plaintext** — keep the containing user account trusted, and prefer running on macOS when handling sensitive accounts.
+Local stdio storage is intentionally versioned and does not read the previous
+formats:
 
-Config values set via `mcp-telegram config set` (API keys, Telegram credentials) follow the same backend: Keychain on macOS, plaintext JSON on Linux/Windows.
+- **macOS:** Telegram session data and every stored config key are independent
+  generic-password items under the `mcp-telegram.v2` Keychain service. Reads go
+  directly to Keychain; there is no process cache or aggregate JSON blob.
+- **Linux/Windows:** the state root is
+  `$XDG_STATE_HOME/mcp-telegram`, or
+  `$HOME/.local/state/mcp-telegram` when `XDG_STATE_HOME` is unset. The Telegram
+  session is `session-v2.bin`; config values are separate files under
+  `config-v2/`. The directory is forced to `0700`, files are `0600`, and writes
+  use fsync plus atomic replacement so concurrent updates to different keys do
+  not overwrite one another.
+- **Backups:** the default stdio backup root is `<state-root>/backups`. An
+  operator may replace it with `--allowed-paths` or
+  `MCP_TELEGRAM_ALLOWED_PATHS`. Client-provided MCP roots never expand the
+  filesystem allowlist. Targets are checked after symlink resolution and files
+  are atomically replaced. HTTP and `research` do not initialize or expose this
+  facility.
 
-> **Note on the plaintext store (Linux/Windows):** the session file grants full access to your Telegram account. Place it on an encrypted filesystem (LUKS/BitLocker) and do **not** sync `~/.local/state/mcp-telegram` (or `~/.config`) to an unencrypted cloud backup — a leaked `session.json` is equivalent to a leaked login.
+The Linux/Windows local session and config files are **plaintext** despite their
+restrictive permissions. A copied `session-v2.bin` can grant access to the
+Telegram account: keep the OS account trusted, use an encrypted filesystem
+(LUKS/BitLocker), and do not sync the state directory to an unencrypted cloud
+backup.
+
+HTTP mode does not use the local stdio session. It requires exactly one backend
+(`MCP_AUTH_SESSION_BUCKET` or `MCP_AUTH_SESSION_DIR`) and stores encrypted,
+per-authorization objects under `sessions-v3/`, durable revocation tombstones
+under `revoked-v3/`, and OAuth state under `oauth-v3/`. Session decryption
+requires both the server token key and the per-authorization key carried inside
+the sealed client token.
+
+## Breaking Upgrade
+
+This release deliberately provides no migration or compatibility layer:
+
+- previous env names and the removed `--auth`/unauthenticated HTTP modes are not
+  accepted;
+- the old aggregate Keychain blob, config JSON, local session path, HTTP tokens,
+  HTTP storage prefixes, and old opaque cursors are not read;
+- every HTTP authorization and affected local installation must be configured
+  with the current `MCP_*` names and complete a new Telegram login/QR login.
+
+Before deployment, record the previous image digest and retain the previous
+storage long enough to roll back. Delete old HTTP objects only after the new
+release passes the real-Telegram and Cloud Run smoke described in
+[deploy/README.md](deploy/README.md). A rollback must restore the previous
+binary, environment, and storage prefixes together.
 
 ## Development
 
@@ -452,6 +563,13 @@ make build            # build the binary with version metadata
 make lint             # golangci-lint
 make test             # unit tests
 make test-integration # end-to-end tests (need a real account + TEST_* vars)
+
+# Production acceptance checks used by CI
+go test -race ./...
+./scripts/check-coverage.sh
+go vet ./...
+govulncheck ./...
+go mod verify
 ```
 
 Unit tests run without credentials. The integration suite in `test/` is behind
@@ -460,6 +578,11 @@ second MCP implementation (mark3labs/mcp-go) as the client, to catch wire-level
 interop issues. It reads the `TEST_*` variables documented in `.env.example`
 (e.g. `TEST_CHAT_ID`, `TEST_GROUP_ID`) and skips any test whose variable or
 Telegram credentials are unset.
+
+CI runs ordinary tests on Linux and macOS, the race detector, package coverage
+gates, vet, golangci-lint, govulncheck, a Windows cross-build, and a pinned
+Docker build followed by a HIGH/CRITICAL vulnerability scan. The release image
+uses a checksummed Go 1.26.8 toolchain and Alpine 3.22 with security updates.
 
 ## License
 

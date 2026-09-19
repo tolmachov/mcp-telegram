@@ -15,6 +15,7 @@ import (
 )
 
 const testIssuer = "https://mcp.example.com"
+const testSID = "0123456789abcdef0123456789abcdef"
 
 func newKey(t *testing.T) string {
 	t.Helper()
@@ -31,13 +32,14 @@ func TestCipherRoundTrip(t *testing.T) {
 		t.Fatalf("NewCipher: %v", err)
 	}
 	const user = tgid.UserID(42)
+	uk := userKeyForTest(t)
 	plaintext := []byte(`{"session":"data"}`)
 
-	blob, err := c.seal(user, nil, plaintext)
+	blob, err := c.seal(user, uk, plaintext)
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
-	got, err := c.open(user, nil, blob)
+	got, err := c.open(user, uk, blob)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -52,12 +54,13 @@ func TestCipherRejectsWrongUserAndKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCipher: %v", err)
 	}
-	blob, err := c1.seal(1, nil, []byte("secret"))
+	uk := userKeyForTest(t)
+	blob, err := c1.seal(1, uk, []byte("secret"))
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 
-	if _, err := c1.open(2, nil, blob); err == nil {
+	if _, err := c1.open(2, uk, blob); err == nil {
 		t.Error("open with another user id succeeded; AAD binding is broken")
 	}
 
@@ -65,7 +68,7 @@ func TestCipherRejectsWrongUserAndKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCipher: %v", err)
 	}
-	if _, err := c2.open(1, nil, blob); err == nil {
+	if _, err := c2.open(1, uk, blob); err == nil {
 		t.Error("open with a foreign key ring succeeded")
 	}
 
@@ -73,7 +76,7 @@ func TestCipherRejectsWrongUserAndKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCipher: %v", err)
 	}
-	if _, err := cOther.open(1, nil, blob); err == nil {
+	if _, err := cOther.open(1, uk, blob); err == nil {
 		t.Error("open under another issuer succeeded; AAD binding is broken")
 	}
 }
@@ -84,7 +87,8 @@ func TestCipherRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCipher: %v", err)
 	}
-	blob, err := cOld.seal(7, nil, []byte("legacy"))
+	uk := userKeyForTest(t)
+	blob, err := cOld.seal(7, uk, []byte("session"))
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
@@ -94,12 +98,12 @@ func TestCipherRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCipher: %v", err)
 	}
-	got, err := cRotated.open(7, nil, blob)
+	got, err := cRotated.open(7, uk, blob)
 	if err != nil {
 		t.Fatalf("open after rotation: %v", err)
 	}
-	if string(got) != "legacy" {
-		t.Errorf("open after rotation = %q, want %q", got, "legacy")
+	if string(got) != "session" {
+		t.Errorf("open after rotation = %q, want %q", got, "session")
 	}
 }
 
@@ -128,31 +132,31 @@ func TestFSStore(t *testing.T) {
 	}
 	const user = tgid.UserID(100)
 
-	if _, err := fs.Session(user, "", nil).LoadSession(ctx); !errors.Is(err, session.ErrNotFound) {
+	if _, err := fs.Session(user, testSID, nil).LoadSession(ctx); !errors.Is(err, session.ErrNotFound) {
 		t.Errorf("LoadSession on empty store: err = %v, want session.ErrNotFound", err)
 	}
-	if ok, err := fs.Exists(ctx, user, ""); err != nil || ok {
+	if ok, err := fs.Exists(ctx, user, testSID); err != nil || ok {
 		t.Errorf("Exists on empty store = (%v, %v), want (false, nil)", ok, err)
 	}
 
-	if err := fs.Session(user, "", nil).StoreSession(ctx, []byte("blob")); err != nil {
+	if err := fs.Session(user, testSID, nil).StoreSession(ctx, []byte("blob")); err != nil {
 		t.Fatalf("StoreSession: %v", err)
 	}
-	if ok, err := fs.Exists(ctx, user, ""); err != nil || !ok {
+	if ok, err := fs.Exists(ctx, user, testSID); err != nil || !ok {
 		t.Errorf("Exists after store = (%v, %v), want (true, nil)", ok, err)
 	}
-	data, err := fs.Session(user, "", nil).LoadSession(ctx)
+	data, err := fs.Session(user, testSID, nil).LoadSession(ctx)
 	if err != nil || string(data) != "blob" {
 		t.Errorf("LoadSession = (%q, %v), want (%q, nil)", data, err, "blob")
 	}
 
-	if err := fs.Delete(ctx, user, ""); err != nil {
+	if err := fs.Delete(ctx, user, testSID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if ok, _ := fs.Exists(ctx, user, ""); ok {
+	if ok, _ := fs.Exists(ctx, user, testSID); ok {
 		t.Error("Exists after delete = true, want false")
 	}
-	if err := fs.Delete(ctx, user, ""); err != nil {
+	if err := fs.Delete(ctx, user, testSID); err != nil {
 		t.Errorf("Delete of a missing session should be a no-op, got %v", err)
 	}
 }
@@ -168,13 +172,13 @@ func TestFSExistsZeroByteAbsent(t *testing.T) {
 		t.Fatalf("NewFS: %v", err)
 	}
 	const user = tgid.UserID(100)
-	if err := os.WriteFile(fs.path(user, ""), nil, 0o600); err != nil {
+	if err := os.WriteFile(fs.path(user, testSID), nil, 0o600); err != nil {
 		t.Fatalf("seeding 0-byte session file: %v", err)
 	}
-	if ok, err := fs.Exists(ctx, user, ""); err != nil || ok {
+	if ok, err := fs.Exists(ctx, user, testSID); err != nil || ok {
 		t.Errorf("Exists on a 0-byte session file = (%v, %v), want (false, nil)", ok, err)
 	}
-	if _, err := fs.Session(user, "", nil).LoadSession(ctx); !errors.Is(err, session.ErrNotFound) {
+	if _, err := fs.Session(user, testSID, nil).LoadSession(ctx); !errors.Is(err, session.ErrNotFound) {
 		t.Errorf("LoadSession on a 0-byte file: err = %v, want session.ErrNotFound", err)
 	}
 }
@@ -193,11 +197,11 @@ func TestListSkipsNonCanonicalNames(t *testing.T) {
 		t.Fatalf("NewFS: %v", err)
 	}
 	const user = tgid.UserID(7)
-	if err := fs.Session(user, "", nil).StoreSession(ctx, []byte("live")); err != nil {
+	if err := fs.Session(user, testSID, nil).StoreSession(ctx, []byte("live")); err != nil {
 		t.Fatalf("StoreSession: %v", err)
 	}
 	for _, foreign := range []string{"07.bin", "+7.bin"} {
-		if err := os.WriteFile(filepath.Join(dir, foreign), []byte("foreign"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(fs.sessionsDir(), foreign), []byte("foreign"), 0o600); err != nil {
 			t.Fatalf("seeding %s: %v", foreign, err)
 		}
 	}
@@ -206,8 +210,8 @@ func TestListSkipsNonCanonicalNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(refs) != 1 || refs[0].UserID != user || refs[0].SID != "" {
-		t.Errorf("List = %+v, want exactly the canonical {7, \"\"} ref (non-canonical names must be skipped)", refs)
+	if len(refs) != 1 || refs[0].UserID != user || refs[0].SID != testSID {
+		t.Errorf("List = %+v, want exactly the canonical current-format ref", refs)
 	}
 }
 
@@ -220,13 +224,14 @@ func TestEncryptedStore(t *testing.T) {
 	backend := NewMemory()
 	store := Encrypted(backend, cipher)
 	const user = tgid.UserID(5)
+	uk := userKeyForTest(t)
 
-	if err := store.Session(user, "", nil).StoreSession(ctx, []byte("plaintext")); err != nil {
+	if err := store.Session(user, testSID, uk).StoreSession(ctx, []byte("plaintext")); err != nil {
 		t.Fatalf("StoreSession: %v", err)
 	}
 
 	// The backend must hold ciphertext, not the plaintext.
-	raw, err := backend.Session(user, "", nil).LoadSession(ctx)
+	raw, err := backend.Session(user, testSID, nil).LoadSession(ctx)
 	if err != nil {
 		t.Fatalf("backend LoadSession: %v", err)
 	}
@@ -234,7 +239,7 @@ func TestEncryptedStore(t *testing.T) {
 		t.Fatal("backend stores plaintext; encryption wrapper is not applied")
 	}
 
-	got, err := store.Session(user, "", nil).LoadSession(ctx)
+	got, err := store.Session(user, testSID, uk).LoadSession(ctx)
 	if err != nil || string(got) != "plaintext" {
 		t.Errorf("LoadSession = (%q, %v), want (%q, nil)", got, err, "plaintext")
 	}
@@ -242,10 +247,10 @@ func TestEncryptedStore(t *testing.T) {
 	// A blob that cannot be decrypted must surface as ErrCorruptSession —
 	// distinct from ErrNotFound so the caller does not mistake a key/issuer
 	// misconfiguration for "new user" and destroy a recoverable session.
-	if err := backend.Session(user, "", nil).StoreSession(ctx, []byte("garbage")); err != nil {
+	if err := backend.Session(user, testSID, nil).StoreSession(ctx, []byte("garbage")); err != nil {
 		t.Fatalf("backend StoreSession: %v", err)
 	}
-	_, err = store.Session(user, "", nil).LoadSession(ctx)
+	_, err = store.Session(user, testSID, uk).LoadSession(ctx)
 	if !errors.Is(err, ErrCorruptSession) {
 		t.Errorf("LoadSession of corrupt blob: err = %v, want ErrCorruptSession", err)
 	}
@@ -264,12 +269,12 @@ func TestEncryptedStorePreservesErrNotFound(t *testing.T) {
 		t.Fatalf("NewCipher: %v", err)
 	}
 	store := Encrypted(NewMemory(), cipher)
-	if _, err := store.Session(1, "", nil).LoadSession(ctx); !errors.Is(err, session.ErrNotFound) {
+	if _, err := store.Session(1, testSID, userKeyForTest(t)).LoadSession(ctx); !errors.Is(err, session.ErrNotFound) {
 		t.Errorf("LoadSession on empty encrypted store: err = %v, want session.ErrNotFound", err)
 	}
 }
 
-// TestFSSplitKeyNotMasterDecryptable is the end-to-end at-rest-dump check: a v2
+// TestFSSplitKeyNotMasterDecryptable is the end-to-end at-rest-dump check: a v3
 // session written to disk begins with the version byte and cannot be decrypted
 // by a store that holds only the master key (no per-session key). This is the
 // whole point — a leaked bucket + secret, without a live token, is insufficient.
@@ -295,19 +300,19 @@ func TestFSSplitKeyNotMasterDecryptable(t *testing.T) {
 		t.Fatalf("StoreSession: %v", err)
 	}
 
-	raw, err := os.ReadFile(filepath.Join(dir, user.String()+"."+sid+".bin")) //nolint:gosec // test temp dir + numeric id
+	raw, err := os.ReadFile(filepath.Join(backend.sessionsDir(), user.String()+"."+sid+".bin")) //nolint:gosec // test temp dir + numeric id
 	if err != nil {
-		t.Fatalf("reading v2 session file: %v", err)
+		t.Fatalf("reading v3 session file: %v", err)
 	}
-	if len(raw) == 0 || raw[0] != sessionBlobV2 {
-		t.Fatalf("on-disk v2 blob must start with version byte %#x, got %#v", sessionBlobV2, raw[:1])
+	if len(raw) == 0 || raw[0] != sessionBlobVersion {
+		t.Fatalf("on-disk v3 blob must start with version byte %#x, got %#v", sessionBlobVersion, raw[:1])
 	}
 
 	// An attacker with the bucket + the master key but no token (empty userKey)
 	// cannot read the session.
 	masterOnly := Encrypted(backend, cipher)
 	if _, err := masterOnly.Session(user, sid, nil).LoadSession(ctx); !errors.Is(err, ErrCorruptSession) {
-		t.Errorf("master-only load of a v2 session: err = %v, want ErrCorruptSession", err)
+		t.Errorf("master-only load of a v3 session: err = %v, want ErrCorruptSession", err)
 	}
 	// With the per-session key it decrypts.
 	got, err := store.Session(user, sid, uk).LoadSession(ctx)
@@ -316,12 +321,7 @@ func TestFSSplitKeyNotMasterDecryptable(t *testing.T) {
 	}
 }
 
-// TestStoreRejectsMismatchedPairing pins the legacy-pairing invariant enforced
-// at the write: a legacy object name (empty sid) may only be sealed master-only
-// (empty userKey), and a suffixed object name (non-empty sid) may only be sealed
-// split-key (non-empty userKey). Either mismatch is refused before it can write
-// a blob that would be unreadable on its next load.
-func TestStoreRejectsMismatchedPairing(t *testing.T) {
+func TestStoreRejectsMissingSessionIdentity(t *testing.T) {
 	ctx := t.Context()
 	cipher, err := NewCipher([]string{newKey(t)}, testIssuer)
 	if err != nil {
@@ -331,13 +331,11 @@ func TestStoreRejectsMismatchedPairing(t *testing.T) {
 	const user = tgid.UserID(88)
 	const sid = "0123456789abcdef0123456789abcdef"
 
-	// Legacy name + per-session key: would seal a v2 blob under the legacy name.
 	if err := store.Session(user, "", userKeyForTest(t)).StoreSession(ctx, []byte("x")); err == nil {
-		t.Error("storing a keyed session under the legacy (empty-sid) name must be refused")
+		t.Error("storing with an empty session id must be refused")
 	}
-	// Suffixed name + no key: would seal a v1 blob under a suffixed name.
 	if err := store.Session(user, sid, nil).StoreSession(ctx, []byte("x")); err == nil {
-		t.Error("storing an unkeyed session under a suffixed name must be refused")
+		t.Error("storing without a per-session key must be refused")
 	}
 	// Neither mismatched write may have landed.
 	refs, err := store.List(ctx)
@@ -349,7 +347,7 @@ func TestStoreRejectsMismatchedPairing(t *testing.T) {
 	}
 }
 
-// TestCipherRejectsWrongLengthUserKey pins that a non-empty v2 key must be
+// TestCipherRejectsWrongLengthUserKey pins that a v3 user key must be
 // exactly userKeyLen bytes: a short/oversized key fails closed on both seal and
 // open rather than silently sealing a weak split-key blob.
 func TestCipherRejectsWrongLengthUserKey(t *testing.T) {
@@ -405,9 +403,8 @@ func TestEncryptedStoreRejectsInvalidSID(t *testing.T) {
 	if _, err := store.Revoked(ctx, user, bad); err == nil {
 		t.Error("Revoked(invalid sid) must fail")
 	}
-	// The legacy empty sid and a well-formed sid remain accepted.
-	if _, err := store.Exists(ctx, user, ""); err != nil {
-		t.Errorf("Exists(legacy empty sid) must be accepted: %v", err)
+	if _, err := store.Exists(ctx, user, ""); err == nil {
+		t.Error("Exists(empty sid) must fail")
 	}
 	if _, err := store.Exists(ctx, user, "0123456789abcdef0123456789abcdef"); err != nil {
 		t.Errorf("Exists(valid sid) must be accepted: %v", err)
@@ -490,7 +487,7 @@ func TestValidSID(t *testing.T) {
 		}
 	}
 	invalid := []string{
-		"",                                  // empty (legacy is handled separately, not via ValidSID)
+		"",                                  // empty ids are never valid
 		"0123456789abcdef0123456789abcde",   // 31 chars
 		"0123456789abcdef0123456789abcdef0", // 33 chars
 		"0123456789ABCDEF0123456789abcdef",  // uppercase
@@ -505,8 +502,7 @@ func TestValidSID(t *testing.T) {
 	}
 }
 
-// TestFSList pins the listing contract on the FS backend: legacy and suffixed
-// sessions are attributed correctly, foreign files are skipped.
+// TestFSList pins the listing contract on the FS backend.
 func TestFSList(t *testing.T) {
 	ctx := t.Context()
 	dir := filepath.Join(t.TempDir(), "sessions")
@@ -516,9 +512,6 @@ func TestFSList(t *testing.T) {
 	}
 
 	const sidA = "0123456789abcdef0123456789abcdef"
-	if err := fs.Session(1, "", nil).StoreSession(ctx, []byte("legacy")); err != nil {
-		t.Fatalf("store legacy: %v", err)
-	}
 	if err := fs.Session(1, sidA, nil).StoreSession(ctx, []byte("a")); err != nil {
 		t.Fatalf("store a: %v", err)
 	}
@@ -529,7 +522,7 @@ func TestFSList(t *testing.T) {
 	// operator's backup with a numeric uid but a non-sid suffix, which the
 	// sweeper must never treat as (and delete as) a session.
 	for _, stray := range []string{"README.txt", "not-a-number.bin", "1.bak.bin", "1.backup-2026.bin"} {
-		if err := os.WriteFile(filepath.Join(dir, stray), []byte("x"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(fs.sessionsDir(), stray), []byte("x"), 0o600); err != nil {
 			t.Fatalf("writing stray file %s: %v", stray, err)
 		}
 	}
@@ -545,7 +538,7 @@ func TestFSList(t *testing.T) {
 			t.Errorf("ref %v has zero UpdatedAt", r)
 		}
 	}
-	want := []string{"1|", "1|" + sidA, "2|" + sidA}
+	want := []string{"1|" + sidA, "2|" + sidA}
 	if len(refs) != len(want) {
 		t.Fatalf("List returned %d refs (%v), want %d", len(refs), got, len(want))
 	}
@@ -564,10 +557,7 @@ func TestMemoryList(t *testing.T) {
 	stamp := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	m.Now = func() time.Time { return stamp }
 
-	if err := m.Session(7, "", nil).StoreSession(ctx, []byte("legacy")); err != nil {
-		t.Fatalf("store legacy: %v", err)
-	}
-	if err := m.Session(7, "aa", nil).StoreSession(ctx, []byte("a")); err != nil {
+	if err := m.Session(7, testSID, nil).StoreSession(ctx, []byte("a")); err != nil {
 		t.Fatalf("store a: %v", err)
 	}
 
@@ -575,8 +565,8 @@ func TestMemoryList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(refs) != 2 {
-		t.Fatalf("List returned %d refs, want 2", len(refs))
+	if len(refs) != 1 {
+		t.Fatalf("List returned %d refs, want 1", len(refs))
 	}
 	for _, r := range refs {
 		if r.UserID != 7 || !r.UpdatedAt.Equal(stamp) {
@@ -594,10 +584,7 @@ func userKeyForTest(t *testing.T) []byte {
 	return k
 }
 
-// TestCipherV2SplitKey exercises the split-key path: a v2 blob opens only with
-// the exact per-session key it was sealed under, and never with a wrong key or
-// with the legacy master-only path.
-func TestCipherV2SplitKey(t *testing.T) {
+func TestCipherV3SplitKey(t *testing.T) {
 	c, err := NewCipher([]string{newKey(t)}, testIssuer)
 	if err != nil {
 		t.Fatalf("NewCipher: %v", err)
@@ -608,33 +595,33 @@ func TestCipherV2SplitKey(t *testing.T) {
 
 	blob, err := c.seal(user, uk, plaintext)
 	if err != nil {
-		t.Fatalf("seal v2: %v", err)
+		t.Fatalf("seal v3: %v", err)
 	}
-	if len(blob) == 0 || blob[0] != sessionBlobV2 {
-		t.Fatalf("v2 blob must start with the version byte %#x, got %#v", sessionBlobV2, blob[:1])
+	if len(blob) == 0 || blob[0] != sessionBlobVersion {
+		t.Fatalf("v3 blob must start with the version byte %#x, got %#v", sessionBlobVersion, blob[:1])
 	}
 
 	got, err := c.open(user, uk, blob)
 	if err != nil || string(got) != string(plaintext) {
-		t.Fatalf("open v2 = (%q, %v), want (%q, nil)", got, err, plaintext)
+		t.Fatalf("open v3 = (%q, %v), want (%q, nil)", got, err, plaintext)
 	}
 
 	// Wrong per-session key: the master alone is not enough.
 	if _, err := c.open(user, userKeyForTest(t), blob); !errors.Is(err, ErrCorruptSession) {
-		t.Errorf("open v2 with wrong user key: err = %v, want ErrCorruptSession", err)
+		t.Errorf("open v3 with wrong user key: err = %v, want ErrCorruptSession", err)
 	}
-	// Empty key (legacy path) on a v2 blob: must not decrypt.
+	// A missing split-key share must never decrypt a v3 blob.
 	if _, err := c.open(user, nil, blob); !errors.Is(err, ErrCorruptSession) {
-		t.Errorf("open v2 with empty key: err = %v, want ErrCorruptSession", err)
+		t.Errorf("open v3 with empty key: err = %v, want ErrCorruptSession", err)
 	}
 }
 
-// TestCipherV2WrongUserRejected pins the v2 AAD's userID binding on its own:
-// the SAME per-session key opening another user's blob must fail. The v2 key
+// TestCipherV3WrongUserRejected pins the v3 AAD's userID binding on its own:
+// the SAME per-session key opening another user's blob must fail. The v3 key
 // derivation does not involve the user id at all, so only the AAD stands
-// between a copied blob and a cross-user decrypt — dropping userID from the v2
+// between a copied blob and a cross-user decrypt — dropping userID from the v3
 // AAD would pass every other test.
-func TestCipherV2WrongUserRejected(t *testing.T) {
+func TestCipherV3WrongUserRejected(t *testing.T) {
 	c, err := NewCipher([]string{newKey(t)}, testIssuer)
 	if err != nil {
 		t.Fatalf("NewCipher: %v", err)
@@ -642,33 +629,27 @@ func TestCipherV2WrongUserRejected(t *testing.T) {
 	uk := userKeyForTest(t)
 	blob, err := c.seal(tgid.UserID(42), uk, []byte("mtproto-session"))
 	if err != nil {
-		t.Fatalf("seal v2: %v", err)
+		t.Fatalf("seal v3: %v", err)
 	}
 	if _, err := c.open(tgid.UserID(43), uk, blob); !errors.Is(err, ErrCorruptSession) {
-		t.Errorf("open user 42's v2 blob as user 43 with the same key: err = %v, want ErrCorruptSession", err)
+		t.Errorf("open user 42's v3 blob as user 43 with the same key: err = %v, want ErrCorruptSession", err)
 	}
 }
 
-// TestCipherV1BlobRejectedWithUserKey guards the reverse cross-derivation: a
-// legacy v1 blob must not be openable via the v2 path.
-func TestCipherV1BlobRejectedWithUserKey(t *testing.T) {
+func TestCipherOldBlobRejected(t *testing.T) {
 	c, err := NewCipher([]string{newKey(t)}, testIssuer)
 	if err != nil {
 		t.Fatalf("NewCipher: %v", err)
 	}
-	const user = tgid.UserID(9)
-	blob, err := c.seal(user, nil, []byte("legacy"))
-	if err != nil {
-		t.Fatalf("seal v1: %v", err)
-	}
-	if _, err := c.open(user, userKeyForTest(t), blob); !errors.Is(err, ErrCorruptSession) {
-		t.Errorf("open v1 blob via v2 path: err = %v, want ErrCorruptSession", err)
+	oldBlob := append([]byte{c.keys[0].id}, make([]byte, 64)...)
+	if _, err := c.open(tgid.UserID(9), userKeyForTest(t), oldBlob); !errors.Is(err, ErrCorruptSession) {
+		t.Errorf("open old blob: err = %v, want ErrCorruptSession", err)
 	}
 }
 
-// TestCipherV2Rotation pins that per-session v2 blobs survive a master-key
+// TestCipherV3Rotation pins that per-session v3 blobs survive a master-key
 // rotation: the key-ID byte still selects the right master to re-derive from.
-func TestCipherV2Rotation(t *testing.T) {
+func TestCipherV3Rotation(t *testing.T) {
 	oldKey, newKeyStr := newKey(t), newKey(t)
 	cOld, err := NewCipher([]string{oldKey}, testIssuer)
 	if err != nil {
@@ -676,17 +657,17 @@ func TestCipherV2Rotation(t *testing.T) {
 	}
 	const user = tgid.UserID(7)
 	uk := userKeyForTest(t)
-	blob, err := cOld.seal(user, uk, []byte("v2-legacy"))
+	blob, err := cOld.seal(user, uk, []byte("v3-current"))
 	if err != nil {
-		t.Fatalf("seal v2: %v", err)
+		t.Fatalf("seal v3: %v", err)
 	}
 	cRotated, err := NewCipher([]string{newKeyStr, oldKey}, testIssuer)
 	if err != nil {
 		t.Fatalf("NewCipher: %v", err)
 	}
 	got, err := cRotated.open(user, uk, blob)
-	if err != nil || string(got) != "v2-legacy" {
-		t.Fatalf("open v2 after rotation = (%q, %v), want (%q, nil)", got, err, "v2-legacy")
+	if err != nil || string(got) != "v3-current" {
+		t.Fatalf("open v3 after rotation = (%q, %v), want (%q, nil)", got, err, "v3-current")
 	}
 }
 

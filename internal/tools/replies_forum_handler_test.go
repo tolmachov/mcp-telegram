@@ -24,8 +24,8 @@ func TestRepliesGetHandlerValidation(t *testing.T) {
 		{"empty message_id", GetRepliesInput{ChatID: 1}, "invalid message_id"},
 		{"non-numeric message_id", GetRepliesInput{ChatID: 1, MessageID: "abc"}, "invalid message_id"},
 		{"scheduled message_id", GetRepliesInput{ChatID: 1, MessageID: "s:42"}, "no reply thread"},
-		{"non-numeric offset_id", GetRepliesInput{ChatID: 1, MessageID: "1", OffsetID: "xx"}, "invalid message_id"},
-		{"scheduled offset_id", GetRepliesInput{ChatID: 1, MessageID: "1", OffsetID: "s:5"}, "offset_id cannot reference a scheduled"},
+		{"non-numeric before_message_id", GetRepliesInput{ChatID: 1, MessageID: "1", BeforeMessageID: "xx"}, "invalid message_id"},
+		{"scheduled before_message_id", GetRepliesInput{ChatID: 1, MessageID: "1", BeforeMessageID: "s:5"}, "before_message_id cannot reference a scheduled"},
 		{"bad from_date", GetRepliesInput{ChatID: 1, MessageID: "1", FromDate: "nope"}, "invalid from_date"},
 		{"from after to", GetRepliesInput{ChatID: 1, MessageID: "1", FromDate: "2026-02-01T00:00:00Z", ToDate: "2026-01-01T00:00:00Z"}, "window is empty"},
 	}
@@ -52,7 +52,7 @@ func TestForumTopicsGetHandlerValidation(t *testing.T) {
 		wantErrPart string
 	}{
 		{"zero chat_id", GetForumTopicsInput{}, "chat_id is required"},
-		{"invalid cursor", GetForumTopicsInput{ChatID: 1, Cursor: "!!!"}, "invalid cursor"},
+		{"invalid cursor", GetForumTopicsInput{Cursor: "!!!"}, "invalid cursor"},
 	}
 
 	for _, tc := range cases {

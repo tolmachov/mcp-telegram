@@ -15,6 +15,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
+	"github.com/tolmachov/mcp-telegram/internal/presentation"
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
@@ -53,8 +54,8 @@ type PinnedChatsProvider struct {
 
 // PinnedChatResource represents a pinned chat resource content.
 type PinnedChatResource struct {
-	Chat     tgdata.ChatInfo    `json:"chat"`
-	Messages []messages.Message `json:"messages"`
+	Chat     tgdata.ChatInfo        `json:"chat"`
+	Messages []presentation.Message `json:"messages"`
 }
 
 // NewPinnedChatsProvider creates a new PinnedChatsProvider. The logger is
@@ -249,10 +250,11 @@ func (p *PinnedChatsProvider) handlePinnedChat(
 		return nil, fmt.Errorf("fetching messages: %w", err)
 	}
 
-	result := PinnedChatResource{
-		Chat:     chat,
-		Messages: lastMessages.Messages,
+	presented := make([]presentation.Message, 0, len(lastMessages.Messages))
+	for _, message := range lastMessages.Messages {
+		presented = append(presented, presentation.FromMessage(message, false))
 	}
+	result := PinnedChatResource{Chat: chat, Messages: presented}
 
 	data, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {

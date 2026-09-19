@@ -1,9 +1,11 @@
 package tools
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -14,7 +16,7 @@ import (
 // of this logic that had already drifted apart (notably their version policy);
 // they now share encodeCursor/decodeCursor — with the version check folded into
 // decodeCursor via the versioned interface — so the wire format and
-// compatibility rules stay identical.
+// exact-version validation rules stay identical.
 
 // encodeCursor renders a JSON-serialisable envelope as an opaque base64url
 // string. RawURLEncoding (no padding) keeps the token count down since the
@@ -39,17 +41,14 @@ type versioned interface {
 }
 
 // decodeCursor performs the structural half of cursor parsing shared by every
-// tool: reject empty/whitespace input, base64url-decode, JSON-unmarshal into
-// the envelope T, then enforce the version policy against current. Field-level
-// validation (offsets, peer kinds) stays with the caller. DisallowUnknownFields
-// is deliberately NOT used — the version tag, not a strict decoder, is the
-// forward-compat mechanism, so a future cursor that adds an optional field
-// still decodes here and is then accepted/rejected purely on its version.
+// tool: reject empty/whitespace input, base64url-decode, strictly decode JSON
+// into the envelope T, then enforce the version policy against current.
+// Unknown fields are rejected: a changed cursor shape requires a new version,
+// and old/new cursor formats are never accepted by accident.
 //
-// Version policy: a cursor at or below current is accepted (version 0 means a
-// pre-versioning cursor and is tolerated); a higher version comes from a newer
-// build we cannot interpret, and the returned error tells the LLM to restart
-// pagination rather than loop on an offset it can't decode.
+// Version policy is deliberately exact: cursor schemas are not migrated.
+// Deployments that change a schema invalidate in-flight cursors and clients
+// restart pagination without one.
 func decodeCursor[T versioned](s string, current int) (T, error) {
 	var env T
 	if s == "" {
@@ -63,11 +62,17 @@ func decodeCursor[T versioned](s string, current int) (T, error) {
 	if err != nil {
 		return env, fmt.Errorf("cursor is not valid base64url: %w", err)
 	}
-	if err := json.Unmarshal(raw, &env); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&env); err != nil {
 		return env, fmt.Errorf("cursor payload is not valid JSON: %w", err)
 	}
-	if got := env.cursorVersion(); got > current {
-		return env, fmt.Errorf("cursor version %d is newer than supported (%d); restart pagination without the cursor", got, current)
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return env, fmt.Errorf("cursor payload contains trailing JSON")
+	}
+	if got := env.cursorVersion(); got != current {
+		return env, fmt.Errorf("cursor version %d is unsupported (expected %d); restart pagination without the cursor", got, current)
 	}
 	return env, nil
 }

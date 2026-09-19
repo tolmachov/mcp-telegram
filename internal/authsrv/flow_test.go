@@ -19,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gotd/td/session"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 	"github.com/stretchr/testify/assert"
@@ -196,10 +195,15 @@ func testConfig(t *testing.T) *Config {
 // limiter is made effectively unlimited so protocol tests are not coupled to
 // the budget.
 func newTestServer(t *testing.T, cfg *Config, store sessionstore.Store, start StartLoginFunc) (*AuthServer, *httptest.Server) {
+	return newTestServerWithInvalidator(t, cfg, store, start, nil)
+}
+
+func newTestServerWithInvalidator(t *testing.T, cfg *Config, store sessionstore.Store, start StartLoginFunc, invalidate func(tgid.UserID, string)) (*AuthServer, *httptest.Server) {
 	t.Helper()
-	a, err := New(cfg, slog.New(slog.DiscardHandler), store, start)
+	a, err := New(cfg, slog.New(slog.DiscardHandler), store, start, invalidate)
 	require.NoError(t, err)
 	t.Cleanup(a.Close)
+	require.NoError(t, a.Start(t.Context()))
 	a.limiter = newIPRateLimiter(100000, 100000)
 
 	mux := http.NewServeMux()
@@ -333,6 +337,42 @@ func postToken(t *testing.T, ts *httptest.Server, form url.Values) (*tokenRespon
 	return nil, &oe, resp.StatusCode
 }
 
+func TestAuthorizationCodeIsSingleUse(t *testing.T) {
+	store := sessionstore.NewMemory()
+	flow := newFakeFlow()
+	_, ts := newTestServer(t, testConfig(t), store, startOne(flow))
+	clientID := registerClient(t, ts, testRedirectURI)
+	verifier, challenge := pkcePair()
+	loginID := startAuthorize(t, ts, clientID, challenge, "state")
+	code, _ := finishLogin(t, ts, loginID, flow, LoginUser{ID: allowedUser}, []byte("session"))
+
+	_, _, status := redeemCode(t, ts, clientID, testRedirectURI, code, verifier)
+	require.Equal(t, http.StatusOK, status)
+	_, oauthErr, status := redeemCode(t, ts, clientID, testRedirectURI, code, verifier)
+	require.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "invalid_grant", oauthErr.Error)
+}
+
+func TestRefreshReplayRevokesWholeGrant(t *testing.T) {
+	store := sessionstore.NewMemory()
+	flow := newFakeFlow()
+	a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
+	clientID := registerClient(t, ts, testRedirectURI)
+	initial, cc := loginAndRedeem(t, a, ts, flow, clientID)
+
+	rotated, _, status := refreshGrant(t, ts, clientID, initial.RefreshToken)
+	require.Equal(t, http.StatusOK, status)
+	_, oauthErr, status := refreshGrant(t, ts, clientID, initial.RefreshToken)
+	require.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "invalid_grant", oauthErr.Error)
+	exists, err := store.Exists(context.Background(), allowedUser, cc.SessionID)
+	require.NoError(t, err)
+	assert.False(t, exists, "replay must revoke and delete the Telegram session")
+	_, oauthErr, status = refreshGrant(t, ts, clientID, rotated.RefreshToken)
+	require.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "invalid_grant", oauthErr.Error)
+}
+
 func TestMetadataEndpoints(t *testing.T) {
 	_, ts := newTestServer(t, testConfig(t), sessionstore.NewMemory(), neverStartLogin)
 
@@ -408,7 +448,7 @@ func TestFullAuthorizationFlow(t *testing.T) {
 	// per-session key, both carried in the code.
 	cc, err := openBlob(a.sealer, codeBlob, code, a.now())
 	require.NoError(t, err)
-	require.True(t, validSessionID(cc.SessionID), "code must carry a well-formed session id")
+	require.True(t, sessionstore.ValidSID(cc.SessionID), "code must carry a well-formed session id")
 	require.Len(t, cc.SessionKey, sessionKeyLen)
 	stored, err := store.Session(allowedUser, cc.SessionID, cc.SessionKey).LoadSession(context.Background())
 	require.NoError(t, err)
@@ -539,7 +579,9 @@ func TestAuthorizeCapacityLimit(t *testing.T) {
 	for i := range flows {
 		flows[i] = newFakeFlow()
 	}
-	_, ts := newTestServer(t, testConfig(t), sessionstore.NewMemory(), startOne(flows...))
+	cfg := testConfig(t)
+	cfg.TrustedProxyHops = 1
+	_, ts := newTestServer(t, cfg, sessionstore.NewMemory(), startOne(flows...))
 	clientID := registerClient(t, ts, testRedirectURI)
 	_, challenge := pkcePair()
 
@@ -568,12 +610,11 @@ func TestAuthorizeCapacityLimit(t *testing.T) {
 		_ = resp.Body.Close()
 	}
 
-	// One over the global cap (from yet another IP): 503, and the just-started
-	// flow is aborted.
+	// One over the global cap is rejected before an MTProto flow is started.
 	resp := authorize("10.0.1.1", "over")
 	_ = resp.Body.Close()
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
-	assert.True(t, flows[maxPendingLogins].wasAborted(), "over-capacity flow must be aborted")
+	assert.False(t, flows[maxPendingLogins].wasAborted(), "over-capacity flow must never be started")
 }
 
 func TestAddPendingPerIPCap(t *testing.T) {
@@ -582,15 +623,15 @@ func TestAddPendingPerIPCap(t *testing.T) {
 	// A single IP may hold at most maxPendingLoginsPerIP concurrent slots —
 	// well below the global cap, so one IP cannot lock everyone else out.
 	for i := range maxPendingLoginsPerIP {
-		_, err := a.addPending("blob", newFakeFlow(), "9.9.9.9")
+		err := a.addPending("blob", newFakeFlow(), "9.9.9.9")
 		require.NoErrorf(t, err, "slot %d for one IP should be accepted", i)
 	}
-	if _, err := a.addPending("blob", newFakeFlow(), "9.9.9.9"); !errors.Is(err, errTooManyLogins) {
+	if err := a.addPending("blob", newFakeFlow(), "9.9.9.9"); !errors.Is(err, errTooManyLogins) {
 		t.Fatalf("over-cap request from the same IP = %v, want errTooManyLogins", err)
 	}
 
 	// A different IP is unaffected while global capacity remains.
-	if _, err := a.addPending("blob", newFakeFlow(), "8.8.8.8"); err != nil {
+	if err := a.addPending("blob", newFakeFlow(), "8.8.8.8"); err != nil {
 		t.Fatalf("a different IP should still be admitted: %v", err)
 	}
 }
@@ -1008,78 +1049,6 @@ func TestRevoke(t *testing.T) {
 		assert.True(t, exists, "a client_id mismatch must not delete the session")
 	})
 
-	t.Run("legacy token deletes the legacy object", func(t *testing.T) {
-		store := sessionstore.NewMemory()
-		a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
-		require.NoError(t, store.Session(allowedUser, "", nil).StoreSession(context.Background(), []byte("legacy")))
-		now := a.now()
-		legacyRefresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
-			Subject: allowedUser.String(), ClientID: "mcp_cid_x",
-			IssuedAt: now.Unix(), LoginAt: now.Unix(),
-		})
-		require.NoError(t, err)
-
-		require.Equal(t, http.StatusOK, revokeToken(t, ts, url.Values{"token": {legacyRefresh}}))
-		exists, err := store.Exists(context.Background(), allowedUser, "")
-		require.NoError(t, err)
-		assert.False(t, exists, "revoking a legacy token must delete the legacy object")
-	})
-}
-
-// failLegacyRevokeStore wraps Memory and fails Revoke of the legacy (sid "")
-// session for one user, to exercise the upgrade's rollback path. It counts
-// deletes of suffixed objects so a test can prove the rollback Delete fired.
-type failLegacyRevokeStore struct {
-	*sessionstore.Memory
-	failUser   tgid.UserID
-	sidDeletes atomic.Int64
-}
-
-func (s *failLegacyRevokeStore) Revoke(ctx context.Context, userID tgid.UserID, sid string) error {
-	if userID == s.failUser && sid == "" {
-		return errors.New("simulated legacy revoke failure")
-	}
-	return s.Memory.Revoke(ctx, userID, sid)
-}
-
-func (s *failLegacyRevokeStore) Delete(ctx context.Context, userID tgid.UserID, sid string) error {
-	if sid != "" {
-		s.sidDeletes.Add(1)
-	}
-	return s.Memory.Delete(ctx, userID, sid)
-}
-
-// TestLegacyUpgradeRollsBackOnRevokeFailure pins that if the legacy session
-// cannot be revoked, the upgrade rolls back the just-written split-key object
-// and the refresh falls back to a legacy token — the account is never left with
-// two live objects sharing one auth key.
-func TestLegacyUpgradeRollsBackOnRevokeFailure(t *testing.T) {
-	store := &failLegacyRevokeStore{Memory: sessionstore.NewMemory(), failUser: allowedUser}
-	a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
-	clientID := registerClient(t, ts, testRedirectURI)
-	require.NoError(t, store.Session(allowedUser, "", nil).StoreSession(context.Background(), []byte("legacy")))
-	now := a.now()
-	legacyRefresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
-		Subject: allowedUser.String(), ClientID: clientID,
-		IssuedAt: now.Unix(), LoginAt: now.Unix(),
-	})
-	require.NoError(t, err)
-
-	refreshed, _, status := refreshGrant(t, ts, clientID, legacyRefresh)
-	require.Equal(t, http.StatusOK, status)
-	rc, err := openBlob(a.sealer, refreshBlob, refreshed.RefreshToken, a.now())
-	require.NoError(t, err)
-	assert.Empty(t, rc.SessionID, "revoke failure must fall back to a legacy token, not a split-key one")
-
-	// The rollback actually fired (the split-key object was written, then deleted),
-	// not skipped — proving write-then-rollback rather than just an end state.
-	assert.GreaterOrEqual(t, store.sidDeletes.Load(), int64(1), "rollback must delete the just-written split-key object")
-
-	// Exactly one object remains — the legacy one; the upgraded copy was rolled back.
-	refs, err := store.List(context.Background())
-	require.NoError(t, err)
-	require.Len(t, refs, 1)
-	assert.Equal(t, "", refs[0].SID, "the rolled-back split-key copy must not survive")
 }
 
 // failRevokeStore fails every Revoke, to exercise the /revoke store-error path.
@@ -1134,6 +1103,7 @@ func (s *failExistsProbeStore) Exists(context.Context, tgid.UserID, string) (boo
 // perfectly good refresh token (forcing a needless QR re-login).
 func TestRefreshStoreErrorIs503(t *testing.T) {
 	const sid = "0123456789abcdef0123456789abcdef"
+	const family = "fedcba9876543210fedcba9876543210"
 	for name, store := range map[string]sessionstore.Store{
 		"revoked probe fails": &failRevokedProbeStore{Memory: sessionstore.NewMemory()},
 		"exists probe fails":  &failExistsProbeStore{Memory: sessionstore.NewMemory()},
@@ -1142,9 +1112,14 @@ func TestRefreshStoreErrorIs503(t *testing.T) {
 			a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
 			clientID := registerClient(t, ts, testRedirectURI)
 			now := a.now()
+			redeemed, err := store.RedeemCode(context.Background(), family, sid, now.Add(time.Hour))
+			require.NoError(t, err)
+			require.True(t, redeemed)
 			refresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
 				Subject: allowedUser.String(), ClientID: clientID,
+				Resource:  a.cfg.IssuerURL,
 				SessionID: sid, SessionKey: make([]byte, 32),
+				Family:   family,
 				IssuedAt: now.Unix(), LoginAt: now.Unix(),
 			})
 			require.NoError(t, err)
@@ -1155,56 +1130,6 @@ func TestRefreshStoreErrorIs503(t *testing.T) {
 			assert.Equal(t, "temporarily_unavailable", oe.Error)
 		})
 	}
-}
-
-// partialRevokeStore simulates a Revoke that durably wrote the tombstone but
-// then failed (e.g. the blob-delete errored): Revoked reports true afterward,
-// yet Revoke returns an error to its caller.
-type partialRevokeStore struct {
-	*sessionstore.Memory
-	failUser tgid.UserID
-}
-
-func (s *partialRevokeStore) Revoke(ctx context.Context, userID tgid.UserID, sid string) error {
-	if userID == s.failUser && sid == "" {
-		_ = s.Memory.Revoke(ctx, userID, sid) // tombstone lands durably
-		return errors.New("simulated blob-delete failure after tombstone write")
-	}
-	return s.Memory.Revoke(ctx, userID, sid)
-}
-
-// TestLegacyUpgradeCompletesOnPartialRevoke pins that when the legacy Revoke
-// leaves a durable tombstone but still errors, the upgrade COMPLETES (returns
-// the new split-key creds) instead of rolling back — rolling back would strand
-// the account on a now-revoked legacy session and force an unnecessary re-login.
-func TestLegacyUpgradeCompletesOnPartialRevoke(t *testing.T) {
-	store := &partialRevokeStore{Memory: sessionstore.NewMemory(), failUser: allowedUser}
-	a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
-	clientID := registerClient(t, ts, testRedirectURI)
-	require.NoError(t, store.Session(allowedUser, "", nil).StoreSession(context.Background(), []byte("legacy")))
-	now := a.now()
-	legacyRefresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
-		Subject: allowedUser.String(), ClientID: clientID,
-		IssuedAt: now.Unix(), LoginAt: now.Unix(),
-	})
-	require.NoError(t, err)
-
-	refreshed, _, status := refreshGrant(t, ts, clientID, legacyRefresh)
-	require.Equal(t, http.StatusOK, status)
-	rc, err := openBlob(a.sealer, refreshBlob, refreshed.RefreshToken, a.now())
-	require.NoError(t, err)
-	assert.True(t, validSessionID(rc.SessionID),
-		"a durable tombstone must complete the upgrade to a split-key session, not fall back to legacy")
-
-	// The legacy session is durably revoked, so replaying the old legacy token
-	// is rejected — no forced re-login of the upgraded holder, but the stale
-	// legacy grant is dead.
-	revoked, err := store.Revoked(context.Background(), allowedUser, "")
-	require.NoError(t, err)
-	assert.True(t, revoked, "legacy session must remain tombstoned after the completed upgrade")
-	_, oe, status := refreshGrant(t, ts, clientID, legacyRefresh)
-	require.Equal(t, http.StatusBadRequest, status)
-	assert.Equal(t, "invalid_grant", oe.Error)
 }
 
 // TestVerifierRejectsMalformedSessionID pins that an access token carrying a
@@ -1224,142 +1149,13 @@ func TestVerifierRejectsMalformedSessionID(t *testing.T) {
 	assert.ErrorIs(t, err, auth.ErrInvalidToken)
 }
 
-// blockingLegacyLoadStore parks the blocked user's legacy LoadSession on a
-// channel so a test can hold that account's per-account upgrade lock while
-// probing whether a DIFFERENT account's upgrade is serialized behind it.
-type blockingLegacyLoadStore struct {
-	*sessionstore.Memory
-	blockUser tgid.UserID
-	entered   chan struct{}
-	release   chan struct{}
-}
-
-func (s *blockingLegacyLoadStore) Session(userID tgid.UserID, sid string, key []byte) session.Storage {
-	inner := s.Memory.Session(userID, sid, key)
-	if userID == s.blockUser && sid == "" {
-		return blockingLoad{Storage: inner, entered: s.entered, release: s.release}
-	}
-	return inner
-}
-
-type blockingLoad struct {
-	session.Storage
-	entered chan struct{}
-	release chan struct{}
-}
-
-func (b blockingLoad) LoadSession(ctx context.Context) ([]byte, error) {
-	close(b.entered)
-	<-b.release
-	return b.Storage.LoadSession(ctx) //nolint:wrapcheck // test double passes the storage error through unchanged (callers errors.Is on it)
-}
-
-// TestCrossUserUpgradeNotSerialized pins that the upgrade lock is per-account,
-// not global: while one account is parked mid-upgrade (holding its own lock), a
-// different account's upgrade completes. A global lock would deadlock here,
-// which the timeout converts into a failure.
-func TestCrossUserUpgradeNotSerialized(t *testing.T) {
-	const otherUser tgid.UserID = 222222
-	store := &blockingLegacyLoadStore{
-		Memory:    sessionstore.NewMemory(),
-		blockUser: allowedUser,
-		entered:   make(chan struct{}),
-		release:   make(chan struct{}),
-	}
-	a, _ := newTestServer(t, testConfig(t), store, neverStartLogin)
-	ctx := context.Background()
-	require.NoError(t, store.Session(allowedUser, "", nil).StoreSession(ctx, []byte("legacy-a")))
-	require.NoError(t, store.Session(otherUser, "", nil).StoreSession(ctx, []byte("legacy-b")))
-
-	aDone := make(chan error, 1)
-	go func() {
-		_, _, err := a.upgradeLegacySession(ctx, allowedUser)
-		aDone <- err
-	}()
-	<-store.entered // allowedUser is parked inside LoadSession, holding its lock
-
-	bDone := make(chan error, 1)
-	go func() {
-		_, _, err := a.upgradeLegacySession(ctx, otherUser)
-		bDone <- err
-	}()
-	select {
-	case err := <-bDone:
-		require.NoError(t, err, "a different account's upgrade must complete while another is mid-upgrade")
-	case <-time.After(2 * time.Second):
-		t.Fatal("cross-user upgrade blocked on another account's lock — the upgrade lock is global, not per-account")
-	}
-
-	close(store.release) // let allowedUser finish
-	require.NoError(t, <-aDone)
-}
-
-// TestConcurrentLegacyUpgrade pins that concurrent refreshes of the same legacy
-// token do not each mint a split-key copy of the one auth key: exactly one wins
-// the upgrade, all others get invalid_grant, and exactly one object remains.
-func TestConcurrentLegacyUpgrade(t *testing.T) {
-	store := sessionstore.NewMemory()
-	a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
-	clientID := registerClient(t, ts, testRedirectURI)
-	require.NoError(t, store.Session(allowedUser, "", nil).StoreSession(context.Background(), []byte("legacy")))
-	now := a.now()
-	legacyRefresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
-		Subject: allowedUser.String(), ClientID: clientID,
-		IssuedAt: now.Unix(), LoginAt: now.Unix(),
-	})
-	require.NoError(t, err)
-
-	const n = 6
-	var wg sync.WaitGroup
-	statuses := make([]int, n)
-	sids := make([]string, n)
-	start := make(chan struct{})
-	for i := range n {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			<-start // release all goroutines together to maximize contention
-			tr, _, status := refreshGrant(t, ts, clientID, legacyRefresh)
-			statuses[i] = status
-			if status == http.StatusOK {
-				if ac, e := openBlob(a.sealer, refreshBlob, tr.RefreshToken, a.now()); e == nil {
-					sids[i] = ac.SessionID
-				}
-			}
-		}(i)
-	}
-	close(start)
-	wg.Wait()
-
-	oks, bad, winnerSID := 0, 0, ""
-	for i := range n {
-		switch statuses[i] {
-		case http.StatusOK:
-			oks++
-			winnerSID = sids[i]
-		case http.StatusBadRequest:
-			bad++
-		default:
-			t.Errorf("goroutine %d: unexpected status %d", i, statuses[i])
-		}
-	}
-	assert.Equal(t, 1, oks, "exactly one concurrent legacy refresh must win the upgrade")
-	assert.Equal(t, n-1, bad, "every other concurrent refresh must get invalid_grant")
-	require.NotEmpty(t, winnerSID)
-
-	refs, err := store.List(context.Background())
-	require.NoError(t, err)
-	require.Len(t, refs, 1, "only one split-key object may exist after concurrent upgrades")
-	assert.Equal(t, winnerSID, refs[0].SID)
-}
-
 // TestNewSessionCredsValid guards against drift between the sid minting length
 // (sessionIDLen) and the validator length (sessionstore.ValidSID): a minted sid
 // must always validate, or every fresh session would 401 on its first refresh.
 func TestNewSessionCredsValid(t *testing.T) {
 	sid, key, err := newSessionCreds()
 	require.NoError(t, err)
-	assert.True(t, validSessionID(sid), "a freshly minted sid must pass validSessionID")
+	assert.True(t, sessionstore.ValidSID(sid), "a freshly minted sid must pass validSessionID")
 	assert.Len(t, key, sessionKeyLen)
 }
 
@@ -1369,42 +1165,16 @@ func TestNewSessionCredsValid(t *testing.T) {
 func TestRevokeInvalidatesLiveSession(t *testing.T) {
 	store := sessionstore.NewMemory()
 	flow := newFakeFlow()
-	a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
-	clientID := registerClient(t, ts, testRedirectURI)
-
 	var invalidated []string
-	a.SetSessionInvalidator(func(userID tgid.UserID, sid string) {
+	a, ts := newTestServerWithInvalidator(t, testConfig(t), store, startOne(flow), func(userID tgid.UserID, sid string) {
 		invalidated = append(invalidated, userID.String()+"|"+sid)
 	})
+	clientID := registerClient(t, ts, testRedirectURI)
 
 	tr, cc := loginAndRedeem(t, a, ts, flow, clientID)
 	require.Equal(t, http.StatusOK, revokeToken(t, ts, url.Values{"token": {tr.RefreshToken}}))
 	assert.Contains(t, invalidated, allowedUser.String()+"|"+cc.SessionID,
 		"revoke must invalidate the session's live assembly")
-}
-
-// TestUpgradeInvalidatesLegacySession pins that the move-upgrade tears down the
-// warm legacy assembly, so it cannot run a second gotd client on the same
-// MTProto auth key as the freshly-copied session.
-func TestUpgradeInvalidatesLegacySession(t *testing.T) {
-	store := sessionstore.NewMemory()
-	a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
-	clientID := registerClient(t, ts, testRedirectURI)
-	require.NoError(t, store.Session(allowedUser, "", nil).StoreSession(context.Background(), []byte("legacy")))
-	now := a.now()
-	legacyRefresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
-		Subject: allowedUser.String(), ClientID: clientID,
-		IssuedAt: now.Unix(), LoginAt: now.Unix(),
-	})
-	require.NoError(t, err)
-
-	var invalidated []string
-	a.SetSessionInvalidator(func(userID tgid.UserID, sid string) {
-		invalidated = append(invalidated, userID.String()+"|"+sid)
-	})
-	_, _, status := refreshGrant(t, ts, clientID, legacyRefresh)
-	require.Equal(t, http.StatusOK, status)
-	assert.Contains(t, invalidated, allowedUser.String()+"|", "upgrade must invalidate the legacy assembly")
 }
 
 // TestRefreshRejectsMalformedSid pins the storage-boundary defense: a token
@@ -1428,9 +1198,8 @@ func TestRefreshRejectsMalformedSid(t *testing.T) {
 // before any invalidation or store call — no token-carried string reaches a path.
 func TestRevokeRejectsMalformedSid(t *testing.T) {
 	store := sessionstore.NewMemory()
-	a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
 	called := false
-	a.SetSessionInvalidator(func(tgid.UserID, string) { called = true })
+	a, ts := newTestServerWithInvalidator(t, testConfig(t), store, neverStartLogin, func(tgid.UserID, string) { called = true })
 	now := a.now()
 	bad, err := sealBlob(a.sealer, accessBlob, accessClaims{
 		Subject: allowedUser.String(), SessionID: "../evil",
@@ -1488,7 +1257,7 @@ func TestRefreshCarriesSessionIdentity(t *testing.T) {
 
 	cc, err := openBlob(a.sealer, codeBlob, code, a.now())
 	require.NoError(t, err)
-	require.True(t, validSessionID(cc.SessionID))
+	require.True(t, sessionstore.ValidSID(cc.SessionID))
 
 	// Two consecutive refreshes must preserve the exact sid and key.
 	rt := tr.RefreshToken
@@ -1509,72 +1278,58 @@ func TestRefreshCarriesSessionIdentity(t *testing.T) {
 	}
 }
 
-// TestLegacySessionUpgradeOnRefresh pins the migration path: a pre-upgrade
-// refresh token (no sid/sk) pointing at a legacy master-only session is
-// upgraded, on refresh, to an independent split-key session — the new tokens
-// carry a fresh sid+key, a new v2 object is written, and the legacy object is
-// left in place.
-func TestLegacySessionUpgradeOnRefresh(t *testing.T) {
-	store := sessionstore.NewMemory()
-	a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
-	clientID := registerClient(t, ts, testRedirectURI)
-
-	// Seed a legacy session (empty sid) and a matching legacy refresh token.
-	require.NoError(t, store.Session(allowedUser, "", nil).StoreSession(context.Background(), []byte("legacy-session")))
-	now := a.now()
-	legacyRefresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
-		Subject:  allowedUser.String(),
-		Username: "durov",
-		ClientID: clientID,
-		IssuedAt: now.Unix(),
-		LoginAt:  now.Unix(),
-	})
-	require.NoError(t, err)
-
-	refreshed, _, status := refreshGrant(t, ts, clientID, legacyRefresh)
-	require.Equal(t, http.StatusOK, status)
-
-	// The new tokens carry a fresh independent-session identity.
-	rc, err := openBlob(a.sealer, refreshBlob, refreshed.RefreshToken, a.now())
-	require.NoError(t, err)
-	require.True(t, validSessionID(rc.SessionID), "upgraded refresh must carry a real sid")
-	require.Len(t, rc.SessionKey, sessionKeyLen)
-
-	// Upgrade is a MOVE: the new object exists and the legacy object is gone, so
-	// the old stateless legacy refresh token can no longer mint tokens or spawn
-	// another copy (its next use fails the Exists(uid,"") gate).
-	exists, err := store.Exists(context.Background(), allowedUser, rc.SessionID)
-	require.NoError(t, err)
-	assert.True(t, exists, "upgraded v2 session object must be written")
-	legacyExists, err := store.Exists(context.Background(), allowedUser, "")
-	require.NoError(t, err)
-	assert.False(t, legacyExists, "legacy object must be deleted after the move-upgrade")
-
-	// The upgraded session decrypts with the new key and holds the same bytes.
-	got, err := store.Session(allowedUser, rc.SessionID, rc.SessionKey).LoadSession(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, []byte("legacy-session"), got)
-
-	// Replaying the now-orphaned legacy refresh token fails cleanly — no
-	// unbounded proliferation of session copies.
-	_, oe, status := refreshGrant(t, ts, clientID, legacyRefresh)
-	require.Equal(t, http.StatusBadRequest, status)
-	assert.Equal(t, "invalid_grant", oe.Error)
-
-	// Exactly one object exists (the upgraded one) — the replay created none.
-	refs, err := store.List(context.Background())
-	require.NoError(t, err)
-	assert.Len(t, refs, 1, "upgrade is a move + replay is rejected, so only the upgraded object remains")
+type unavailableGrantStore struct {
+	*sessionstore.Memory
+	failRedeem atomic.Bool
+	failRevoke atomic.Bool
 }
 
-func TestNewTokenInfoForTesting(t *testing.T) {
-	uk := []byte("test-session-key")
-	info := NewTokenInfoForTesting(allowedUser, "durov", "deadbeef", uk, time.Now().Add(time.Hour))
-	assert.Equal(t, allowedUser.String(), info.UserID)
-	extra, ok := info.Extra[extraIdentityKey].(identityExtra)
-	require.True(t, ok)
-	assert.Equal(t, allowedUser, extra.ID)
-	assert.Equal(t, "durov", extra.Username)
-	assert.Equal(t, "deadbeef", extra.SessionID)
-	assert.Equal(t, uk, extra.SessionKey)
+func (s *unavailableGrantStore) RedeemCode(ctx context.Context, jti, sid string, expires time.Time) (bool, error) {
+	if s.failRedeem.Load() {
+		return false, errors.New("grant storage unavailable")
+	}
+	return s.Memory.RedeemCode(ctx, jti, sid, expires)
+}
+
+func (s *unavailableGrantStore) RevokeGrant(ctx context.Context, family string) error {
+	if s.failRevoke.Load() {
+		return errors.New("grant storage unavailable")
+	}
+	return s.Memory.RevokeGrant(ctx, family)
+}
+
+func TestGrantStorageFailureAllowsRetryWithoutLosingSession(t *testing.T) {
+	store := &unavailableGrantStore{Memory: sessionstore.NewMemory()}
+	store.failRedeem.Store(true)
+	store.failRevoke.Store(true)
+	flow := newFakeFlow()
+	a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
+	clientID := registerClient(t, ts, testRedirectURI)
+	verifier, challenge := pkcePair()
+	loginID := startAuthorize(t, ts, clientID, challenge, "state")
+	code, _ := finishLogin(t, ts, loginID, flow, LoginUser{ID: allowedUser}, []byte("session"))
+	_, oauthErr, status := redeemCode(t, ts, clientID, testRedirectURI, code, verifier)
+	require.Equal(t, http.StatusServiceUnavailable, status)
+	assert.Equal(t, "temporarily_unavailable", oauthErr.Error)
+	store.failRedeem.Store(false)
+	tokens, _, status := redeemCode(t, ts, clientID, testRedirectURI, code, verifier)
+	require.Equal(t, http.StatusOK, status, "failed storage write must not consume the code")
+	cc, err := openBlob(a.sealer, codeBlob, code, a.now())
+	require.NoError(t, err)
+	response, err := http.PostForm(ts.URL+"/revoke", url.Values{"token": {tokens.RefreshToken}})
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	assert.Equal(t, http.StatusServiceUnavailable, response.StatusCode)
+	assert.Equal(t, "60", response.Header.Get("Retry-After"))
+	exists, err := store.Exists(t.Context(), allowedUser, cc.SessionID)
+	require.NoError(t, err)
+	assert.True(t, exists, "failed revocation must retain the session for retry")
+	store.failRevoke.Store(false)
+	require.Equal(t, http.StatusOK, revokeToken(t, ts, url.Values{"token": {tokens.RefreshToken}}))
+	exists, err = store.Exists(t.Context(), allowedUser, cc.SessionID)
+	require.NoError(t, err)
+	assert.False(t, exists)
+	_, oauthErr, status = refreshGrant(t, ts, clientID, tokens.RefreshToken)
+	require.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "invalid_grant", oauthErr.Error)
 }

@@ -7,9 +7,9 @@
 // Telegram app (Settings → Devices → Link Desktop Device), which both proves
 // who they are and produces the MTProto session the server needs to act on
 // their behalf. Every artifact the server issues (authorization code, access
-// token, refresh token, OAuth state, client ID) is a self-contained sealed
-// blob, so no server-side session or token storage is required beyond the
-// Telegram session store itself.
+// token, refresh token, OAuth state, client ID) is a sealed blob. Authorization
+// code redemption and refresh-family generations are additionally persisted
+// in the configured session backend for single-use and replay revocation.
 package authsrv
 
 import (
@@ -125,14 +125,22 @@ type Config struct {
 	// RefreshTokenTTL caps refresh-token lifetime. Zero means the default
 	// (30 days).
 	RefreshTokenTTL time.Duration
+	// TrustedProxyHops controls how many rightmost proxy addresses are trusted
+	// when deriving the client IP. Zero ignores forwarding headers entirely.
+	TrustedProxyHops int
 }
 
-// Validate checks the configuration and normalizes IssuerURL.
+// Normalized returns a copy in canonical form without mutating the caller.
+func (c Config) Normalized() Config {
+	c.IssuerURL = strings.TrimRight(c.IssuerURL, "/")
+	return c
+}
+
+// Validate checks the configuration without mutating it.
 func (c *Config) Validate() error {
 	if c == nil {
 		return fmt.Errorf("auth config must not be nil")
 	}
-	c.IssuerURL = strings.TrimRight(c.IssuerURL, "/")
 	u, err := url.Parse(c.IssuerURL)
 	if err != nil {
 		return fmt.Errorf("invalid issuer URL %q: %w", c.IssuerURL, err)
@@ -168,6 +176,9 @@ func (c *Config) Validate() error {
 	}
 	if c.RefreshTokenTTL < 0 {
 		return fmt.Errorf("refresh token TTL must not be negative")
+	}
+	if c.TrustedProxyHops < 0 || c.TrustedProxyHops > 16 {
+		return fmt.Errorf("trusted proxy hops must be between 0 and 16")
 	}
 	return nil
 }

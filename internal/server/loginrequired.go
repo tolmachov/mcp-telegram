@@ -8,8 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gotd/td/telegram/auth"
-	"github.com/gotd/td/tgerr"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
@@ -301,7 +299,7 @@ func (s *Server) authProbe(ctx context.Context) (account string, authorized bool
 	// check_failed for a probe that succeeded.
 	case checked:
 		return account, authorized, nil
-	case runErr != nil && isDeadSession(runErr):
+	case runErr != nil && tgclient.IsSessionUnauthorized(runErr):
 		// Telegram was reached and rejected the stored key outright. gotd
 		// raises these during connection setup, so the callback never ran and
 		// there is no Status to read — but the answer is not "undetermined",
@@ -315,14 +313,6 @@ func (s *Server) authProbe(ctx context.Context) (account string, authorized bool
 		return "", false, fmt.Errorf("connecting to Telegram: %w", runErr)
 	}
 	return "", false, fmt.Errorf("the check did not complete: %w", cause(ctx))
-}
-
-// isDeadSession reports whether Telegram answered that the stored session is
-// no longer usable, as opposed to being unreachable. These are the errors
-// gotd itself treats as permanent (telegram/connect.go isPermanentError).
-func isDeadSession(err error) bool {
-	return auth.IsUnauthorized(err) ||
-		tgerr.Is(err, "AUTH_KEY_UNREGISTERED", "SESSION_EXPIRED", "AUTH_KEY_DUPLICATED")
 }
 
 // cause reports why a probe ended without running, preferring the context's

@@ -1,9 +1,8 @@
-# Deploying the remote (HTTP) mode to Cloud Run
+# Cloud Run deployment
 
-The HTTP mode serves MCP over streamable HTTP behind an embedded OAuth 2.1
-authorization server. Users authenticate by scanning a Telegram QR code on
-the authorization page; each allowed user gets their own MTProto session
-(stored encrypted in GCS) and their own MCP assembly.
+HTTP mode is always protected by the embedded OAuth 2.1 server. Each OAuth
+authorization creates an independent Telegram MTProto session and a durable
+refresh-token family. There is no unauthenticated HTTP mode.
 
 ## One-time setup
 
@@ -13,23 +12,29 @@ REGION=europe-west1
 BUCKET=my-mcp-telegram-sessions
 SA=mcp-telegram@${PROJECT}.iam.gserviceaccount.com
 
-# Bucket for encrypted per-user sessions.
 gcloud storage buckets create gs://${BUCKET} --location=${REGION} \
   --uniform-bucket-level-access
-
-# Dedicated service account with access to that bucket only.
 gcloud iam service-accounts create mcp-telegram
 gcloud storage buckets add-iam-policy-binding gs://${BUCKET} \
   --member=serviceAccount:${SA} --role=roles/storage.objectAdmin
 
-# Secrets: the Telegram API hash and the 32-byte token master key.
-printf '%s' "$TELEGRAM_API_HASH" | gcloud secrets create telegram-api-hash --data-file=-
-head -c 32 /dev/urandom | base64 | tr -d '\n' | gcloud secrets create mcp-auth-token-key --data-file=-
-for s in telegram-api-hash mcp-auth-token-key; do
-  gcloud secrets add-iam-policy-binding $s \
+printf '%s' "$MCP_TELEGRAM_API_HASH" | \
+  gcloud secrets create mcp-telegram-api-hash --data-file=-
+head -c 32 /dev/urandom | base64 | tr -d '\n' | \
+  gcloud secrets create mcp-auth-token-keys --data-file=-
+for s in mcp-telegram-api-hash mcp-auth-token-keys; do
+  gcloud secrets add-iam-policy-binding "$s" \
     --member=serviceAccount:${SA} --role=roles/secretmanager.secretAccessor
 done
 ```
+
+Copy `deploy/cloudrun.env.example` to the untracked
+`deploy/cloudrun.env`, fill in the bucket, allowlist, API ID, and issuer URL.
+Do not add `PORT`: Cloud Run injects it into the ingress container and the
+application binds to `:$PORT`. Cloud Run does not expand `$PORT` inside another
+environment variable, so `MCP_HTTP_ADDR=$PORT` is not a valid substitute.
+`MCP_HTTP_ADDR` remains available as an explicit override outside Cloud Run;
+the ordinary local default stays `127.0.0.1:8080`.
 
 ## Deploy
 
@@ -40,54 +45,52 @@ gcloud run deploy mcp-telegram \
   --service-account=${SA} \
   --max-instances=1 \
   --env-vars-file=deploy/cloudrun.env \
-  --set-secrets=TELEGRAM_API_HASH=telegram-api-hash:latest,AUTH_TOKEN_KEY=mcp-auth-token-key:latest \
+  --set-secrets=MCP_TELEGRAM_API_HASH=mcp-telegram-api-hash:latest,MCP_AUTH_TOKEN_KEYS=mcp-auth-token-keys:latest \
   --allow-unauthenticated
 ```
 
-After the first deploy, put the service URL into `AUTH_ISSUER_URL` in
-`deploy/cloudrun.env` and deploy again — sealed tokens and session encryption
-are bound to the issuer value.
+`--allow-unauthenticated` exposes the OAuth protocol and login page; the MCP
+endpoint itself rejects requests without a valid bearer token. Keep
+`--max-instances=1`: two instances must never connect the same MTProto session
+at once because Telegram can revoke the duplicated auth key.
 
-### Why `--max-instances=1` is required
+The service enforces a 1 MiB MCP request body, 32 KiB headers, 128 concurrent
+HTTP requests, a ten-minute MCP session timeout, and a per-user limit of ten
+new sessionless MCP sessions per minute (burst three). `MCP_AUTH_TRUSTED_PROXY_HOPS=0`
+ignores all forwarding headers. Increase it only after verifying every address
+in the actual proxy chain.
 
-Every user has exactly one MTProto session (one auth key). If two instances
-load the same session and connect concurrently from different IPs, Telegram
-kills the key with `AUTH_KEY_DUPLICATED` and every user is forcibly logged
-out. A single instance caps nothing else: scale-to-zero still works
-(`min-instances` stays 0), sessions persist in GCS, and per-user clients are
-re-connected lazily on the next request.
+## Token and storage model
 
-If idle connections misbehave after long CPU-throttled pauses (tools failing
-right after a wake-up), add `--no-cpu-throttling` — it keeps background
-MTProto connections alive between requests at the cost of always-on billing
-while an instance exists.
+- Authorization codes have a random durable `jti` and can be redeemed once.
+- Refresh tokens carry a family id and generation. Rotation is an atomic CAS.
+  Reuse or concurrent replay of an old generation revokes the whole family,
+  its Telegram session, and the live pooled client.
+- A storage failure returns `503`; it does not consume or rotate the grant.
+- Session encryption requires both the server master key and the random
+  per-authorization key carried by the OAuth token.
+- Current objects use `sessions-v3/`, `revoked-v3/`, and `oauth-v3/grants/`.
+  Older prefixes are never read.
 
-## Token model and revocation
+## Breaking upgrade
 
-Access and refresh tokens are stateless sealed blobs — the server keeps no
-token database, so individual tokens cannot be revoked by id, and a rotated
-refresh token stays valid until its absolute 30-day expiry. What the design
-gives you instead are two coarse levers, both re-checked on every refresh:
+This release intentionally has no migration path. Before deployment, record a
+rollback image digest and preserve the old storage long enough to roll back.
+After committing to the new release:
 
-- **Remove a user from `AUTH_ALLOWED_USERS`** and redeploy — their refresh
-  grants stop working immediately (the allowlist is re-checked at refresh).
-- **Delete their session** from the bucket (`gs://$BUCKET/sessions/<id>.bin`)
-  — refresh re-checks that the session still exists, so this forces a fresh
-  QR login.
+1. Remove old objects under `sessions/`, `revoked/`, and `oauth-v2/` only after
+   the rollback window closes.
+2. Every user reconnects the MCP client and completes QR login (and 2FA when
+   enabled).
+3. Verify code exchange, refresh rotation, revoke, two parallel clients, MCP
+   reconnect, and offline logout against a real Telegram account.
 
-A leaked refresh token therefore grants at most 30 days of access and cannot
-be individually revoked; if that matters, rotate `AUTH_TOKEN_KEY` (invalidates
-*all* tokens at once) or shorten the deployment's exposure by keeping the
-allowlist tight. `POST /revoke` exists for spec compliance but is a no-op.
+Rollback means deploying the recorded previous image with its previous env and
+storage prefixes. Do not point an older binary at the v3 prefixes.
 
-## Connecting a client
+## Release gate
 
-- **claude.ai / Claude Desktop**: add a custom connector with the service
-  URL. The OAuth flow opens the authorization page; scan the QR with the
-  Telegram app (Settings → Devices → Link Desktop Device), enter the 2FA
-  password if prompted.
-- **Claude Code**: `claude mcp add --transport http telegram https://<service-url>/`
-  and complete the same browser flow with `/mcp`.
-
-Only Telegram accounts listed in `AUTH_ALLOWED_USERS` can complete the login;
-everyone else is rejected after the scan and their session is discarded.
+Do not promote unless Linux/macOS tests, race tests, vet, lint, `govulncheck`,
+module verification, Windows cross-build, container build/scan, and the manual
+Telegram smoke all pass. Also verify that the v3 prefixes contain only current
+objects and that rollback instructions/image digest are recorded.

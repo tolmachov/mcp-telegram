@@ -1,0 +1,230 @@
+package tools
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/gotd/td/tg"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/tolmachov/mcp-telegram/internal/messages"
+	telegramfake "github.com/tolmachov/mcp-telegram/internal/testutil/telegram"
+	"github.com/tolmachov/mcp-telegram/internal/tgdata"
+)
+
+func TestLimitedAndProgressWriters(t *testing.T) {
+	var dst bytes.Buffer
+	limited := newLimitedWriter(&dst, 4)
+	n, err := limited.Write([]byte("abcdef"))
+	assert.Equal(t, 4, n)
+	assert.ErrorIs(t, err, errMediaTooLarge)
+	assert.Equal(t, "abcd", dst.String())
+
+	reports := make([]int64, 0, 1)
+	progress := newProgressWriter(&bytes.Buffer{}, time.Hour, func(written int64) {
+		reports = append(reports, written)
+	})
+	n, err = progress.Write([]byte("abc"))
+	require.NoError(t, err)
+	assert.Equal(t, 3, n)
+	n, err = progress.Write([]byte("de"))
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+	assert.Equal(t, []int64{3}, reports)
+}
+
+func TestBackupProgressLifecycleAndBounds(t *testing.T) {
+	from := time.Unix(100, 0)
+	to := time.Unix(200, 0)
+	bp := newBackupProgress(t.Context(), nil, nil, from, to, 0)
+	require.NoError(t, bp.Start())
+	assert.Error(t, bp.Start())
+	bp.SetMessage("working")
+	bp.SetMessageCount(5)
+	bp.UpdateEarliestTime(time.Unix(150, 0))
+	bp.UpdateEarliestTime(time.Unix(50, 0))
+	progress, total := bp.getProgress()
+	assert.Equal(t, 100, total)
+	assert.Equal(t, float64(100), progress)
+	bp.Send("done")
+	require.NoError(t, bp.Stop())
+	assert.Error(t, bp.Stop())
+
+	counted := newBackupProgress(t.Context(), nil, nil, time.Time{}, time.Time{}, 2)
+	counted.SetMessageCount(3)
+	progress, _ = counted.getProgress()
+	assert.Equal(t, float64(100), progress)
+}
+
+func TestMessagePageCursorRoundTripAndRejection(t *testing.T) {
+	raw := formatMessagePageCursor(messagePageCursor{Kind: cursorKindSearch, ChatID: 9, OffsetID: 8, Limit: 50, Query: "needle"})
+	parsed, err := parseMessagePageCursor(raw, cursorKindSearch)
+	require.NoError(t, err)
+	assert.Equal(t, "needle", parsed.Query)
+	_, err = parseMessagePageCursor(raw, cursorKindHistory)
+	assert.ErrorContains(t, err, "belongs to")
+
+	invalid := formatMessagePageCursor(messagePageCursor{Kind: cursorKindSearch, ChatID: 9, OffsetID: 0, Limit: 50})
+	_, err = parseMessagePageCursor(invalid, cursorKindSearch)
+	assert.ErrorContains(t, err, "invalid pagination state")
+}
+
+func TestReadOnlyHandlersUseExpectedRPCs(t *testing.T) {
+	t.Run("get me", func(t *testing.T) {
+		inv := telegramfake.New(
+			telegramfake.Typed(func(_ context.Context, _ *tg.UsersGetFullUserRequest, out *tg.UsersUserFull) error {
+				out.FullUser = tg.UserFull{About: "bio"}
+				out.Users = []tg.UserClass{&tg.User{ID: 1, Self: true, FirstName: "A", Username: "me"}}
+				return nil
+			}),
+		)
+		errRes, out, err := NewMeGetHandler(tg.NewClient(inv)).handle(t.Context(), &mcp.CallToolRequest{}, GetMeInput{})
+		require.NoError(t, err)
+		require.Nil(t, errRes)
+		require.NotNil(t, out)
+		assert.Equal(t, int64(1), out.ID)
+		assert.Equal(t, "bio", out.Bio)
+		assert.Zero(t, inv.Remaining())
+	})
+
+	t.Run("resolve username", func(t *testing.T) {
+		inv := telegramfake.New(
+			telegramfake.Typed(func(_ context.Context, req *tg.ContactsResolveUsernameRequest, out *tg.ContactsResolvedPeer) error {
+				assert.Equal(t, "public", req.Username)
+				out.Users = []tg.UserClass{&tg.User{ID: 1, Username: "public", FirstName: "A", Self: true}}
+				out.Chats = []tg.ChatClass{&tg.Channel{ID: 2, Username: "public", Title: "Public", Megagroup: true}}
+				return nil
+			}),
+		)
+		errRes, out, err := NewUsernameResolveHandler(tg.NewClient(inv)).handle(t.Context(), &mcp.CallToolRequest{}, ResolveUsernameInput{Username: "@public"})
+		require.NoError(t, err)
+		require.Nil(t, errRes)
+		require.Len(t, out.Entities, 2)
+		assert.Equal(t, "supergroup", out.Entities[1].Kind)
+		assert.Zero(t, inv.Remaining())
+	})
+
+	t.Run("folders", func(t *testing.T) {
+		inv := telegramfake.New(dialogFiltersStep(t,
+			&tg.DialogFilterDefault{},
+			&tg.DialogFilter{ID: 2, Title: tg.TextWithEntities{Text: "Work"}, IncludePeers: []tg.InputPeerClass{&tg.InputPeerUser{UserID: 7}}},
+			&tg.DialogFilterChatlist{ID: 3, Title: tg.TextWithEntities{Text: "Shared"}},
+		))
+		errRes, out, err := NewGetFoldersHandler(tg.NewClient(inv)).handle(t.Context(), &mcp.CallToolRequest{}, GetFoldersInput{})
+		require.NoError(t, err)
+		require.Nil(t, errRes)
+		require.Len(t, out.Folders, 2)
+		assert.Equal(t, []int64{7}, out.Folders[0].IncludeIDs)
+		assert.Equal(t, folderKindShared, out.Folders[1].Kind)
+		assert.Zero(t, inv.Remaining())
+	})
+
+	t.Run("chat info", func(t *testing.T) {
+		const channelID = int64(60)
+		inv := telegramfake.New(
+			resolveChannelStep(t, channelID, 160),
+			telegramfake.Typed(func(_ context.Context, req *tg.ChannelsGetFullChannelRequest, out *tg.MessagesChatFull) error {
+				channel := req.Channel.(*tg.InputChannel)
+				assert.Equal(t, channelID, channel.ChannelID)
+				out.FullChat = &tg.ChannelFull{About: "description", ParticipantsCount: 10}
+				out.Chats = []tg.ChatClass{&tg.Channel{ID: channelID, AccessHash: 160, Title: "Detailed", Username: "detailed", Megagroup: true}}
+				return nil
+			}),
+			telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetPeerDialogsRequest, out *tg.MessagesPeerDialogs) error {
+				out.Dialogs = []tg.DialogClass{&tg.Dialog{UnreadCount: 3, Pinned: true}}
+				return nil
+			}),
+		)
+		errRes, out, err := NewChatInfoGetHandler(tg.NewClient(inv)).handle(t.Context(), &mcp.CallToolRequest{}, GetChatInfoInput{ChatID: botAPIChannelID(channelID)})
+		require.NoError(t, err)
+		require.Nil(t, errRes)
+		require.NotNil(t, out)
+		assert.Equal(t, "Detailed", out.Name)
+		assert.Equal(t, 10, out.MembersCount)
+		assert.Equal(t, 3, out.UnreadCount)
+		assert.Zero(t, inv.Remaining())
+	})
+}
+
+func TestTelegramErrorHelpers(t *testing.T) {
+	result := telegramErrResult("send", errors.New("boom"))
+	require.NotNil(t, result)
+	assert.Contains(t, toolResultText(result), "send")
+	result = errResolvePeer(42, errors.New("boom"))
+	assert.Contains(t, toolResultText(result), "42")
+	assert.Equal(t, "ok", textResult("ok").Content[0].(*mcp.TextContent).Text)
+}
+
+func TestChatsHandlersServeSeededSnapshot(t *testing.T) {
+	cache := NewChatsCache(nil)
+	cache.chats = []tgdata.ChatInfo{
+		{ID: 1, Name: "Alpha", Username: "alpha"},
+		{ID: 2, Name: "Beta", Username: "beta"},
+		{ID: 3, Name: "Gamma", Username: "gamma"},
+	}
+	cache.sessionID = 99
+	cache.truncated = true
+
+	get := NewChatsGetHandler(cache)
+	first := get.pageFrom(cache.chats, cache.sessionID, 0, 2, true)
+	require.True(t, first.HasMore)
+	assert.NotEmpty(t, first.NextCursor)
+	errRes, second, err := get.handle(t.Context(), &mcp.CallToolRequest{}, GetChatsInput{Limit: 2, Cursor: first.NextCursor})
+	require.NoError(t, err)
+	require.Nil(t, errRes)
+	require.Len(t, second.Chats, 1)
+	assert.Equal(t, int64(3), second.Chats[0].ID)
+	assert.Contains(t, second.Warning, "incomplete")
+
+	errRes, _, err = get.handle(t.Context(), &mcp.CallToolRequest{}, GetChatsInput{Cursor: "invalid"})
+	require.NoError(t, err)
+	require.NotNil(t, errRes)
+
+	search := NewChatsSearchHandler(nil, cache)
+	errRes, found, err := search.handle(t.Context(), &mcp.CallToolRequest{}, SearchChatsInput{Query: "@beta", Limit: 1})
+	require.NoError(t, err)
+	require.Nil(t, errRes)
+	require.Len(t, found.Results, 1)
+	assert.Equal(t, int64(2), found.Results[0].ID)
+	assert.Contains(t, found.Warning, "incomplete")
+}
+
+func TestBackupMessagesWritesAtomicallyInsideConfiguredPath(t *testing.T) {
+	const channelID = int64(61)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "backup.txt")
+	inv := telegramfake.New(
+		resolveChannelStep(t, channelID, 161),
+		resolveChannelStep(t, channelID, 161),
+		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
+			out.Messages = &tg.MessagesMessages{Messages: []tg.MessageClass{&tg.Message{ID: 1, Date: 100, Message: "backed up"}}}
+			return nil
+		}),
+	)
+	client := tg.NewClient(inv)
+	provider := messages.NewProviderWithRate(client, 100_000)
+	handler := NewMessageBackupHandler(client, provider, []string{dir})
+
+	errRes, out, err := handler.handle(t.Context(), &mcp.CallToolRequest{}, BackupMessagesInput{
+		ChatID: botAPIChannelID(channelID), Filepath: target, Limit: 1,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, errRes)
+	assert.False(t, errRes.IsError)
+	require.NotNil(t, out)
+	assert.Equal(t, 1, out.MessageCount)
+	content, err := os.ReadFile(target) //nolint:gosec // target is inside the test's private temporary directory.
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "backed up")
+	info, err := os.Stat(target)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	assert.Zero(t, inv.Remaining())
+}

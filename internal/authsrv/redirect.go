@@ -63,7 +63,7 @@ func matchRegistered(registered []string, raw string) bool {
 		if err != nil || ru.Scheme != "http" || !isLoopbackHost(ru.Hostname()) {
 			continue
 		}
-		if strings.EqualFold(ru.Hostname(), u.Hostname()) && ru.Path == u.Path {
+		if strings.EqualFold(ru.Hostname(), u.Hostname()) && ru.Path == u.Path && ru.RawQuery == u.RawQuery && ru.Fragment == u.Fragment {
 			return true
 		}
 	}

@@ -211,9 +211,8 @@ func TestProcessHistoryNotModified(t *testing.T) {
 	assert.False(t, result.HasMore)
 }
 
-// TestProcessHistoryHasMore pins the page-fullness HasMore logic — the fix for
-// the old `len < Count` bug that reported HasMore=true on the final page of any
-// non-trivial chat (Count is the whole-history size, not the remaining count).
+// TestProcessHistoryHasMore pins the correctness-first contract: slice pages
+// continue until Telegram returns an empty raw page, even when a page is short.
 func TestProcessHistoryHasMore(t *testing.T) {
 	p := NewProvider(nil)
 	peer := &tg.InputPeerEmpty{}
@@ -226,12 +225,12 @@ func TestProcessHistoryHasMore(t *testing.T) {
 		return out
 	}
 
-	t.Run("slice shorter than limit is the last page", func(t *testing.T) {
-		// The exact regression: a full chat of 1000 messages, last page of 37.
+	t.Run("short slice still exposes an advancing raw cursor", func(t *testing.T) {
 		hist := &tg.MessagesMessagesSlice{Count: 1000, Messages: msgs(37)}
 		res, err := p.processHistory(hist, peer, 50)
 		require.NoError(t, err)
-		assert.False(t, res.HasMore, "a page shorter than the limit must end pagination")
+		assert.True(t, res.HasMore)
+		assert.Equal(t, 37, res.NextID)
 		assert.Equal(t, 37, res.Count)
 	})
 
@@ -252,11 +251,24 @@ func TestProcessHistoryHasMore(t *testing.T) {
 		assert.False(t, res.HasMore)
 	})
 
-	t.Run("channel messages gate on the limit too", func(t *testing.T) {
+	t.Run("short channel page still continues", func(t *testing.T) {
 		hist := &tg.MessagesChannelMessages{Count: 1000, Messages: msgs(10)}
 		res, err := p.processHistory(hist, peer, 50)
 		require.NoError(t, err)
-		assert.False(t, res.HasMore)
+		assert.True(t, res.HasMore)
+		assert.Equal(t, 10, res.NextID)
+	})
+
+	t.Run("service-only page advances by the raw service id", func(t *testing.T) {
+		hist := &tg.MessagesMessagesSlice{Count: 1000, Messages: []tg.MessageClass{
+			&tg.MessageService{ID: 42},
+			&tg.MessageService{ID: 41},
+		}}
+		res, err := p.processHistory(hist, peer, 50)
+		require.NoError(t, err)
+		assert.Empty(t, res.Messages)
+		assert.True(t, res.HasMore)
+		assert.Equal(t, 41, res.NextID)
 	})
 
 	t.Run("full page of dropped messages does not report more", func(t *testing.T) {
@@ -396,4 +408,24 @@ func TestHistoryOffsetDate(t *testing.T) {
 			assert.True(t, got.Equal(tt.want))
 		})
 	}
+}
+
+// TestTelegramDateBounds pins the translation from the tool contract
+// (inclusive from_date, exclusive to_date) to Telegram's strict min_date and
+// max_date/offset_date, including sub-second inputs that must not shift a
+// whole-second message across the boundary.
+func TestTelegramDateBounds(t *testing.T) {
+	whole := time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC)
+	frac := whole.Add(500 * time.Millisecond)
+	s := int(whole.Unix())
+
+	// Inclusive lower bound: a message at exactly `whole` is kept (s > min).
+	assert.Equal(t, s-1, telegramFromInclusive(whole))
+	// A message at `whole` is before `frac`, so it must be excluded (s > min fails).
+	assert.Equal(t, s, telegramFromInclusive(frac))
+
+	// Exclusive upper bound: a message at exactly `whole` is dropped (s < max fails).
+	assert.Equal(t, s, telegramBefore(whole))
+	// A message at `whole` is before `frac`, so it must be kept (s < max).
+	assert.Equal(t, s+1, telegramBefore(frac))
 }

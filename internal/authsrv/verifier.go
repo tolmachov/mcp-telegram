@@ -8,6 +8,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
 
+	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
@@ -44,6 +45,10 @@ func (a *AuthServer) Verifier() auth.TokenVerifier {
 		if !now.Before(time.Unix(c.ExpiresAt, 0)) {
 			return nil, fmt.Errorf("%w: token expired", auth.ErrInvalidToken)
 		}
+		if normalizeResource(c.Resource) != a.cfg.IssuerURL {
+			a.logger.Warn("access token rejected: resource mismatch")
+			return nil, fmt.Errorf("%w: resource mismatch", auth.ErrInvalidToken)
+		}
 		userID, err := tgid.Parse(c.Subject)
 		if err != nil {
 			a.logger.Warn("access token rejected: malformed subject", "reason", err)
@@ -56,10 +61,10 @@ func (a *AuthServer) Verifier() auth.TokenVerifier {
 			a.logger.Warn("access token rejected: user no longer allowed", "user_id", userID)
 			return nil, fmt.Errorf("%w: user not allowed", auth.ErrInvalidToken)
 		}
-		// A non-empty session id must be well-formed: it reaches the storage
-		// layer as an object-name suffix. It is server-minted, so a malformed
-		// value means a forged/corrupt token, not a legacy (empty-sid) one.
-		if c.SessionID != "" && !validSessionID(c.SessionID) {
+		// The mandatory session id must be well-formed: it reaches the storage
+		// layer as an object-name suffix. A malformed or empty value means a
+		// forged, corrupt, or obsolete token.
+		if !sessionstore.ValidSID(c.SessionID) || !sessionstore.ValidSID(c.Family) || len(c.SessionKey) != sessionKeyLen {
 			a.logger.Warn("access token rejected: malformed session id", "user_id", userID)
 			return nil, fmt.Errorf("%w: not a valid access token", auth.ErrInvalidToken)
 		}
@@ -83,14 +88,13 @@ type UserIdentity struct {
 	// Username is the Telegram @username captured at login (may be empty:
 	// usernames are optional and can change; ID is the stable key).
 	Username string
-	// SessionID is this authorization's session-object suffix. Empty for a
-	// legacy (pre-upgrade) session. Together with ID it keys the client pool,
+	// SessionID is this authorization's session-object suffix. Together with ID it keys the client pool,
 	// so multiple independent authorizations of one account each get their own
 	// assembly.
 	SessionID string
 	// SessionKey is this authorization's per-session encryption key from the
 	// token. It is passed to the session store to decrypt this session's blob
-	// (empty for a legacy master-only session). Treat as secret: never log it.
+	// Treat as secret: never log it.
 	SessionKey []byte
 }
 
@@ -119,21 +123,4 @@ func IdentityFromTokenInfo(info *auth.TokenInfo) (*UserIdentity, bool) {
 		ID: extra.ID, Username: extra.Username,
 		SessionID: extra.SessionID, SessionKey: extra.SessionKey,
 	}, true
-}
-
-// NewTokenInfoForTesting fabricates the TokenInfo this package's Verifier
-// would produce. It exists so other packages can unit-test handlers that sit
-// behind auth.RequireBearerToken (e.g. the per-user client pool) without
-// running the OAuth flow.
-func NewTokenInfoForTesting(id tgid.UserID, username, sessionID string, sessionKey []byte, expiry time.Time) *auth.TokenInfo {
-	return &auth.TokenInfo{
-		UserID:     id.String(),
-		Expiration: expiry,
-		Extra: map[string]any{
-			extraIdentityKey: identityExtra{
-				ID: id, Username: username,
-				SessionID: sessionID, SessionKey: sessionKey,
-			},
-		},
-	}
 }

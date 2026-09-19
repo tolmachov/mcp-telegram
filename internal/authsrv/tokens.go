@@ -31,6 +31,7 @@ type stateClaims struct {
 // and SessionKey identify and decrypt this authorization's own session object
 // (see the SessionKey note on accessClaims).
 type codeClaims struct {
+	JTI           string `json:"jti"`
 	Subject       string `json:"sub"`
 	Username      string `json:"un,omitempty"`
 	ClientID      string `json:"cid"`
@@ -48,7 +49,7 @@ type codeClaims struct {
 // per-session encryption key. SessionKey is a decryption key share, not just
 // an authenticator: combined with the master key it decrypts the stored
 // session, so it must never be logged and only travels inside this sealed
-// token. Both are empty for pre-upgrade (legacy, master-only) sessions.
+// token. Both fields are mandatory; tokens without them are rejected.
 type accessClaims struct {
 	Subject    string `json:"sub"`
 	Username   string `json:"un,omitempty"`
@@ -56,6 +57,7 @@ type accessClaims struct {
 	Resource   string `json:"res,omitempty"`
 	SessionID  string `json:"sid,omitempty"`
 	SessionKey []byte `json:"sk,omitempty"`
+	Family     string `json:"fam"`
 	IssuedAt   int64  `json:"iat"`
 	ExpiresAt  int64  `json:"exp"`
 }
@@ -73,6 +75,8 @@ type refreshClaims struct {
 	Resource   string `json:"res,omitempty"`
 	SessionID  string `json:"sid,omitempty"`
 	SessionKey []byte `json:"sk,omitempty"`
+	Family     string `json:"fam"`
+	Generation int64  `json:"gen"`
 	IssuedAt   int64  `json:"iat"`
 	LoginAt    int64  `json:"lat"`
 }

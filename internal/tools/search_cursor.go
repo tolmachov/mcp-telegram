@@ -9,11 +9,8 @@ import (
 // kept short because the full encoded cursor ends up in tool outputs and
 // inputs, and LLMs count against context on every copy.
 //
-// The envelope carries a version tag so the decoder can distinguish an
-// old cursor it can still understand from a newer one it cannot. Bumping
-// cursorVersion and teaching ParseGlobalSearchCursor to migrate earlier
-// shapes is how future schema changes stay backwards-compatible without
-// invalidating every in-flight pagination.
+// The envelope carries a version tag so the decoder rejects every old or
+// newer schema. Schema changes deliberately invalidate in-flight pagination.
 type cursorEnvelope struct {
 	Version int               `json:"v"`
 	Rate    int               `json:"r"`
@@ -26,7 +23,7 @@ type cursorEnvelope struct {
 func (e cursorEnvelope) cursorVersion() int { return e.Version }
 
 // cursorSchemaVersion is the current envelope schema version.
-const cursorSchemaVersion = 1
+const cursorSchemaVersion = 2
 
 // FormatGlobalSearchCursor renders a cursor as an opaque base64 string.
 // Invariant: ParseGlobalSearchCursor(FormatGlobalSearchCursor(c)) round-trips

@@ -34,7 +34,7 @@ func StateDir() (string, error) {
 	}
 	// MkdirAll honours 0o700 only on directories it creates. If the mcp-telegram
 	// dir was restored from a backup or migrated with looser perms, tighten it
-	// now — config.json and session.json are 0o600 so contents are unreadable,
+	// now — per-key config files and the session file are 0o600 so contents are unreadable,
 	// but a listable dir still leaks which keys exist.
 	//nolint:gosec // G302: 0o700 is the correct restrictive mode for a directory (needs the execute bit to be traversable).
 	if err := os.Chmod(stateDir, 0o700); err != nil {

@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tolmachov/mcp-telegram/internal/authsrv"
+	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
@@ -19,6 +23,21 @@ func testServer(t *testing.T) *Server {
 	return &Server{
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+}
+
+// testAuth returns a valid embedded-OAuth configuration and an in-memory
+// session store, the pair the http transport requires.
+func testAuth(t *testing.T, issuer string) (*authsrv.Config, sessionstore.Store) {
+	t.Helper()
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("generating key: %v", err)
+	}
+	return &authsrv.Config{
+		IssuerURL: issuer,
+		Allow:     authsrv.AllowUsers(42),
+		TokenKeys: []string{base64.StdEncoding.EncodeToString(key)},
+	}, sessionstore.NewMemory()
 }
 
 // freePort reserves an ephemeral port and immediately releases it so
@@ -50,39 +69,25 @@ func waitForServer(t *testing.T, url string) *http.Response {
 	return nil
 }
 
-// TestServeHTTPHealthzAndShutdown drives the production HTTP scaffolding:
-// healthz responds, unknown paths reach the wrapped handler, and canceling
-// the context shuts the server down cleanly.
-func TestServeHTTPHealthzAndShutdown(t *testing.T) {
+// TestServeHTTPServesAndShutsDown drives the production HTTP scaffolding:
+// requests reach the wrapped handler, and canceling the context shuts the
+// server down cleanly.
+func TestServeHTTPServesAndShutsDown(t *testing.T) {
 	s := testServer(t)
 	addr := freePort(t)
 
-	handler := withHealthz(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTeapot)
-	}))
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- s.serveHTTP(ctx, handler, addr) }()
 
-	base := fmt.Sprintf("http://%s", addr)
-	resp := waitForServer(t, base+"/healthz")
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("healthz status = %d, want 200", resp.StatusCode)
-	}
-	body, _ := io.ReadAll(resp.Body)
+	resp := waitForServer(t, fmt.Sprintf("http://%s/anything", addr))
 	_ = resp.Body.Close()
-	if string(body) != "ok" {
-		t.Errorf("healthz body = %q, want %q", body, "ok")
-	}
-
-	resp2, err := http.Get(base + "/anything") //nolint:gosec,noctx // test-local URL
-	if err != nil {
-		t.Fatalf("GET /anything: %v", err)
-	}
-	_ = resp2.Body.Close()
-	if resp2.StatusCode != http.StatusTeapot {
-		t.Errorf("wrapped handler status = %d, want 418", resp2.StatusCode)
+	if resp.StatusCode != http.StatusTeapot {
+		t.Errorf("wrapped handler status = %d, want 418", resp.StatusCode)
 	}
 
 	cancel()
@@ -112,7 +117,7 @@ func TestServeHTTPCrossOriginProtection(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- s.serveHTTP(ctx, handler, addr) }()
+	go func() { done <- s.serveHTTP(ctx, withCrossOriginProtection(handler), addr) }()
 
 	base := fmt.Sprintf("http://%s", addr)
 	_ = waitForServer(t, base+"/").Body.Close()
@@ -172,12 +177,22 @@ func TestNewTransportValidation(t *testing.T) {
 	t.Run("http requires addr", func(t *testing.T) {
 		opts := base()
 		opts.Transport = TransportHTTP
+		opts.Auth, opts.SessionStore = testAuth(t, "http://127.0.0.1")
 		if _, err := New(opts); err == nil {
 			t.Error("New accepted http transport without HTTPAddr")
 		}
 		opts.HTTPAddr = ":0"
 		if _, err := New(opts); err != nil {
 			t.Errorf("New rejected http transport with HTTPAddr: %v", err)
+		}
+	})
+
+	t.Run("http requires oauth", func(t *testing.T) {
+		opts := base()
+		opts.Transport = TransportHTTP
+		opts.HTTPAddr = ":0"
+		if _, err := New(opts); err == nil {
+			t.Error("New accepted http transport without Auth")
 		}
 	})
 

@@ -34,6 +34,8 @@ const (
 // errTooManyLogins is returned by addPending when the registry is full.
 var errTooManyLogins = fmt.Errorf("too many concurrent login attempts")
 
+var errAuthServerNotRunning = fmt.Errorf("authorization server is not running")
+
 // pendingLogin is one /authorize request waiting for its Telegram QR login
 // to complete. It pairs the OAuth request (kept as the sealed state blob, so
 // finalizeLogin re-validates integrity and the 10-minute state TTL through
@@ -80,16 +82,14 @@ func newLoginID() (string, error) {
 	return randomHex(16)
 }
 
-// addPending registers a login flow under a fresh random id. It fails with
-// errTooManyLogins when the registry is at global capacity or the requesting
-// IP already holds its per-IP share (both checked after sweeping expired
-// entries); the caller must then abort the flow itself.
-func (a *AuthServer) addPending(request string, flow LoginFlow, ip string) (*pendingLogin, error) {
+// reservePending atomically consumes admission capacity before the expensive
+// MTProto login flow is started. The reservation is activated afterwards.
+func (a *AuthServer) reservePending(request, ip string) (*pendingLogin, error) {
 	id, err := newLoginID()
 	if err != nil {
 		return nil, err
 	}
-	p := &pendingLogin{id: id, request: request, flow: flow, created: a.now(), ip: ip}
+	p := &pendingLogin{id: id, request: request, created: a.now(), ip: ip}
 
 	a.pendingMu.Lock()
 	a.sweepExpiredLocked(a.now())
@@ -117,6 +117,49 @@ func (a *AuthServer) addPending(request string, flow LoginFlow, ip string) (*pen
 	return p, nil
 }
 
+// reserveLivePending couples lifecycle admission with registry admission. The
+// lifecycle lock prevents Close from draining the registry between the started
+// check and insertion; after insertion Close can safely remove the reservation,
+// causing activatePending to reject and abort a just-started flow.
+func (a *AuthServer) reserveLivePending(request, ip string) (*pendingLogin, context.Context, error) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	if !a.started || a.closed || a.loginCtx == nil {
+		return nil, nil, errAuthServerNotRunning
+	}
+	p, err := a.reservePending(request, ip)
+	if err != nil {
+		return nil, nil, err
+	}
+	return p, a.loginCtx, nil
+}
+
+// activatePending attaches a successfully started flow to a reservation. It
+// fails when shutdown removed the reservation while the flow was starting.
+func (a *AuthServer) activatePending(p *pendingLogin, flow LoginFlow) bool {
+	a.pendingMu.Lock()
+	defer a.pendingMu.Unlock()
+	current, ok := a.pending[p.id]
+	if !ok || current != p {
+		return false
+	}
+	p.flow = flow
+	return true
+}
+
+// addPending remains a compact test helper for already-created fake flows.
+func (a *AuthServer) addPending(request string, flow LoginFlow, ip string) error {
+	p, err := a.reservePending(request, ip)
+	if err != nil {
+		return err
+	}
+	if !a.activatePending(p, flow) {
+		flow.Abort()
+		return context.Canceled
+	}
+	return nil
+}
+
 // lookupPending returns the live pending login with the given id. Entries
 // past their TTL are treated as absent and aborted on the spot, so expiry
 // does not depend on janitor timing.
@@ -126,7 +169,9 @@ func (a *AuthServer) lookupPending(id string) (*pendingLogin, bool) {
 	if ok && a.now().Sub(p.created) > pendingLoginTTL {
 		delete(a.pending, id)
 		a.pendingMu.Unlock()
-		p.flow.Abort()
+		if p.flow != nil {
+			p.flow.Abort()
+		}
 		return nil, false
 	}
 	a.pendingMu.Unlock()
@@ -140,7 +185,7 @@ func (a *AuthServer) removePending(id string) {
 	p, ok := a.pending[id]
 	delete(a.pending, id)
 	a.pendingMu.Unlock()
-	if ok {
+	if ok && p.flow != nil {
 		p.flow.Abort()
 	}
 }
@@ -159,7 +204,9 @@ func (a *AuthServer) sweepExpiredLocked(now time.Time) {
 		}
 	}
 	for _, p := range stale {
-		p.flow.Abort()
+		if p.flow != nil {
+			p.flow.Abort()
+		}
 	}
 }
 
@@ -345,9 +392,27 @@ func (a *AuthServer) finalizeLogin(ctx context.Context, w http.ResponseWriter, p
 		fail("Storing the Telegram session failed. Start over from your MCP client.")
 		return
 	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), finalizeTimeout)
+		defer cancel()
+		if err := a.store.Delete(cleanupCtx, user.ID, sid); err != nil {
+			a.logger.Error("cleaning up uncommitted telegram session failed", "user_id", user.ID, "session", sid, "err", err)
+		}
+	}()
 
 	now := a.now()
+	jti, err := randomHex(sessionIDLen)
+	if err != nil {
+		a.logger.Error("generating authorization code id failed", "err", err)
+		fail("Internal error. Start over from your MCP client.")
+		return
+	}
 	code, err := sealBlob(a.sealer, codeBlob, codeClaims{
+		JTI:           jti,
 		Subject:       user.ID.String(),
 		Username:      user.Username,
 		ClientID:      sc.ClientID,
@@ -371,6 +436,7 @@ func (a *AuthServer) finalizeLogin(ctx context.Context, w http.ResponseWriter, p
 	}
 
 	a.logger.Info("telegram login completed", "user_id", user.ID, "username", user.Username)
+	committed = true
 	a.removePending(p.id)
 	a.writeJSON(w, http.StatusOK, &pollResponse{Status: "done", Redirect: redirect})
 }

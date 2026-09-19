@@ -151,11 +151,25 @@ func (h *MessageReadHandler) markChatAsRead(ctx context.Context, chatID int64) e
 
 	switch p := peer.(type) {
 	case *tg.InputPeerChannel:
+		history, historyErr := h.client.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+			Peer:  peer,
+			Limit: 1,
+		})
+		if historyErr != nil {
+			return fmt.Errorf("failed to get channel top message: %w", historyErr)
+		}
+		maxID := topHistoryMessageID(history)
+		if maxID == 0 {
+			// Empty channel: there is nothing to acknowledge, and Telegram rejects
+			// channels.readHistory with a zero MaxID.
+			return nil
+		}
 		_, err = h.client.ChannelsReadHistory(ctx, &tg.ChannelsReadHistoryRequest{
 			Channel: &tg.InputChannel{
 				ChannelID:  p.ChannelID,
 				AccessHash: p.AccessHash,
 			},
+			MaxID: maxID,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to mark channel as read: %w", err)
@@ -170,4 +184,33 @@ func (h *MessageReadHandler) markChatAsRead(ctx context.Context, chatID int64) e
 	}
 
 	return nil
+}
+
+func topHistoryMessageID(history tg.MessagesMessagesClass) int {
+	var raw []tg.MessageClass
+	switch h := history.(type) {
+	case *tg.MessagesMessages:
+		raw = h.Messages
+	case *tg.MessagesMessagesSlice:
+		raw = h.Messages
+	case *tg.MessagesChannelMessages:
+		raw = h.Messages
+	}
+	for _, item := range raw {
+		switch msg := item.(type) {
+		case *tg.Message:
+			if msg.ID > 0 {
+				return msg.ID
+			}
+		case *tg.MessageService:
+			if msg.ID > 0 {
+				return msg.ID
+			}
+		case *tg.MessageEmpty:
+			if msg.ID > 0 {
+				return msg.ID
+			}
+		}
+	}
+	return 0
 }

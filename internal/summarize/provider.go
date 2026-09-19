@@ -8,11 +8,40 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
 )
 
 // Provider is an interface for LLM providers that can summarize text.
 type Provider interface {
-	Summarize(ctx context.Context, prompt string) (string, error)
+	Summarize(ctx context.Context, req Request) (string, error)
+}
+
+// Request keeps trusted instructions separate from untrusted chat data. The
+// Messages field must contain a JSON array; providers place System in their
+// native system channel and never concatenate chat text into it.
+type Request struct {
+	System          string
+	Goal            string
+	PreviousSummary string
+	Messages        json.RawMessage
+}
+
+func (r Request) userContent() (string, error) {
+	if !json.Valid(r.Messages) {
+		return "", fmt.Errorf("messages is not valid JSON")
+	}
+	payload := struct {
+		Goal            string          `json:"goal"`
+		PreviousSummary string          `json:"previous_summary,omitempty"`
+		Messages        json.RawMessage `json:"messages"`
+	}{r.Goal, r.PreviousSummary, r.Messages}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshaling provider input: %w", err)
+	}
+	return string(raw), nil
 }
 
 // ProviderName represents a valid summarization provider name.
@@ -106,37 +135,72 @@ func postJSON(ctx context.Context, client *http.Client, providerName, url string
 		return fmt.Errorf("marshaling request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("sending request: %w", err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			slog.Debug("summarize: response body close failed", "provider", providerName, "err", err)
+	for attempt := 1; attempt <= 3; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("creating request: %w", err)
 		}
-	}()
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
 
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, httpMaxResponseBytes))
-	if err != nil {
-		return fmt.Errorf("reading response (status %d): %w", resp.StatusCode, err)
+		resp, err := client.Do(req)
+		if err != nil {
+			return fmt.Errorf("sending request: %w", err)
+		}
+		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, httpMaxResponseBytes))
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("summarize: response body close failed", "provider", providerName, "err", closeErr)
+		}
+		if readErr != nil {
+			return fmt.Errorf("reading response (status %d): %w", resp.StatusCode, readErr)
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			if err := json.Unmarshal(raw, respBody); err != nil {
+				return fmt.Errorf("unmarshaling response: %w", err)
+			}
+			return nil
+		}
+
+		statusErr := fmt.Errorf("%s returned status %d: %s", providerName, resp.StatusCode, errBodySnippet(raw))
+		if attempt == 3 || !retryableProviderStatus(resp.StatusCode) {
+			return statusErr
+		}
+		if err := waitForRetry(ctx, retryDelay(resp.Header.Get("Retry-After"), attempt)); err != nil {
+			return fmt.Errorf("%w: %w", err, statusErr)
+		}
 	}
+	panic("unreachable")
+}
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s returned status %d: %s", providerName, resp.StatusCode, errBodySnippet(raw))
+func retryableProviderStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status == http.StatusInternalServerError || status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
+}
+
+func retryDelay(retryAfter string, attempt int) time.Duration {
+	if seconds, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second
 	}
-
-	if err := json.Unmarshal(raw, respBody); err != nil {
-		return fmt.Errorf("unmarshaling response: %w", err)
+	if when, err := http.ParseTime(retryAfter); err == nil {
+		if delay := time.Until(when); delay > 0 {
+			return delay
+		}
 	}
+	base := 200 * time.Millisecond * time.Duration(1<<(attempt-1))
+	// Small bounded jitter prevents synchronized retries without introducing a
+	// shared pseudo-random generator into request handling.
+	return base + time.Duration(time.Now().UnixNano()%int64(100*time.Millisecond))
+}
 
-	return nil
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

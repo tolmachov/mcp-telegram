@@ -10,6 +10,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/authsrv"
+	"github.com/tolmachov/mcp-telegram/internal/tgid"
 	"github.com/tolmachov/mcp-telegram/internal/tools"
 )
 
@@ -38,7 +39,7 @@ var safeParamFields = map[string]struct{}{
 	// on the open deployment they name who/what a user queried, which is
 	// activity data, so they are length-redacted like free text.
 	"chat_id": {}, "chat_ids": {}, "from_chat_id": {}, "to_chat_id": {},
-	"folder_id": {}, "message_id": {}, "offset_id": {}, "top_msg_id": {},
+	"folder_id": {}, "message_id": {}, "before_message_id": {}, "top_msg_id": {},
 	"reply_to_message_id": {}, "anchor_id": {}, "from_sender_id": {},
 	"cursor": {}, "next_cursor": {},
 	// numbers / dates / enums
@@ -121,6 +122,14 @@ func requestUser(ctx context.Context, req mcp.Request) (*authsrv.UserIdentity, b
 		if extra := req.GetExtra(); extra != nil {
 			if u, ok := authsrv.IdentityFromTokenInfo(extra.TokenInfo); ok {
 				return u, true
+			}
+			// Logging needs only the stable numeric subject. Keep it observable
+			// even if middleware from another version omitted our typed Extra;
+			// authorization and pool dispatch still require the full identity.
+			if extra.TokenInfo != nil {
+				if id, err := tgid.Parse(extra.TokenInfo.UserID); err == nil {
+					return &authsrv.UserIdentity{ID: id}, true
+				}
 			}
 		}
 	}

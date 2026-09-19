@@ -9,17 +9,15 @@ import (
 )
 
 // keychainStore is a thin adapter over the shared macOS Keychain vault. The
-// vault is what actually reads/writes the single generic-password item; this
+// vault is what actually reads/writes independent generic-password items; this
 // type exists to satisfy the Store interface and translate secret.ErrNotFound
 // into config.ErrNotFound.
 type keychainStore struct {
 	vault *secret.Vault
 }
 
-// NewStore returns the process-wide config store backed by the shared vault.
-// The first Get/Set/List/LoadAll call triggers the single Keychain read; all
-// subsequent calls — including those made by the Telegram session storage —
-// hit the in-memory cache and do not prompt again.
+// NewStore returns a config store backed by the versioned Keychain service.
+// Every operation observes Keychain directly; there is no process cache.
 func NewStore() (Store, error) {
 	return &keychainStore{vault: secret.Shared()}, nil
 }

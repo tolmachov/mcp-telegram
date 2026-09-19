@@ -7,9 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -69,15 +66,31 @@ func RegisterTools(s *mcp.Server, handlers []Handler) {
 
 // parseDateFilter parses an RFC3339 date string for a filter field (e.g.
 // "from_date"). Returns an errResult on parse failure; ok is false in that case.
-func parseDateFilter(fieldName, value string) (t time.Time, errRes *mcp.CallToolResult, ok bool) {
-	parsed, err := time.Parse(time.RFC3339, value)
-	if err != nil {
-		return time.Time{}, errResult(fmt.Sprintf(
-			"invalid %s %q: %v. Expected RFC3339 format, e.g. \"2026-04-09T00:00:00Z\".",
-			fieldName, value, err,
-		)), false
+func parseDate(value string) (time.Time, error) {
+	if value == "" {
+		return time.Time{}, nil
 	}
-	return parsed, nil, true
+	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
+		if parsed, err := time.ParseInLocation(layout, value, time.UTC); err == nil {
+			return parsed, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid date format %q, expected YYYY-MM-DD, YYYY-MM-DD HH:MM:SS (UTC), or RFC3339 with explicit offset", value)
+}
+
+func parseDateWindow(from, to string) (time.Time, time.Time, *mcp.CallToolResult) {
+	minDate, err := parseDate(from)
+	if err != nil {
+		return time.Time{}, time.Time{}, errResult(fmt.Sprintf("invalid from_date: %v", err))
+	}
+	maxDate, err := parseDate(to)
+	if err != nil {
+		return time.Time{}, time.Time{}, errResult(fmt.Sprintf("invalid to_date: %v", err))
+	}
+	if !minDate.IsZero() && !maxDate.IsZero() && !minDate.Before(maxDate) {
+		return time.Time{}, time.Time{}, errResult(fmt.Sprintf("from_date (%s) is not before to_date (%s); the date window is empty.", minDate.Format(time.RFC3339), maxDate.Format(time.RFC3339)))
+	}
+	return minDate, maxDate, nil
 }
 
 // ptrTrue returns a pointer to true. Used for *bool fields on
@@ -94,7 +107,7 @@ func sendProgress(ctx context.Context, req *mcp.CallToolRequest, progress, total
 	if req == nil || req.Session == nil {
 		return
 	}
-	token := req.Params.GetProgressToken()
+	token := requestProgressToken(req)
 	if token == nil {
 		return
 	}
@@ -106,6 +119,20 @@ func sendProgress(ctx context.Context, req *mcp.CallToolRequest, progress, total
 	}); err != nil {
 		slog.Debug("progress notification failed", "err", err)
 	}
+}
+
+func requestProgressToken(req *mcp.CallToolRequest) any {
+	if req == nil || req.Params == nil {
+		return nil
+	}
+	return req.Params.GetProgressToken()
+}
+
+func requestSession(req *mcp.CallToolRequest) *mcp.ServerSession {
+	if req == nil {
+		return nil
+	}
+	return req.Session
 }
 
 // sendProgressWithToken sends a single progress notification using an explicit
@@ -318,165 +345,13 @@ func errResolvePeer(chatID int64, err error) *mcp.CallToolResult {
 	))
 }
 
-// confirmDestructive gates a destructive action. confirmed=true is the
-// caller's in-band confirmation (per Server.Instructions the model asks the
-// user first); it is the only path that works in non-interactive clients,
-// where an elicitation form can never be accepted, so it skips elicitation.
-// Otherwise it asks the user via MCP elicitation. Returns (true, nil) when the
-// user confirms, or when the client
-// has a session but doesn't advertise elicitation capability (graceful
-// fallback — Claude is already instructed via Server.Instructions to confirm
-// verbally before proceeding). Returns (false, error) when there is no MCP
-// session at all (fail-closed: cannot present a confirmation UI).
-//
-// Per the official SDK pattern, we check the elicitation capability via
-// InitializeParams BEFORE calling Elicit, mirroring how the SDK itself
-// detects unsupported clients internally. This is cleaner than catching an
-// error after the call and avoids the previous SDK's reliance on a
-// not-supported sentinel error that doesn't exist in the official SDK.
-//
-// The flat-form schema below complies with the elicitation spec's "primitives
-// only, no nesting" constraint.
-func confirmDestructive(ctx context.Context, req *mcp.CallToolRequest, confirmed bool, message string) (bool, error) {
-	if confirmed {
-		return true, nil
-	}
-	if req == nil || req.Session == nil {
-		// Fail closed: no session means we cannot present a confirmation UI.
-		// Return an error so callers can surface a clear diagnostic instead of
-		// the misleading "Cancelled by user" message.
-		return false, fmt.Errorf("no MCP session available to confirm destructive action")
-	}
-	iparams := req.Session.InitializeParams()
-	if iparams == nil || iparams.Capabilities == nil || iparams.Capabilities.Elicitation == nil {
-		// Client doesn't support elicitation — proceed without UI confirmation.
-		// This also fires in non-interactive contexts (scripts, test harnesses).
-		// Log to both MCP session and slog so operators see it regardless of
-		// whether the client subscribes to log notifications.
-		slog.Info("confirmDestructive: client does not support elicitation; proceeding without confirmation")
-		mcpLog(ctx, req.Session, logLevelWarning, "elicitation", map[string]any{
-			"action":   "fallback_no_capability",
-			"behavior": "proceeding without UI confirm; client does not support elicitation",
-		})
-		return true, nil
-	}
-	result, err := req.Session.Elicit(ctx, &mcp.ElicitParams{
-		Mode:    "form",
-		Message: message,
-		RequestedSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"confirm": map[string]any{
-					"type":        "boolean",
-					"title":       "Confirm",
-					"description": "Tick to proceed; leave unchecked or cancel to abort.",
-				},
-			},
-			"required": []string{"confirm"},
-		},
-	})
-	if err != nil {
-		// Capability said yes but the call failed — log and decline rather
-		// than gracefully proceeding (the client *can* support elicitation,
-		// so a failure here is a real error worth surfacing).
-		mcpLog(ctx, req.Session, logLevelError, "elicitation", map[string]any{
-			"action": "elicit_failed",
-			"error":  err.Error(),
-		})
-		return false, fmt.Errorf("eliciting confirmation: %w", err)
-	}
-	if result.Action != "accept" {
-		return false, nil
-	}
-	// The SDK validates the response against RequestedSchema before returning, so
-	// result.Content["confirm"] should always be a bool when Action == "accept".
-	// The assertion can still fail if the SDK contract changes or a custom client
-	// sends a non-conformant response; the Warn makes that visible and the
-	// safe-default false ensures we decline rather than proceed.
-	confirmed, ok := result.Content["confirm"].(bool)
-	if !ok {
-		slog.Warn("confirmDestructive: elicitation response missing bool confirm field; declining")
-	}
-	return confirmed, nil
-}
-
-// rootsFromClient queries the MCP client for its workspace roots and returns
-// the local filesystem paths from any file:// URIs. Non-file roots are skipped;
-// malformed file:// URIs are logged at Debug level. Returns an empty slice when:
-//   - the client did not declare the roots capability
-//   - the client returned an error
-//   - the roots list is empty or contains no file:// URIs
-//
-// Per MCP spec, this is best-effort: a server should not fail if the client
-// doesn't expose roots — it should fall back to its own configured allow-list.
-func rootsFromClient(ctx context.Context, ss *mcp.ServerSession) []string {
-	if ss == nil {
+// requireExplicitConfirmation is the sole authority gate for irreversible
+// tool calls. MCP UI capabilities and model instructions are advisory only.
+func requireExplicitConfirmation(confirm bool, action string) *mcp.CallToolResult {
+	if confirm {
 		return nil
 	}
-	iparams := ss.InitializeParams()
-	if iparams == nil || iparams.Capabilities == nil {
-		return nil
-	}
-	// Roots is a value type on ClientCapabilities (not a pointer), so we can't
-	// nil-check it directly. Instead, attempt the call and ignore errors —
-	// hosts that don't support roots will return an error or empty list.
-	result, err := ss.ListRoots(ctx, &mcp.ListRootsParams{})
-	if err != nil {
-		slog.Debug("rootsFromClient: ListRoots failed", "err", err)
-		return nil
-	}
-	if result == nil {
-		return nil
-	}
-	paths := make([]string, 0, len(result.Roots))
-	for _, root := range result.Roots {
-		path, err := fileURIToPath(root.URI)
-		if err != nil {
-			// Non-file:// roots (http://, etc.) are legitimately skipped per
-			// MCP spec. Log only when the scheme is file:// to distinguish a
-			// malformed path grant from a deliberate non-file root.
-			if len(root.URI) >= 7 && root.URI[:7] == "file://" {
-				slog.Debug("rootsFromClient: skipping malformed file URI", "uri", root.URI, "err", err)
-			}
-			continue
-		}
-		paths = append(paths, path)
-	}
-	return paths
-}
-
-// fileURIToPath converts a file:// URI into a local filesystem path.
-// It handles percent-decoding and Windows drive-letter forms like
-// file:///C:/Users/alice/project, which url.Parse leaves as /C:/...
-func fileURIToPath(raw string) (string, error) {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "", fmt.Errorf("parsing file uri %q: %w", raw, err)
-	}
-	if u.Scheme != "file" {
-		return "", fmt.Errorf("unsupported uri scheme %q", u.Scheme)
-	}
-	p, err := url.PathUnescape(u.Path)
-	if err != nil {
-		return "", fmt.Errorf("unescaping file uri path %q: %w", u.Path, err)
-	}
-	// Windows file URIs carry drive letters in the path with a leading slash.
-	// Preserve UNC hosts and strip the synthetic leading slash only for drive
-	// letters. filepath.FromSlash converts separators appropriately on Windows.
-	if runtime.GOOS == "windows" {
-		if u.Host != "" {
-			p = `\\` + u.Host + filepath.FromSlash(p)
-		} else if len(p) >= 3 && p[0] == '/' && p[2] == ':' && ((p[1] >= 'A' && p[1] <= 'Z') || (p[1] >= 'a' && p[1] <= 'z')) {
-			p = p[1:]
-		}
-		return filepath.Clean(filepath.FromSlash(p)), nil
-	}
-	if u.Host != "" {
-		p = "//" + u.Host + p
-	}
-	// Keep POSIX paths slash-based so file:// URIs from clients on Unix map
-	// exactly to local paths on the same machine.
-	return filepath.Clean(strings.ReplaceAll(p, `\`, `/`)), nil
+	return errResult(fmt.Sprintf("explicit confirmation required: set confirm=true to %s after the user approves the action", action))
 }
 
 // clampLimit returns limit clamped to [1, maxLimit], or defaultVal when limit is non-positive.

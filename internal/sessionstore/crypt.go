@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/gotd/td/session"
 
@@ -17,27 +18,20 @@ import (
 )
 
 // hkdfInfoSession domain-separates the session-encryption subkey from the
-// authsrv token subkeys derived from the same AUTH_TOKEN_KEY master keys: a
+// authsrv token subkeys derived from the same MCP_AUTH_TOKEN_KEYS master keys: a
 // component that can decrypt sessions must not be able to mint tokens and
-// vice versa. The v1 label derives the legacy master-only key (empty userKey);
-// the v2 label derives the split key that additionally folds in the per-session
-// userKey via the HKDF salt.
-const (
-	hkdfInfoSession   = "mcp-telegram/sessionstore/aead/v1"
-	hkdfInfoSessionV2 = "mcp-telegram/sessionstore/aead/v2"
-)
+// vice versa. The v3 key additionally folds in the per-authorization userKey
+// via the HKDF salt.
+const hkdfInfoSession = "mcp-telegram/sessionstore/aead/v3"
 
-// sessionBlobV2 is the first byte of a v2 (split-key) blob. Legacy v1 blobs
-// have no version byte and begin directly with the key ID; a v1 key ID can be
-// any byte, so v1 and v2 blobs are told apart by whether a userKey is present
-// (they are always minted together), not by sniffing this byte.
-const sessionBlobV2 = 0x02
+// sessionBlobVersion is the mandatory first byte of every supported blob.
+const sessionBlobVersion = 0x03
 
 const masterKeyLen = 32
 
-// userKeyLen is the required length of a v2 per-session key (matches the key
+// userKeyLen is the required length of a v3 per-session key (matches the key
 // authsrv mints). Enforced in aeadFor so a short/low-entropy key can never seal
-// or open a v2 blob — the split-key protection must not silently degrade if an
+// or open a v3 blob — the split-key protection must not silently degrade if an
 // upstream bug ever passes a malformed key.
 const userKeyLen = 32
 
@@ -52,13 +46,11 @@ var ErrCorruptSession = errors.New("sessionstore: cannot decrypt session blob")
 
 // cryptKey is one master key. The one-byte id (first byte of the master key's
 // SHA-256) prefixes every blob so decryption can pick the right key during
-// rotation — same scheme as the authsrv key ring. v1AEAD is the cached
-// legacy (master-only) AEAD; v2 AEADs are derived per (master, userKey) on
-// demand, so master is retained for that derivation.
+// rotation — same scheme as the authsrv key ring. AEADs are derived per
+// (master, userKey) on demand, so master is retained for that derivation.
 type cryptKey struct {
 	id     byte
 	master []byte
-	v1AEAD cipher.AEAD
 }
 
 // Cipher encrypts session blobs with the first key and decrypts with any.
@@ -67,7 +59,7 @@ type Cipher struct {
 	issuer string
 }
 
-// NewCipher parses base64-encoded 32-byte master keys (the AUTH_TOKEN_KEY
+// NewCipher parses base64-encoded 32-byte master keys (the MCP_AUTH_TOKEN_KEYS
 // values) into a session cipher. The first key encrypts new blobs; all keys
 // decrypt, enabling rotation. issuer participates in the AAD so blobs cannot
 // travel between deployments.
@@ -82,10 +74,7 @@ func NewCipher(encodedKeys []string, issuer string) (*Cipher, error) {
 		if err != nil {
 			return nil, fmt.Errorf("sessionstore key %d: %w", i, err)
 		}
-		k, err := deriveCryptKey(master)
-		if err != nil {
-			return nil, fmt.Errorf("sessionstore key %d: %w", i, err)
-		}
+		k := deriveCryptKey(master)
 		if prev, dup := seen[k.id]; dup {
 			return nil, fmt.Errorf("sessionstore keys %d and %d collide on key ID %d: replace one of them", prev, i, k.id)
 		}
@@ -111,19 +100,11 @@ func decodeMasterKey(e string) ([]byte, error) {
 	return nil, fmt.Errorf("key is not valid base64")
 }
 
-func deriveCryptKey(master []byte) (*cryptKey, error) {
+func deriveCryptKey(master []byte) *cryptKey {
 	sum := sha256.Sum256(master)
-	aeadKey, err := hkdf.Key(sha256.New, master, nil, hkdfInfoSession, 32)
-	if err != nil {
-		return nil, fmt.Errorf("deriving AEAD key: %w", err)
-	}
-	aead, err := newGCM(aeadKey)
-	if err != nil {
-		return nil, err
-	}
 	m := make([]byte, len(master))
 	copy(m, master)
-	return &cryptKey{id: sum[0], master: m, v1AEAD: aead}, nil
+	return &cryptKey{id: sum[0], master: m}
 }
 
 // newGCM builds an AES-256-GCM AEAD from a 32-byte key.
@@ -139,39 +120,26 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 	return aead, nil
 }
 
-// aeadFor returns the AEAD for one blob. With no userKey it is the cached
-// legacy (master-only) AEAD; with a userKey it is the v2 key derived by folding
-// the per-session userKey into the HKDF salt, so the resulting key depends on
-// BOTH the master and userKey.
+// aeadFor returns the AEAD derived from both the master and per-session key.
 func (c *Cipher) aeadFor(k *cryptKey, userKey []byte) (cipher.AEAD, error) {
-	if len(userKey) == 0 {
-		return k.v1AEAD, nil
-	}
 	if len(userKey) != userKeyLen {
-		return nil, fmt.Errorf("sessionstore: v2 session key must be %d bytes, got %d", userKeyLen, len(userKey))
+		return nil, fmt.Errorf("sessionstore: session key must be %d bytes, got %d", userKeyLen, len(userKey))
 	}
-	aeadKey, err := hkdf.Key(sha256.New, k.master, userKey, hkdfInfoSessionV2, 32)
+	aeadKey, err := hkdf.Key(sha256.New, k.master, userKey, hkdfInfoSession, 32)
 	if err != nil {
-		return nil, fmt.Errorf("deriving v2 AEAD key: %w", err)
+		return nil, fmt.Errorf("deriving v3 AEAD key: %w", err)
 	}
 	return newGCM(aeadKey)
 }
 
-// aad binds a blob to this deployment and user, so a blob copied to another
-// user's key or another deployment fails authentication. The v2 variant also
-// binds the blob version, so a v1 and v2 blob can never be confused.
-func (c *Cipher) aad(userID tgid.UserID, v2 bool) []byte {
-	if v2 {
-		return []byte(c.issuer + "|session|v2|" + userID.String())
-	}
-	return []byte(c.issuer + "|session|" + userID.String())
+// aad binds a blob to this deployment, format, and user.
+func (c *Cipher) aad(userID tgid.UserID) []byte {
+	return []byte(c.issuer + "|session|v3|" + userID.String())
 }
 
-// seal returns [0x02 ||] keyID || nonce || AEAD ciphertext — the leading
-// version byte is present only for v2 (non-empty userKey) blobs.
+// seal returns version || keyID || nonce || AEAD ciphertext.
 func (c *Cipher) seal(userID tgid.UserID, userKey, plaintext []byte) ([]byte, error) {
 	k := c.keys[0]
-	v2 := len(userKey) > 0
 	aead, err := c.aeadFor(k, userKey)
 	if err != nil {
 		return nil, err
@@ -180,34 +148,19 @@ func (c *Cipher) seal(userID tgid.UserID, userKey, plaintext []byte) ([]byte, er
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("generating nonce: %w", err)
 	}
-	header := 1 // keyID
-	if v2 {
-		header = 2 // version byte + keyID
-	}
-	buf := make([]byte, 0, header+len(nonce)+len(plaintext)+aead.Overhead())
-	if v2 {
-		buf = append(buf, sessionBlobV2)
-	}
+	buf := make([]byte, 0, 2+len(nonce)+len(plaintext)+aead.Overhead())
+	buf = append(buf, sessionBlobVersion)
 	buf = append(buf, k.id)
 	buf = append(buf, nonce...)
-	return aead.Seal(buf, nonce, plaintext, c.aad(userID, v2)), nil
+	return aead.Seal(buf, nonce, plaintext, c.aad(userID)), nil
 }
 
-// open reverses seal. The userKey (present iff the blob is v2) selects the
-// derivation and the blob layout; v2 blobs must carry the version byte.
+// open reverses seal. Unsupported formats are rejected without migration.
 func (c *Cipher) open(userID tgid.UserID, userKey, blob []byte) ([]byte, error) {
-	v2 := len(userKey) > 0
-	idOffset := 0
-	if v2 {
-		if len(blob) < 1 || blob[0] != sessionBlobV2 {
-			return nil, fmt.Errorf("%w: expected a v2 session blob", ErrCorruptSession)
-		}
-		idOffset = 1
+	if len(blob) < 2 || blob[0] != sessionBlobVersion {
+		return nil, fmt.Errorf("%w: unsupported session blob version", ErrCorruptSession)
 	}
-	if len(blob) < idOffset+1 {
-		return nil, ErrCorruptSession
-	}
-	keyID := blob[idOffset]
+	keyID := blob[1]
 	var key *cryptKey
 	for _, k := range c.keys {
 		if k.id == keyID {
@@ -220,14 +173,14 @@ func (c *Cipher) open(userID tgid.UserID, userKey, blob []byte) ([]byte, error) 
 	}
 	aead, err := c.aeadFor(key, userKey)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrCorruptSession, err)
 	}
-	headerLen := idOffset + 1 + aead.NonceSize()
+	headerLen := 2 + aead.NonceSize()
 	if len(blob) < headerLen {
 		return nil, ErrCorruptSession
 	}
-	nonce := blob[idOffset+1 : headerLen]
-	plaintext, err := aead.Open(nil, nonce, blob[headerLen:], c.aad(userID, v2))
+	nonce := blob[2:headerLen]
+	plaintext, err := aead.Open(nil, nonce, blob[headerLen:], c.aad(userID))
 	if err != nil {
 		return nil, ErrCorruptSession
 	}
@@ -244,12 +197,9 @@ type encryptedStore struct {
 	cipher *Cipher
 }
 
-// validStoreSID guards the store boundary: a non-empty sid becomes an
-// object-name / file-path suffix, so a malformed one (callers should already
-// have rejected it) must never reach a backend. Empty sid is the legacy
-// per-user object. This is defense-in-depth — every production caller validates
-// upstream — against a future path that forwards a token sid unchecked.
-func validStoreSID(sid string) bool { return sid == "" || ValidSID(sid) }
+// validStoreSID guards the store boundary before a token-derived value can
+// become an object-name or file-path suffix.
+func validStoreSID(sid string) bool { return ValidSID(sid) }
 
 // errInvalidStoreSID is returned by every encryptedStore method when a caller
 // presents a malformed non-empty sid (see validStoreSID).
@@ -347,6 +297,22 @@ func (s *encryptedStore) DeleteRevoked(ctx context.Context, userID tgid.UserID, 
 	return nil
 }
 
+func (s *encryptedStore) RedeemCode(ctx context.Context, family, sid string, expiresAt time.Time) (bool, error) {
+	return s.inner.RedeemCode(ctx, family, sid, expiresAt)
+}
+
+func (s *encryptedStore) RotateGrant(ctx context.Context, family string, generation int64) (GrantRotation, error) {
+	return s.inner.RotateGrant(ctx, family, generation)
+}
+
+func (s *encryptedStore) RevokeGrant(ctx context.Context, family string) error {
+	return s.inner.RevokeGrant(ctx, family)
+}
+
+func (s *encryptedStore) SweepAuthState(ctx context.Context, now time.Time) error {
+	return s.inner.SweepAuthState(ctx, now)
+}
+
 type encryptedSession struct {
 	inner   session.Storage
 	cipher  *Cipher
@@ -375,17 +341,8 @@ func (s *encryptedSession) LoadSession(ctx context.Context) ([]byte, error) {
 }
 
 func (s *encryptedSession) StoreSession(ctx context.Context, data []byte) error {
-	// Legacy-pairing invariant, enforced at the write: a legacy session (empty
-	// sid) is master-only (empty userKey) and a suffixed session (non-empty sid)
-	// is split-key (non-empty userKey) — the two are always minted together, so a
-	// mismatch is an upstream programming error. Refuse to persist it rather than
-	// seal a v2 blob under the legacy object name (or a v1 blob under a suffixed
-	// name), which would silently strand the session as ErrCorruptSession on its
-	// next read. Reads are left to fail naturally as ErrCorruptSession, which also
-	// covers the legitimate "attacker probes a v2 blob master-only" path.
-	if (s.sid == "") != (len(s.userKey) == 0) {
-		return fmt.Errorf(
-			"sessionstore: refusing to store session with mismatched id/key pairing (both must be empty for legacy, both set otherwise)")
+	if !ValidSID(s.sid) || len(s.userKey) != userKeyLen {
+		return fmt.Errorf("sessionstore: refusing to store session with invalid id/key pairing")
 	}
 	blob, err := s.cipher.seal(s.userID, s.userKey, data)
 	if err != nil {

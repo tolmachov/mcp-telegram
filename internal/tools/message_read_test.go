@@ -11,6 +11,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	telegramfake "github.com/tolmachov/mcp-telegram/internal/testutil/telegram"
 )
 
 // staticErrInvoker fails every MTProto call with the same error, so MarkAsRead's
@@ -59,4 +61,35 @@ func TestMarkAsReadNonFloodErrorContinuesBatch(t *testing.T) {
 	assert.True(t, errRes.IsError)
 	// Every chat was attempted (no early stop), so the last one appears too.
 	assert.Contains(t, toolResultText(errRes), "chat_id=300")
+}
+
+func TestMarkAsReadChannelUsesCurrentTopMessage(t *testing.T) {
+	const channelID = int64(99)
+	inv := telegramfake.New(
+		telegramfake.Typed(func(_ context.Context, req *tg.ChannelsGetChannelsRequest, out *tg.MessagesChatsBox) error {
+			assert.Equal(t, channelID, req.ID[0].(*tg.InputChannel).ChannelID)
+			out.Chats = &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Channel{ID: channelID, AccessHash: 123}}}
+			return nil
+		}),
+		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
+			assert.Equal(t, 1, req.Limit)
+			out.Messages = &tg.MessagesChannelMessages{Messages: []tg.MessageClass{&tg.MessageService{ID: 77}}}
+			return nil
+		}),
+		telegramfake.Typed(func(_ context.Context, req *tg.ChannelsReadHistoryRequest, out *tg.BoolBox) error {
+			assert.Equal(t, 77, req.MaxID)
+			out.Bool = &tg.BoolTrue{}
+			return nil
+		}),
+	)
+	h := NewMessageReadHandler(tg.NewClient(inv))
+
+	errRes, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, MarkAsReadInput{
+		ChatIDs: []int64{-1_000_000_000_000 - channelID},
+	})
+	require.NoError(t, err)
+	require.Nil(t, errRes)
+	require.NotNil(t, out)
+	assert.Equal(t, 1, out.Successful)
+	assert.Zero(t, inv.Remaining())
 }

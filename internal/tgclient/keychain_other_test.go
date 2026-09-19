@@ -19,7 +19,7 @@ func TestResolveSessionPathUsesXDGStateHome(t *testing.T) {
 
 	got, err := resolveSessionPath()
 	require.NoError(t, err)
-	want := filepath.Join(os.Getenv("XDG_STATE_HOME"), "mcp-telegram", "session.json")
+	want := filepath.Join(os.Getenv("XDG_STATE_HOME"), "mcp-telegram", "session-v2.bin")
 	assert.Equal(t, want, got)
 }
 

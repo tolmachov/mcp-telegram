@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/gotd/td/tg"
@@ -30,14 +29,14 @@ type ForwardMessageInput struct {
 	FromChatID int64  `json:"from_chat_id" jsonschema:"The ID of the chat to forward from"`
 	MessageID  string `json:"message_id" jsonschema:"Opaque message handle from GetMessages. Scheduled handles (\"s:...\") are not supported."`
 	ToChatID   int64  `json:"to_chat_id" jsonschema:"The ID of the chat to forward to"`
-	Confirm    bool   `json:"confirm,omitempty" jsonschema:"Set to true to proceed with forwarding. Only set this after the user has confirmed. When false/omitted, the host may present its own confirmation prompt, and in non-interactive clients the call is cancelled without forwarding (status cancelled)."`
+	Confirm    bool   `json:"confirm" jsonschema:"Must be true after the user explicitly confirms publishing the copy to the destination chat"`
 }
 
 const statusForwarded = "forwarded"
 
 // ForwardMessageResult is the typed output of ForwardMessage.
 type ForwardMessageResult struct {
-	Status            string `json:"status"` // "forwarded" | "cancelled"
+	Status            string `json:"status"` // "forwarded"
 	FromChatID        int64  `json:"from_chat_id"`
 	OriginalMessageID string `json:"original_message_id"`
 	ToChatID          int64  `json:"to_chat_id"`
@@ -50,7 +49,7 @@ type ForwardMessageResult struct {
 func (h *MessageForwardHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "ForwardMessage",
-		Description: "Copy a message from one chat to another, preserving the original sender attribution and any media. Works with any regular message type (text, media, documents); scheduled handles (\"s:...\") are rejected. Both chats must be accessible to you. The copy is a new, independent message visible to all members of the destination chat — it does not carry the original send time. This duplicates content into another chat, so the host may ask for confirmation. To send fresh text instead of copying, use SendMessage.",
+		Description: "Copy a message from one chat to another, preserving the original sender attribution and any media. Works with any regular message type (text, media, documents); scheduled handles (\"s:...\") are rejected. Both chats must be accessible to you. The copy is a new, independent message visible to all members of the destination chat — it does not carry the original send time. The call is rejected unless confirm=true. To send fresh text instead of copying, use SendMessage.",
 		// DestructiveHint mirrors the other confirm-gated tools (DeleteMessages,
 		// LeaveChat): forwarding publishes content into another chat, an
 		// outward-facing side effect the handler asks to confirm.
@@ -72,10 +71,11 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	if in.ToChatID == 0 {
 		return errResult("to_chat_id is required. Use SearchChats or GetChats to find the destination chat ID."), nil, nil
 	}
+	if errRes := requireExplicitConfirmation(in.Confirm, "forward the message"); errRes != nil {
+		return errRes, nil, nil
+	}
 
-	// Resolve both peers before confirming so the confirmation dialog only
-	// appears for actionable requests, mirroring DeleteMessages and LeaveChat.
-	// A bad chat ID surfaces as a resolve error instead of a confirm-then-fail.
+	// A bad chat ID surfaces as a resolve error before the mutation is issued.
 	fromPeer, err := tgclient.ResolvePeer(ctx, h.client, in.FromChatID)
 	if err != nil {
 		return errResolvePeer(in.FromChatID, err), nil, nil
@@ -83,22 +83,6 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	toPeer, err := tgclient.ResolvePeer(ctx, h.client, in.ToChatID)
 	if err != nil {
 		return errResolvePeer(in.ToChatID, err), nil, nil
-	}
-
-	confirmed, err := confirmDestructive(ctx, req, in.Confirm, fmt.Sprintf(
-		"Forward message %s from chat %d to chat %d? This creates a permanent copy visible to everyone in the destination chat.",
-		ref.Format(), in.FromChatID, in.ToChatID,
-	))
-	if err != nil {
-		return errResult(fmt.Sprintf("confirmation failed: %v", err)), nil, nil
-	}
-	if !confirmed {
-		return nil, &ForwardMessageResult{
-			Status:            statusCancelled,
-			FromChatID:        in.FromChatID,
-			OriginalMessageID: ref.Format(),
-			ToChatID:          in.ToChatID,
-		}, nil
 	}
 
 	updates, err := h.client.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{

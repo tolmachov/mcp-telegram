@@ -303,7 +303,7 @@ func TestSearchDateInversion(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "min_date")
-	assert.Contains(t, err.Error(), "after max_date")
+	assert.Contains(t, err.Error(), "not before max_date")
 }
 
 // TestSearchGlobalDateInversion verifies the same guard in SearchGlobal.
@@ -319,5 +319,5 @@ func TestSearchGlobalDateInversion(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "min_date")
-	assert.Contains(t, err.Error(), "after max_date")
+	assert.Contains(t, err.Error(), "not before max_date")
 }

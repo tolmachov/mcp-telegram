@@ -82,8 +82,8 @@ func TestChatRefFromURL(t *testing.T) {
 
 // TestLeaveChatResolvePeerRejectsInvite verifies the documented contract that
 // LeaveChat refuses invite links before any network call. resolvePeer is called
-// directly because handle() reaches confirmDestructive first, which can't run
-// against a nil session. A nil client is safe: the invite branch returns early.
+// directly so the test isolates reference parsing. A nil client is safe because
+// the invite branch returns before any RPC.
 func TestLeaveChatResolvePeerRejectsInvite(t *testing.T) {
 	h := &LeaveChatHandler{}
 	ctx := context.Background()
@@ -128,10 +128,9 @@ func (f *leaveChatInvoker) Invoke(_ context.Context, input bin.Encoder, output b
 	}
 }
 
-// TestLeaveChatConfirmBypassesElicitation verifies the confirm gate:
-//   - Confirm=true skips confirmDestructive and reaches channels.leaveChannel,
-//     even with a nil session (which the elicitation path could never satisfy).
-//   - Confirm=false with no session bails out at the confirmation gate and never
+// TestLeaveChatConfirmBypassesElicitation verifies the fail-closed gate:
+//   - Confirm=true reaches channels.leaveChannel.
+//   - Confirm=false bails out at the confirmation gate and never
 //     hits the API, so the account is not left behind the user's back.
 func TestLeaveChatConfirmBypassesElicitation(t *testing.T) {
 	newHandler := func() (*LeaveChatHandler, *leaveChatInvoker) {

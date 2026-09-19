@@ -27,10 +27,13 @@ func TestBuildForumTopicsResult(t *testing.T) {
 		},
 	}
 
-	got := buildForumTopicsResult(resp, 4)
+	got, err := buildForumTopicsResult(resp, 0)
+	require.NoError(t, err)
 
 	require.Len(t, got.Topics, 3)
-	assert.Equal(t, 50, got.Count)
+	assert.Equal(t, 3, got.Count)
+	assert.Equal(t, 50, got.Total)
+	assert.Equal(t, 4, got.RawCount)
 
 	assert.Equal(t, "General", got.Topics[0].Title)
 	assert.True(t, got.Topics[0].Hidden)
@@ -60,51 +63,71 @@ func TestBuildForumTopicsResultLastPage(t *testing.T) {
 		},
 	}
 
-	got := buildForumTopicsResult(resp, 100)
+	got, err := buildForumTopicsResult(resp, 0)
+	require.NoError(t, err)
 
 	require.Len(t, got.Topics, 2)
 	assert.Nil(t, got.NextOffset)
 }
 
-// TestBuildForumTopicsResultAllDeleted locks in the fix for the pagination
-// loop: a full page consisting only of deleted topics (with Count reporting
-// more) must NOT advertise a next page, because there is no real topic to
-// anchor an advancing offset on. NextOffset stays nil so the tool emits no
-// (zero) cursor that would restart from the first page forever.
-func TestBuildForumTopicsResultAllDeleted(t *testing.T) {
-	resp := &tg.MessagesForumTopics{
-		Count: 50,
-		Topics: []tg.ForumTopicClass{
-			&tg.ForumTopicDeleted{ID: 1},
-			&tg.ForumTopicDeleted{ID: 2},
+func TestBuildForumTopicsPaginationAnchors(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		topics      []tg.ForumTopicClass
+		messages    []tg.MessageClass
+		createOrder bool
+		seen        int
+		total       int
+		want        *ForumTopicsOffset
+		wantErr     string
+	}{
+		{
+			name:     "trailing deleted topic resumes from live anchor",
+			topics:   []tg.ForumTopicClass{&tg.ForumTopic{ID: 3, TopMessage: 30, Date: 111}, &tg.ForumTopicDeleted{ID: 4}},
+			messages: []tg.MessageClass{&tg.Message{ID: 30, Date: 222}},
+			seen:     5, total: 10, want: &ForumTopicsOffset{Topic: 3, ID: 30, Date: 222, Seen: 6},
 		},
-	}
-
-	got := buildForumTopicsResult(resp, 2)
-
-	assert.Empty(t, got.Topics)
-	assert.Nil(t, got.NextOffset)
-}
-
-// TestBuildForumTopicsResultDateFallback exercises the offset_date fallback:
-// when the last topic's top message is absent from resp.Messages, the offset
-// date falls back to the topic's own creation date.
-func TestBuildForumTopicsResultDateFallback(t *testing.T) {
-	resp := &tg.MessagesForumTopics{
-		Count: 50,
-		Topics: []tg.ForumTopicClass{
-			&tg.ForumTopic{ID: 3, Title: "A", TopMessage: 30, Date: 111},
-			&tg.ForumTopic{ID: 4, Title: "B", TopMessage: 40, Date: 222},
+		{
+			name:     "service message anchors a newly created topic",
+			topics:   []tg.ForumTopicClass{&tg.ForumTopic{ID: 3, TopMessage: 3, Date: 111}},
+			messages: []tg.MessageClass{&tg.MessageService{ID: 3, Date: 222}},
+			total:    10, want: &ForumTopicsOffset{Topic: 3, ID: 3, Date: 222, Seen: 1},
 		},
-		// no Messages → top message 40 not found → fallback to lastTopic.Date
+		{
+			name:        "creation ordering uses topic date",
+			topics:      []tg.ForumTopicClass{&tg.ForumTopic{ID: 3, TopMessage: 30, Date: 111}},
+			messages:    []tg.MessageClass{&tg.Message{ID: 30, Date: 222}},
+			createOrder: true, total: 10, want: &ForumTopicsOffset{Topic: 3, ID: 30, Date: 111, Seen: 1},
+		},
+		{
+			name:   "all deleted cannot supply a continuation anchor",
+			topics: []tg.ForumTopicClass{&tg.ForumTopicDeleted{ID: 3}, &tg.ForumTopicDeleted{ID: 4}},
+			total:  10, wantErr: "only deleted topics",
+		},
+		{
+			name:   "missing top message cannot approximate activity date",
+			topics: []tg.ForumTopicClass{&tg.ForumTopic{ID: 3, TopMessage: 30, Date: 111}},
+			total:  10, wantErr: "missing anchor data",
+		},
+		{
+			name:   "terminal deleted page needs no anchor",
+			topics: []tg.ForumTopicClass{&tg.ForumTopicDeleted{ID: 3}},
+			seen:   9, total: 10,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := buildForumTopicsResult(&tg.MessagesForumTopics{
+				Count: tc.total, Topics: tc.topics, Messages: tc.messages, OrderByCreateDate: tc.createOrder,
+			}, tc.seen)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got.NextOffset)
+		})
 	}
-
-	got := buildForumTopicsResult(resp, 2)
-
-	require.NotNil(t, got.NextOffset)
-	assert.Equal(t, 4, got.NextOffset.Topic)
-	assert.Equal(t, 40, got.NextOffset.ID)
-	assert.Equal(t, 222, got.NextOffset.Date) // lastTopic.Date fallback
 }
 
 func TestExtractReplies(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/gotd/td/tg"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
@@ -21,6 +22,7 @@ type ChatsCache struct {
 	chats     []tgdata.ChatInfo
 	sessionID int64
 	truncated bool
+	loads     singleflight.Group
 }
 
 // NewChatsCache creates a cache backed by the given client.
@@ -43,19 +45,42 @@ func (c *ChatsCache) load(ctx context.Context, onProgress tgdata.ProgressFunc, r
 		}
 	}
 
-	result, err := tgdata.GetChats(ctx, c.client, onProgress)
-	if err != nil {
-		return nil, 0, false, err
+	type loadResult struct {
+		chats     []tgdata.ChatInfo
+		sid       int64
+		truncated bool
 	}
-	sid := cryptoRandInt64() | 1 // guarantee non-zero to distinguish an unloaded cache
-
-	c.mu.Lock()
-	c.chats = result.Chats
-	c.sessionID = sid
-	c.truncated = result.Truncated
-	c.mu.Unlock()
-
-	return result.Chats, sid, result.Truncated, nil
+	resultCh := c.loads.DoChan("dialogs", func() (any, error) {
+		if !refresh {
+			c.mu.RLock()
+			cached := loadResult{chats: c.chats, sid: c.sessionID, truncated: c.truncated}
+			c.mu.RUnlock()
+			if cached.sid != 0 {
+				return cached, nil
+			}
+		}
+		result, err := tgdata.GetChats(ctx, c.client, onProgress)
+		if err != nil {
+			return loadResult{}, err
+		}
+		loaded := loadResult{chats: result.Chats, sid: cryptoRandInt64() | 1, truncated: result.Truncated}
+		c.mu.Lock()
+		c.chats = loaded.chats
+		c.sessionID = loaded.sid
+		c.truncated = loaded.truncated
+		c.mu.Unlock()
+		return loaded, nil
+	})
+	select {
+	case <-ctx.Done():
+		return nil, 0, false, ctx.Err()
+	case outcome := <-resultCh:
+		if outcome.Err != nil {
+			return nil, 0, false, outcome.Err
+		}
+		loaded := outcome.Val.(loadResult)
+		return loaded.chats, loaded.sid, loaded.truncated, nil
+	}
 }
 
 // snapshot returns the cached chats for sessionID and whether that snapshot is

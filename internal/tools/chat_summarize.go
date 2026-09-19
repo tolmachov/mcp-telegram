@@ -29,23 +29,31 @@ func NewChatSummarizeHandler(msgProvider *messages.Provider, config summarize.Co
 
 // SummarizeChatInput is the input for the SummarizeChat tool.
 type SummarizeChatInput struct {
-	ChatID int64  `json:"chat_id" jsonschema:"The chat ID to summarize"`
-	Goal   string `json:"goal" jsonschema:"What you want from the summary. Examples: 'key points and decisions'\\, 'extract all action items and deadlines'\\, 'analyze sentiment and mood'\\, 'identify top 5 discussed topics'\\, 'create meeting minutes'"`
-	Period string `json:"period,omitempty" jsonschema:"Time period: 'day'\\, 'week'\\, or 'month' (default: 'month')"`
-	Since  string `json:"since,omitempty" jsonschema:"Date in YYYY-MM-DD or RFC3339 format to start from (alternative to period\\, e.g.\\, '2024-01-15')"`
+	MaxMessages int    `json:"max_messages,omitempty" jsonschema:"Maximum messages sent to the summarizer (default 2000, hard maximum 10000)."`
+	ChatID      int64  `json:"chat_id" jsonschema:"The chat ID to summarize"`
+	Goal        string `json:"goal" jsonschema:"What you want from the summary. Examples: 'key points and decisions'\\, 'extract all action items and deadlines'\\, 'analyze sentiment and mood'\\, 'identify top 5 discussed topics'\\, 'create meeting minutes'"`
+	Period      string `json:"period,omitempty" jsonschema:"Time period: 'day'\\, 'week'\\, or 'month' (default: 'month')"`
+	Since       string `json:"since,omitempty" jsonschema:"Date in YYYY-MM-DD or RFC3339 format to start from (alternative to period\\, e.g.\\, '2024-01-15')"`
 }
+
+const (
+	defaultSummaryMaxMessages = 2000
+	hardSummaryMaxMessages    = 10000
+)
 
 // SummarizeChatResult is the typed output of SummarizeChat. Clients get
 // the summary text plus the analysis window so they can render provenance
 // without re-computing the period from the input.
 type SummarizeChatResult struct {
-	ChatID      int64  `json:"chat_id"`
-	Goal        string `json:"goal"`
-	Period      string `json:"period,omitempty"`
-	PeriodStart string `json:"period_start"` // RFC3339
-	PeriodEnd   string `json:"period_end"`   // RFC3339
-	Provider    string `json:"provider"`
-	Summary     string `json:"summary"`
+	ChatID            int64  `json:"chat_id"`
+	Goal              string `json:"goal"`
+	Period            string `json:"period,omitempty"`
+	PeriodStart       string `json:"period_start"` // RFC3339
+	PeriodEnd         string `json:"period_end"`   // RFC3339
+	Provider          string `json:"provider"`
+	Summary           string `json:"summary"`
+	MessagesProcessed int    `json:"messages_processed"`
+	Truncated         bool   `json:"truncated"`
 	// Partial is true when summarization stopped early (e.g. a provider error
 	// on a later batch) and Summary holds only the batches completed so far.
 	Partial bool   `json:"partial,omitempty"`
@@ -82,6 +90,13 @@ func (h *ChatSummarizeHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	if in.Goal == "" {
 		return errResult("goal is required"), nil, nil
 	}
+	maxMessages := in.MaxMessages
+	if maxMessages == 0 {
+		maxMessages = defaultSummaryMaxMessages
+	}
+	if maxMessages < 1 || maxMessages > hardSummaryMaxMessages {
+		return errResult(fmt.Sprintf("max_messages must be between 1 and %d", hardSummaryMaxMessages)), nil, nil
+	}
 
 	periodEnd := time.Now()
 	since, err := h.parseSinceTime(in)
@@ -108,14 +123,14 @@ func (h *ChatSummarizeHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 		sendProgress(ctx, req, float64(current), float64(total), message)
 	}
 
-	result, err := summarizer.Summarize(ctx, in.ChatID, in.Goal, since, onProgress)
+	result, err := summarizer.SummarizeDetailed(ctx, in.ChatID, in.Goal, since, maxMessages, onProgress)
 	if err != nil {
 		mcpLog(ctx, req.Session, logLevelError, "SummarizeChat", map[string]any{
 			"chat_id": in.ChatID,
 			"error":   err.Error(),
 		})
 	}
-	errRes, out := h.buildResult(in, since, periodEnd, result, err)
+	errRes, out := h.buildDetailedResult(in, since, periodEnd, result, err)
 	return errRes, out, nil
 }
 
@@ -126,17 +141,28 @@ func (h *ChatSummarizeHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 // batches); the sampling-unsupported case gets a targeted error; and a total
 // failure returns a generic error.
 func (h *ChatSummarizeHandler) buildResult(in SummarizeChatInput, since, periodEnd time.Time, result string, err error) (*mcp.CallToolResult, *SummarizeChatResult) {
+	return h.buildDetailedResult(in, since, periodEnd, summarize.Result{Summary: result}, err)
+}
+
+func (h *ChatSummarizeHandler) buildDetailedResult(in SummarizeChatInput, since, periodEnd time.Time, result summarize.Result, err error) (*mcp.CallToolResult, *SummarizeChatResult) {
 	out := &SummarizeChatResult{
-		ChatID:      in.ChatID,
-		Goal:        in.Goal,
-		Period:      in.Period,
-		PeriodStart: since.UTC().Format(time.RFC3339),
-		PeriodEnd:   periodEnd.UTC().Format(time.RFC3339),
-		Provider:    string(h.config.Provider),
-		Summary:     result,
+		ChatID:            in.ChatID,
+		Goal:              in.Goal,
+		Period:            in.Period,
+		PeriodStart:       since.UTC().Format(time.RFC3339),
+		PeriodEnd:         periodEnd.UTC().Format(time.RFC3339),
+		Provider:          string(h.config.Provider),
+		Summary:           result.Summary,
+		MessagesProcessed: result.MessagesProcessed,
+		Truncated:         result.Truncated,
+		Partial:           result.Partial,
+		Warning:           result.Warning,
 	}
 
 	if err == nil {
+		if out.Partial || out.Truncated {
+			return &mcp.CallToolResult{Meta: mcp.Meta{MetaWarning: out.Warning}}, out
+		}
 		return nil, out
 	}
 	// Specifically surface the sampling-unsupported case so the user gets a
@@ -148,7 +174,7 @@ func (h *ChatSummarizeHandler) buildResult(in SummarizeChatInput, since, periodE
 	// return it marked partial rather than throwing the completed work away.
 	// The warning also rides in Meta so the server request logger surfaces
 	// this degraded success at Warn (the result itself is not an error).
-	if strings.TrimSpace(result) != "" {
+	if strings.TrimSpace(result.Summary) != "" {
 		out.Partial = true
 		out.Warning = fmt.Sprintf("summarization stopped early: %v", err)
 		return &mcp.CallToolResult{Meta: mcp.Meta{MetaWarning: out.Warning}}, out
@@ -194,17 +220,17 @@ func (h *ChatSummarizeHandler) createProvider(session *mcp.ServerSession) (summa
 		return summarize.NewSamplingProvider(session), nil
 	case summarize.ProviderGemini:
 		if h.config.GeminiAPIKey == "" {
-			return nil, fmt.Errorf("GEMINI_API_KEY is required when using --summarize-provider=gemini")
+			return nil, fmt.Errorf("MCP_SUMMARIZE_GEMINI_API_KEY is required when using --summarize-provider=gemini")
 		}
 		return summarize.NewGeminiProvider(h.config.GeminiAPIKey, h.config.Model), nil
 	case summarize.ProviderOllama:
 		if h.config.OllamaURL == "" {
-			return nil, fmt.Errorf("OLLAMA_URL is required when using --summarize-provider=ollama")
+			return nil, fmt.Errorf("MCP_SUMMARIZE_OLLAMA_URL is required when using --summarize-provider=ollama")
 		}
 		return summarize.NewOllamaProvider(h.config.OllamaURL, h.config.Model), nil
 	case summarize.ProviderAnthropic:
 		if h.config.AnthropicAPIKey == "" {
-			return nil, fmt.Errorf("ANTHROPIC_API_KEY is required when using --summarize-provider=anthropic")
+			return nil, fmt.Errorf("MCP_SUMMARIZE_ANTHROPIC_API_KEY is required when using --summarize-provider=anthropic")
 		}
 		return summarize.NewAnthropicProvider(h.config.AnthropicAPIKey, h.config.Model), nil
 	default:

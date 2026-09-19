@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+
+	"github.com/tolmachov/mcp-telegram/internal/xdg"
 )
 
 // This file holds the filesystem-sandbox for BackupMessages: default backup
@@ -15,35 +16,18 @@ import (
 // symlink escape). It is separated from the tool handler because it is
 // security-critical and warrants review in isolation.
 
-// maxFilenameLength limits the base filename length to ensure compatibility
+// maxFilenameLength limits the base filename length for portability
 // across filesystems (most support 255 bytes, but we keep it conservative).
-const maxFilenameLength = 100
+const maxFilenameBytes = 180
 
-// DefaultBackupDir returns the default backup directory based on the OS.
-// Returns an error when os.UserHomeDir fails (e.g. no HOME env var set,
-// no passwd entry on Unix, or equivalent on other platforms), because in
-// that case the resulting path would be relative to the process working
-// directory rather than an absolute user directory.
+// DefaultBackupDir keeps backups under the same state root as every other
+// persistent artifact.
 func DefaultBackupDir() (string, error) {
-	homeDir, err := os.UserHomeDir()
+	stateDir, err := xdg.StateDir()
 	if err != nil {
-		return "", fmt.Errorf("locating home directory: %w", err)
+		return "", err
 	}
-
-	switch runtime.GOOS {
-	case "darwin":
-		return filepath.Join(homeDir, "Library", "Application Support", "mcp-telegram", "backups"), nil
-	case "windows":
-		if appData := os.Getenv("APPDATA"); appData != "" {
-			return filepath.Join(appData, "mcp-telegram", "backups"), nil
-		}
-		return filepath.Join(homeDir, "AppData", "Roaming", "mcp-telegram", "backups"), nil
-	default: // linux and others
-		if xdgData := os.Getenv("XDG_DATA_HOME"); xdgData != "" {
-			return filepath.Join(xdgData, "mcp-telegram", "backups"), nil
-		}
-		return filepath.Join(homeDir, ".local", "share", "mcp-telegram", "backups"), nil
-	}
+	return filepath.Join(stateDir, "backups"), nil
 }
 
 // sanitizeFilename removes or replaces characters that are invalid in filenames.
@@ -54,10 +38,17 @@ func sanitizeFilename(name string) string {
 		result = strings.ReplaceAll(result, char, "_")
 	}
 	result = strings.Trim(result, " .")
-	// Limit length (use runes to avoid splitting multi-byte UTF-8 characters).
-	runes := []rune(result)
-	if len(runes) > maxFilenameLength {
-		result = string(runes[:maxFilenameLength])
+	// Filesystems limit names in bytes, not runes. Keep enough room for the
+	// timestamp and extension appended by the caller without splitting UTF-8.
+	if len(result) > maxFilenameBytes {
+		var limited strings.Builder
+		for _, r := range result {
+			if limited.Len()+len(string(r)) > maxFilenameBytes {
+				break
+			}
+			limited.WriteRune(r)
+		}
+		result = limited.String()
 	}
 	if result == "" {
 		result = "backup"
@@ -109,7 +100,8 @@ func isPathAllowed(targetPath string, allowedPaths []string) error {
 			continue
 		}
 
-		if rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel)) {
+		outside := rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
+		if !outside && !filepath.IsAbs(rel) {
 			return nil
 		}
 	}
@@ -118,7 +110,7 @@ func isPathAllowed(targetPath string, allowedPaths []string) error {
 		return fmt.Errorf("path %q is not within allowed directories: all %d allowlist entries are unresolvable (%s). Fix the configuration so the sandbox roots exist and are readable", targetPath, len(skipReasons), strings.Join(skipReasons, "; "))
 	}
 
-	return fmt.Errorf("path %q is not within allowed directories. Configure --allowed-paths or TELEGRAM_ALLOWED_PATHS", targetPath)
+	return fmt.Errorf("path %q is not within allowed directories. Configure --allowed-paths or MCP_TELEGRAM_ALLOWED_PATHS", targetPath)
 }
 
 // resolveSymlinks returns the fully-resolved absolute path of p. When p

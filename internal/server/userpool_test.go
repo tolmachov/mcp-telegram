@@ -11,8 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/auth"
-
 	"github.com/tolmachov/mcp-telegram/internal/authsrv"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
@@ -36,8 +34,8 @@ func waitFor(t *testing.T, cond func() bool) {
 
 // poolRequest sends one request through the pool behind a stub bearer
 // verifier, so the identity reaches the pool exactly the way the production
-// RequireBearerToken middleware delivers it. The session id is empty (the
-// legacy single-session case); use poolRequestSID for independent sessions.
+// RequireBearerToken middleware delivers it. Use poolRequestSID for explicit
+// per-authorization identities.
 func poolRequest(t *testing.T, p *userPool, id tgid.UserID) *httptest.ResponseRecorder {
 	return poolRequestSID(t, p, id, "")
 }
@@ -46,14 +44,10 @@ func poolRequest(t *testing.T, p *userPool, id tgid.UserID) *httptest.ResponseRe
 // so tests can drive several independent sessions of one account.
 func poolRequestSID(t *testing.T, p *userPool, id tgid.UserID, sid string) *httptest.ResponseRecorder {
 	t.Helper()
-	verifier := func(_ context.Context, _ string, _ *http.Request) (*auth.TokenInfo, error) {
-		return authsrv.NewTokenInfoForTesting(id, "u", sid, nil, time.Now().Add(time.Hour)), nil
-	}
-	handler := auth.RequireBearerToken(verifier, nil)(p)
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
-	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Mcp-Session-Id", "existing-test-session")
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	p.serveUser(rec, req, &authsrv.UserIdentity{ID: id, Username: "u", SessionID: sid})
 	return rec
 }
 
@@ -61,6 +55,35 @@ func okHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+}
+
+func TestUserPoolServeHTTPRejectsMissingIdentity(t *testing.T) {
+	pool := newUserPool(t.Context(), func(context.Context, *authsrv.UserIdentity) (builtAssembly, error) {
+		t.Fatal("builder must not run for an unauthenticated request")
+		return builtAssembly{}, nil
+	}, testWWWAuthenticate, discardLogger())
+	recorder := httptest.NewRecorder()
+	pool.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/", nil))
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestUserPoolLimitsSessionlessInitializePerUser(t *testing.T) {
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+		return okAssembly(), nil
+	}, testWWWAuthenticate, discardLogger())
+	for i := range initializeBurst + 1 {
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		rec := httptest.NewRecorder()
+		pool.serveUser(rec, req, &authsrv.UserIdentity{ID: 7, Username: "u", SessionID: "sid"})
+		if i < initializeBurst && rec.Code != http.StatusOK {
+			t.Fatalf("sessionless request %d status = %d, want 200", i+1, rec.Code)
+		}
+		if i == initializeBurst && rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("sessionless request %d status = %d, want 429", i+1, rec.Code)
+		}
+	}
 }
 
 // okAssembly is a healthy build with a no-op closer.
@@ -121,7 +144,7 @@ func TestUserPoolIndependentSessionsPerUser(t *testing.T) {
 }
 
 // TestUserPoolEvictSession pins that EvictSession tears down a specific
-// session's assembly (even though it is idle-but-warm) so a revoked/upgraded
+// session's assembly (even though it is idle-but-warm) so a revoked
 // session's client is stopped and the next request cold-rebuilds.
 func TestUserPoolEvictSession(t *testing.T) {
 	var builds, closes atomic.Int64
@@ -170,7 +193,7 @@ func TestUserPoolEvictSessionDefersBusyClose(t *testing.T) {
 	// Simulate an in-flight request holding the entry.
 	pool.mu.Lock()
 	e := pool.entries[poolKey{id: 1, sid: "aaaa"}]
-	e.inflight.Add(1)
+	e.inflight++
 	pool.mu.Unlock()
 
 	pool.EvictSession(1, "aaaa")
@@ -329,7 +352,7 @@ func TestUserPoolDeadBusyAssemblyMapsTo401(t *testing.T) {
 	// Simulate a hung stream holding the entry while the client dies: the
 	// pool cannot tear it down, so new requests get the re-auth 401.
 	pool.mu.Lock()
-	pool.entries[poolKey{id: 1}].inflight.Add(1)
+	pool.entries[poolKey{id: 1}].inflight++
 	pool.mu.Unlock()
 	dead.Store(true)
 
@@ -368,7 +391,7 @@ func TestUserPoolDeadBusyClosedOnRelease(t *testing.T) {
 	// A hung request holds the entry; capture its ref before the client dies.
 	pool.mu.Lock()
 	e := pool.entries[poolKey{id: 1}]
-	e.inflight.Add(1)
+	e.inflight++
 	pool.mu.Unlock()
 	dead.Store(true)
 
@@ -391,48 +414,37 @@ func TestUserPoolDeadBusyClosedOnRelease(t *testing.T) {
 	}
 }
 
-// TestUserPoolDeadBusyCloseNoLeakOnRaceOrder deterministically pins the fix for
-// the dead-but-busy zero-close. The leak window is a single interleaving: the
-// last holder's release() decrements inflight to 0 and reads the close flag as
-// unset in the instant AFTER entryFor decides the entry is busy but BEFORE
-// entryFor stores the flag. A probabilistic stress test can't reliably hit that
-// window (the two ops sat a map-delete apart), so we use entryFor's test hook to
-// interpose release() at exactly that point. Pre-fix, neither side closes and the
-// map-detached entry leaks; post-fix, entryFor re-reads inflight after the store
-// and closes it.
-func TestUserPoolDeadBusyCloseNoLeakOnRaceOrder(t *testing.T) {
-	var closes atomic.Int64
-	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
-		return builtAssembly{}, errors.New("no rebuild in this test")
-	}, testWWWAuthenticate, discardLogger())
+// TestUserPoolEvictReleaseTransitionIsAtomic exercises both possible lock
+// orders between eviction and the final release. The mutex-protected state
+// machine must close exactly once without a production-only interposition
+// hook or an atomic flag handshake.
+func TestUserPoolEvictReleaseTransitionIsAtomic(t *testing.T) {
+	for range 100 {
+		var closes atomic.Int64
+		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+			return builtAssembly{}, errors.New("unused")
+		}, testWWWAuthenticate, discardLogger())
+		key := poolKey{id: 1}
+		e := &userEntry{
+			key: key, ready: make(chan struct{}), state: entryActive,
+			handler: okHandler(), closer: closerFunc(func() error { closes.Add(1); return nil }),
+			inflight: 1, lastUsed: time.Now(),
+		}
+		close(e.ready)
+		pool.mu.Lock()
+		pool.entries[key] = e
+		pool.mu.Unlock()
 
-	key := poolKey{id: 1}
-	errDead := errors.New("client run loop exited")
-	e := &userEntry{key: key, ready: make(chan struct{})}
-	e.finish(builtAssembly{
-		Handler: okHandler(),
-		Closer:  closerFunc(func() error { closes.Add(1); return nil }),
-		Health:  func() error { return errDead },
-	})
-	e.inflight.Store(1) // the hung in-flight holder
-	pool.mu.Lock()
-	pool.entries[key] = e
-	pool.mu.Unlock()
-
-	// The holder releases at the worst possible moment: after entryFor has
-	// committed to the dead-but-busy branch, before it stores the close flag.
-	// release() sees the flag unset and does not close, so the close must come
-	// from entryFor's post-store recheck.
-	pool.testHookDeadBusyBeforeStore = func() { pool.release(e) }
-
-	if _, err := pool.entryFor(t.Context(), &authsrv.UserIdentity{ID: 1}); !errors.Is(err, tgclient.ErrSessionUnauthorized) {
-		t.Fatalf("entryFor on a dead-but-busy entry: err = %v, want ErrSessionUnauthorized", err)
-	}
-	if got := closes.Load(); got != 1 {
-		t.Fatalf("dead entry closed %d times, want exactly 1 (0 = the leak this test pins, >1 = double close)", got)
-	}
-	if pool.size() != 0 {
-		t.Errorf("entry must be removed from the map; size = %d, want 0", pool.size())
+		start := make(chan struct{})
+		done := make(chan struct{}, 2)
+		go func() { <-start; pool.EvictSession(1, ""); done <- struct{}{} }()
+		go func() { <-start; pool.release(e); done <- struct{}{} }()
+		close(start)
+		<-done
+		<-done
+		if got := closes.Load(); got != 1 {
+			t.Fatalf("close count = %d, want exactly 1", got)
+		}
 	}
 }
 
@@ -468,7 +480,7 @@ func TestUserPoolBuilderPanic(t *testing.T) {
 		pool.mu.Lock()
 		defer pool.mu.Unlock()
 		e := pool.entries[key]
-		return e != nil && e.inflight.Load() == 2
+		return e != nil && e.inflight == 2
 	})
 
 	close(release) // let the builder panic
@@ -490,10 +502,9 @@ func TestUserPoolBuilderPanic(t *testing.T) {
 }
 
 // TestUserPoolCloseDuringBuild pins the shutdown handoff for an in-flight
-// build: Close() flags the not-yet-done entry and returns without closing it;
+// build: Close() evicts the not-yet-done entry and returns without closing it;
 // when the build completes and publishes a live Closer, the creator's release()
-// observes the flag and tears it down — exactly once (the closeOnce tie between
-// that release and any other teardown path must not double-close).
+// observes the evicted state and tears it down exactly once.
 func TestUserPoolCloseDuringBuild(t *testing.T) {
 	var closes atomic.Int64
 	entered := make(chan struct{})
@@ -527,11 +538,9 @@ func TestUserPoolCloseDuringBuild(t *testing.T) {
 
 // TestUserPoolEvictSessionGraceForceClose pins the eviction grace bound: a
 // built assembly still held by a hung in-flight request past evictGrace is
-// force-closed by the timer (bounding the post-upgrade auth-key overlap), and
-// the eventual release() does not double-close. It also pins the guard that a
-// still-BUILDING entry never gets a timer close: firing closeEntry before the
-// closer is published would burn closeOnce with a nil closer and leak the real
-// one forever.
+// force-closed by the pool's single janitor timer, and the eventual release()
+// does not double-close. It also pins that a still-building entry is only
+// eligible for a deadline after its closer has been published.
 func TestUserPoolEvictSessionGraceForceClose(t *testing.T) {
 	t.Run("busy built entry force-closed after grace", func(t *testing.T) {
 		var closes atomic.Int64
@@ -542,13 +551,16 @@ func TestUserPoolEvictSessionGraceForceClose(t *testing.T) {
 			}, nil
 		}, testWWWAuthenticate, discardLogger())
 		pool.evictGrace = 10 * time.Millisecond
+		janitorCtx, cancelJanitor := context.WithCancel(t.Context())
+		defer cancelJanitor()
+		go pool.janitor(janitorCtx)
 
 		if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
 			t.Fatalf("first request status = %d, want 200", rec.Code)
 		}
 		pool.mu.Lock()
 		e := pool.entries[poolKey{id: 1}]
-		e.inflight.Add(1) // a hung stream that never releases in time
+		e.inflight++ // a hung stream that never releases in time
 		pool.mu.Unlock()
 
 		pool.EvictSession(1, "")
@@ -562,7 +574,7 @@ func TestUserPoolEvictSessionGraceForceClose(t *testing.T) {
 		if got := closes.Load(); got != 1 {
 			t.Fatalf("grace timer did not force-close the held assembly; closes = %d, want 1", got)
 		}
-		// The hung holder finally releases: closeOnce absorbs the tie.
+		// The hung holder finally releases: entryClosed absorbs the tie.
 		pool.release(e)
 		if got := closes.Load(); got != 1 {
 			t.Errorf("release after the timer close double-closed; closes = %d, want 1", got)
@@ -587,14 +599,14 @@ func TestUserPoolEvictSessionGraceForceClose(t *testing.T) {
 		go func() { done <- poolRequest(t, pool, 1).Code }()
 		<-entered
 
-		pool.EvictSession(1, "") // entry is not done: no timer may be armed
-		// Give a wrongly-armed timer ample time to fire on the nil closer and
-		// burn closeOnce — the pinned bug would then make closes stay 0 forever.
+		pool.EvictSession(1, "") // the build has no closer to schedule yet
+		// Give an incorrectly scheduled deadline ample time to run before the
+		// closer exists.
 		time.Sleep(100 * time.Millisecond)
 		close(release)
 		<-done
 		if got := closes.Load(); got != 1 {
-			t.Errorf("creator's release must close the flagged build exactly once; closes = %d, want 1 (0 = closeOnce burned by a premature timer)", got)
+			t.Errorf("creator's release must close the evicted build exactly once; closes = %d, want 1", got)
 		}
 	})
 }

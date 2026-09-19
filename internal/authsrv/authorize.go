@@ -6,7 +6,6 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 )
 
@@ -42,7 +41,11 @@ func (a *AuthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		redirectError(w, r, redirectURI, state, "invalid_request", "PKCE with code_challenge_method=S256 is required")
 		return
 	}
-	if res := q.Get("resource"); res != "" && strings.TrimRight(res, "/") != a.cfg.IssuerURL {
+	resource := normalizeResource(q.Get("resource"))
+	if resource == "" {
+		resource = a.cfg.IssuerURL
+	}
+	if resource != a.cfg.IssuerURL {
 		redirectError(w, r, redirectURI, state, "invalid_target", "unknown resource")
 		return
 	}
@@ -52,7 +55,7 @@ func (a *AuthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		RedirectURI:   redirectURI,
 		State:         state,
 		CodeChallenge: challenge,
-		Resource:      q.Get("resource"),
+		Resource:      resource,
 		IssuedAt:      a.now().Unix(),
 	})
 	if err != nil {
@@ -61,27 +64,34 @@ func (a *AuthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The login flow outlives this request and detaches from any context; we
-	// pass loginCtx only to carry values, not for cancellation (Close stops
-	// flows by aborting them via the registry, not by canceling this ctx).
-	// Passing r.Context() would be wrong regardless — the flow must not die
-	// when this request returns.
-	flow, err := a.startLogin(a.loginCtx)
+	ip := clientIP(r, a.cfg.TrustedProxyHops)
+	p, loginCtx, err := a.reserveLivePending(blob, ip)
 	if err != nil {
-		a.logger.Error("starting telegram login failed", "err", err)
-		redirectError(w, r, redirectURI, state, "server_error", "starting the Telegram login failed")
-		return
-	}
-	p, err := a.addPending(blob, flow, clientIP(r))
-	if err != nil {
-		flow.Abort()
 		if errors.Is(err, errTooManyLogins) {
 			a.renderErrorPage(w, http.StatusServiceUnavailable, "Too many login attempts",
 				"Too many logins are in flight right now. Wait a minute and try again.")
 			return
 		}
-		a.logger.Error("registering pending login failed", "err", err)
-		redirectError(w, r, redirectURI, state, "server_error", "internal error")
+		a.logger.Error("reserving pending login failed", "err", err)
+		redirectError(w, r, redirectURI, state, "temporarily_unavailable", "authorization server is unavailable")
+		return
+	}
+
+	// The login flow outlives this request and detaches from any context; we
+	// pass loginCtx only to carry values, not for cancellation (Close stops
+	// flows by aborting them via the registry, not by canceling this ctx).
+	// Passing r.Context() would be wrong regardless — the flow must not die
+	// when this request returns.
+	flow, err := a.startLogin(loginCtx)
+	if err != nil {
+		a.removePending(p.id)
+		a.logger.Error("starting telegram login failed", "err", err)
+		redirectError(w, r, redirectURI, state, "server_error", "starting the Telegram login failed")
+		return
+	}
+	if !a.activatePending(p, flow) {
+		flow.Abort()
+		redirectError(w, r, redirectURI, state, "server_error", "server is shutting down")
 		return
 	}
 

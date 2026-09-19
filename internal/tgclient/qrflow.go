@@ -19,10 +19,11 @@ import (
 type QRState int
 
 const (
-	QRWaiting        QRState = iota // QR shown, waiting for a scan
-	QRPasswordNeeded                // account has 2FA; waiting for the password
-	QRDone                          // logged in, session bytes final
-	QRFailed                        // terminal failure (incl. abort/expiry)
+	QRWaiting           QRState = iota // QR shown, waiting for a scan
+	QRPasswordNeeded                   // account has 2FA; waiting for the password
+	QRPasswordVerifying                // one submitted password is in flight
+	QRDone                             // logged in, session bytes final
+	QRFailed                           // terminal failure (incl. abort/expiry)
 )
 
 // QRUser identifies the account that accepted the QR login.
@@ -177,20 +178,25 @@ func (f *QRFlow) User() (QRUser, bool) {
 func (f *QRFlow) SessionData() ([]byte, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.sessionData, f.state == QRDone
+	return append([]byte(nil), f.sessionData...), f.state == QRDone
 }
 
 // SubmitPassword hands a 2FA password to the flow. Accepted only in
 // QRPasswordNeeded; returns false otherwise (including when a previous
 // submission is still being verified).
 func (f *QRFlow) SubmitPassword(pw string) bool {
-	if f.State() != QRPasswordNeeded {
+	f.mu.Lock()
+	if f.state != QRPasswordNeeded {
+		f.mu.Unlock()
 		return false
 	}
+	f.state = QRPasswordVerifying
+	f.mu.Unlock()
 	select {
 	case f.passwordCh <- pw:
 		return true
 	default:
+		f.setState(QRPasswordNeeded)
 		return false
 	}
 }
@@ -227,6 +233,7 @@ func (f *QRFlow) recordPasswordError(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.err = err
+	f.state = QRPasswordNeeded
 }
 
 func (f *QRFlow) fail(err error) {
@@ -241,6 +248,6 @@ func (f *QRFlow) complete(user QRUser, data []byte) {
 	defer f.mu.Unlock()
 	f.state = QRDone
 	f.user = user
-	f.sessionData = data
+	f.sessionData = append([]byte(nil), data...)
 	f.err = nil
 }

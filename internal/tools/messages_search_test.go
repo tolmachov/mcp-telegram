@@ -37,13 +37,13 @@ func TestSearchMessagesHandleValidation(t *testing.T) {
 			errSubstr: "query is required",
 		},
 		{
-			name:      "invalid offset_id",
-			input:     SearchMessagesInput{ChatID: 1, Query: "hi", OffsetID: "abc"},
+			name:      "invalid before_message_id",
+			input:     SearchMessagesInput{ChatID: 1, Query: "hi", BeforeMessageID: "abc"},
 			errSubstr: "invalid message_id",
 		},
 		{
-			name:      "scheduled offset_id rejected",
-			input:     SearchMessagesInput{ChatID: 1, Query: "hi", OffsetID: "s:42"},
+			name:      "scheduled before_message_id rejected",
+			input:     SearchMessagesInput{ChatID: 1, Query: "hi", BeforeMessageID: "s:42"},
 			errSubstr: "scheduled",
 		},
 		{

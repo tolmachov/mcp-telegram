@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gotd/td/tg"
 	"github.com/lithammer/fuzzysearch/fuzzy"
@@ -78,26 +80,29 @@ func (h *ChatsSearchHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		return errResult(fmt.Sprintf("Failed to get chats: %v", err)), nil, nil
 	}
 
-	// Perform local fuzzy search first.
-	results := h.fuzzySearchLocal(query, chats, limit)
+	results := scoreChats(query, chats)
 
-	// Only search globally if we have room for more results.
 	var warnings []string
 	if truncated {
 		warnings = append(warnings, truncatedChatsWarning)
 	}
-	if len(results) < limit {
-		globalResults, err := h.searchGlobal(ctx, query)
-		if err != nil {
-			mcpLog(ctx, req.Session, logLevelWarning, "SearchChats", map[string]any{
-				"action": "global_search_failed",
-				"query":  query,
-				"error":  err.Error(),
-			})
-			warnings = append(warnings, "Global search failed; results may be incomplete (local matches only).")
-		} else if len(globalResults) > 0 {
-			results = h.addGlobalResults(query, results, globalResults, limit)
-		}
+	var globalResults []tgdata.ChatInfo
+	var globalErr error
+	if h.client != nil {
+		globalResults, globalErr = h.searchGlobal(ctx, query)
+	}
+	if globalErr != nil {
+		mcpLog(ctx, req.Session, logLevelWarning, "SearchChats", map[string]any{
+			"action": "global_search_failed",
+			"query":  query,
+			"error":  globalErr.Error(),
+		})
+		warnings = append(warnings, "Global search failed; results may be incomplete (local matches only).")
+	} else if len(globalResults) > 0 {
+		results = mergeSearchResults(results, scoreChats(query, globalResults))
+	}
+	if len(results) > limit {
+		results = results[:limit]
 	}
 
 	return nil, &SearchResultsList{
@@ -161,68 +166,62 @@ func (h *ChatsSearchHandler) searchGlobal(ctx context.Context, query string) ([]
 	return results, nil
 }
 
-// fuzzySearchLocal performs fuzzy search on local chats only.
-func (h *ChatsSearchHandler) fuzzySearchLocal(query string, chats []tgdata.ChatInfo, limit int) []SearchResult {
-	names := make([]string, len(chats))
-	for i, chat := range chats {
-		names[i] = chat.Name
-	}
-
-	matches := fuzzy.RankFindNormalizedFold(query, names)
-
-	sort.Slice(matches, func(i, j int) bool {
-		return matches[i].Distance < matches[j].Distance
-	})
-
-	seen := make(map[int64]bool)
-	var results []SearchResult
-
-	for _, match := range matches {
-		if len(results) >= limit {
-			break
-		}
-		if match.OriginalIndex < len(chats) {
-			chat := chats[match.OriginalIndex]
-			if !seen[chat.ID] {
-				seen[chat.ID] = true
-				results = append(results, SearchResult{
-					ChatInfo: chat,
-					Distance: match.Distance,
-				})
+func scoreChats(query string, chats []tgdata.ChatInfo) []SearchResult {
+	query = strings.ToLower(strings.TrimSpace(query))
+	queryNoAt := strings.TrimPrefix(query, "@")
+	results := make([]SearchResult, 0, len(chats))
+	for _, chat := range chats {
+		candidates := []string{strings.ToLower(chat.Name), strings.ToLower(chat.Username), strconv.FormatInt(chat.ID, 10)}
+		best := -1
+		for _, candidate := range candidates {
+			candidate = strings.TrimPrefix(strings.TrimSpace(candidate), "@")
+			if candidate == "" || (!strings.Contains(candidate, queryNoAt) && !fuzzy.MatchNormalizedFold(queryNoAt, candidate)) {
+				continue
+			}
+			distance := fuzzy.LevenshteinDistance(queryNoAt, candidate)
+			denom := max(utf8.RuneCountInString(queryNoAt), utf8.RuneCountInString(candidate))
+			score := 0
+			if denom > 0 {
+				score = distance * 1000 / denom
+			}
+			if best < 0 || score < best {
+				best = score
 			}
 		}
+		if best >= 0 {
+			results = append(results, SearchResult{ChatInfo: chat, Distance: best})
+		}
 	}
-
+	sortSearchResults(results)
 	return results
 }
 
-// addGlobalResults adds global search results to fill remaining slots.
-func (h *ChatsSearchHandler) addGlobalResults(query string, localResults []SearchResult, globalChats []tgdata.ChatInfo, limit int) []SearchResult {
-	if len(localResults) >= limit {
-		return localResults
-	}
-
-	seen := make(map[int64]bool)
-	for _, r := range localResults {
-		seen[r.ID] = true
-	}
-
-	results := localResults
-	queryLower := strings.ToLower(query)
-
-	for _, chat := range globalChats {
-		if len(results) >= limit {
-			break
-		}
-		if !seen[chat.ID] {
-			seen[chat.ID] = true
-			distance := fuzzy.LevenshteinDistance(queryLower, strings.ToLower(chat.Name))
-			results = append(results, SearchResult{
-				ChatInfo: chat,
-				Distance: distance,
-			})
+func mergeSearchResults(groups ...[]SearchResult) []SearchResult {
+	byID := make(map[int64]SearchResult)
+	for _, group := range groups {
+		for _, result := range group {
+			previous, exists := byID[result.ID]
+			if !exists || result.Distance < previous.Distance {
+				byID[result.ID] = result
+			}
 		}
 	}
+	merged := make([]SearchResult, 0, len(byID))
+	for _, result := range byID {
+		merged = append(merged, result)
+	}
+	sortSearchResults(merged)
+	return merged
+}
 
-	return results
+func sortSearchResults(results []SearchResult) {
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Distance != results[j].Distance {
+			return results[i].Distance < results[j].Distance
+		}
+		if results[i].Name != results[j].Name {
+			return results[i].Name < results[j].Name
+		}
+		return results[i].ID < results[j].ID
+	})
 }

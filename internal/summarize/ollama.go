@@ -27,6 +27,7 @@ func NewOllamaProvider(baseURL, model string) *OllamaProvider {
 
 type ollamaRequest struct {
 	Model  string `json:"model"`
+	System string `json:"system"`
 	Prompt string `json:"prompt"`
 	Stream bool   `json:"stream"`
 }
@@ -38,10 +39,15 @@ type ollamaResponse struct {
 }
 
 // Summarize sends a prompt to Ollama and returns the response.
-func (p *OllamaProvider) Summarize(ctx context.Context, prompt string) (string, error) {
+func (p *OllamaProvider) Summarize(ctx context.Context, req Request) (string, error) {
+	content, err := req.userContent()
+	if err != nil {
+		return "", err
+	}
 	reqBody := ollamaRequest{
 		Model:  p.model,
-		Prompt: prompt,
+		System: req.System,
+		Prompt: content,
 		Stream: false,
 	}
 

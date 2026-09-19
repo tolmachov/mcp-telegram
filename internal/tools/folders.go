@@ -453,12 +453,12 @@ func NewDeleteFolderHandler(client *tg.Client) *DeleteFolderHandler {
 // DeleteFolderInput is the input for the DeleteFolder tool.
 type DeleteFolderInput struct {
 	FolderID int  `json:"folder_id" jsonschema:"Numeric folder ID to delete (from GetFolders)"`
-	Confirm  bool `json:"confirm,omitempty" jsonschema:"Set to true to proceed with deleting the folder. Only set this after the user has confirmed. When false/omitted, the host may present its own confirmation prompt, and in non-interactive clients the call is cancelled without deleting (status cancelled)."`
+	Confirm  bool `json:"confirm" jsonschema:"Must be true after the user explicitly confirms deleting the folder"`
 }
 
 // DeleteFolderResult is the typed output of DeleteFolder.
 type DeleteFolderResult struct {
-	Status   string `json:"status"` // "deleted" | "cancelled"
+	Status   string `json:"status"` // "deleted"
 	FolderID int    `json:"folder_id"`
 }
 
@@ -466,7 +466,7 @@ type DeleteFolderResult struct {
 func (h *DeleteFolderHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "DeleteFolder",
-		Description: "Delete a Telegram chat folder (dialog filter) by its numeric ID. This removes only the folder view — your chats and their messages are untouched. Find the folder_id with GetFolders. The host may ask you to confirm.",
+		Description: "Delete a Telegram chat folder (dialog filter) by its numeric ID. This removes only the folder view — your chats and their messages are untouched. Find the folder_id with GetFolders. The call is rejected unless confirm=true.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptrTrue(), OpenWorldHint: ptrTrue()},
 	}, h.handle)
 }
@@ -475,6 +475,9 @@ func (h *DeleteFolderHandler) handle(ctx context.Context, req *mcp.CallToolReque
 	if in.FolderID <= 0 {
 		return errResult("folder_id is required: a positive folder ID from GetFolders."), nil, nil
 	}
+	if errRes := requireExplicitConfirmation(in.Confirm, "delete the folder"); errRes != nil {
+		return errRes, nil, nil
+	}
 
 	filters, err := h.client.MessagesGetDialogFilters(ctx)
 	if err != nil {
@@ -482,16 +485,6 @@ func (h *DeleteFolderHandler) handle(ctx context.Context, req *mcp.CallToolReque
 	}
 	if !slices.Contains(folderIDs(filters), in.FolderID) {
 		return errResult(fmt.Sprintf("No folder with ID %d. List your folders with GetFolders.", in.FolderID)), nil, nil
-	}
-
-	confirmed, err := confirmDestructive(ctx, req, in.Confirm, fmt.Sprintf(
-		"Delete folder %d? Your chats stay; only the folder view is removed.", in.FolderID,
-	))
-	if err != nil {
-		return errResult(fmt.Sprintf("confirmation failed: %v", err)), nil, nil
-	}
-	if !confirmed {
-		return nil, &DeleteFolderResult{Status: statusCancelled, FolderID: in.FolderID}, nil
 	}
 
 	// Omitting Filter (no SetFilter) tells Telegram to delete the folder.

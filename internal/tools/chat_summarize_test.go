@@ -146,11 +146,11 @@ func TestCreateProvider(t *testing.T) {
 		{"sampling", summarize.Config{Provider: summarize.ProviderSampling}, false, ""},
 		{"empty defaults to sampling", summarize.Config{}, false, ""},
 		{"gemini", summarize.Config{Provider: summarize.ProviderGemini, GeminiAPIKey: "test-key"}, false, ""},
-		{"gemini missing key", summarize.Config{Provider: summarize.ProviderGemini}, true, "GEMINI_API_KEY is required"},
+		{"gemini missing key", summarize.Config{Provider: summarize.ProviderGemini}, true, "MCP_SUMMARIZE_GEMINI_API_KEY is required"},
 		{"ollama", summarize.Config{Provider: summarize.ProviderOllama, OllamaURL: "http://localhost:11434"}, false, ""},
 		{"ollama missing url", summarize.Config{Provider: summarize.ProviderOllama}, true, "OLLAMA_URL is required"},
 		{"anthropic", summarize.Config{Provider: summarize.ProviderAnthropic, AnthropicAPIKey: "test-key"}, false, ""},
-		{"anthropic missing key", summarize.Config{Provider: summarize.ProviderAnthropic}, true, "ANTHROPIC_API_KEY is required"},
+		{"anthropic missing key", summarize.Config{Provider: summarize.ProviderAnthropic}, true, "MCP_SUMMARIZE_ANTHROPIC_API_KEY is required"},
 		{"unknown returns error", summarize.Config{Provider: "openai"}, true, "unknown summarization provider"},
 		{"typo returns error", summarize.Config{Provider: "smapling"}, true, "unknown summarization provider"},
 	}

@@ -41,7 +41,7 @@ func resolveSessionPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(stateDir, "session.json"), nil
+	return filepath.Join(stateDir, "session-v2.bin"), nil
 }
 
 // LoadSession reads the persisted session, treating "file missing" and

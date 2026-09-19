@@ -74,6 +74,9 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	if in.NewText == "" {
 		return errResult("new_text is required"), nil, nil
 	}
+	if errRes := errMessageTooLong("new_text", in.NewText); errRes != nil {
+		return errRes, nil, nil
+	}
 
 	editReq := &tg.MessagesEditMessageRequest{
 		ID:      ref.ID,

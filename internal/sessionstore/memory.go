@@ -30,24 +30,41 @@ type Memory struct {
 	mu      sync.Mutex
 	blobs   map[memKey]memBlob
 	revoked map[memKey]time.Time
+	grants  map[string]grantRecord
+}
+
+type grantRecord struct {
+	SID        string    `json:"sid"`
+	Generation int64     `json:"generation"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	Revoked    bool      `json:"revoked,omitempty"`
 }
 
 func NewMemory() *Memory {
-	return &Memory{Now: time.Now, blobs: map[memKey]memBlob{}, revoked: map[memKey]time.Time{}}
+	return &Memory{Now: time.Now, blobs: map[memKey]memBlob{}, revoked: map[memKey]time.Time{}, grants: map[string]grantRecord{}}
 }
 
 func (m *Memory) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {
+	if !ValidSID(sid) {
+		return brokenSession{err: errInvalidStoreSID}
+	}
 	return memorySession{store: m, key: memKey{userID, sid}}
 }
 
 func (m *Memory) Exists(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
+	if !ValidSID(sid) {
+		return false, errInvalidStoreSID
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_, ok := m.blobs[memKey{userID, sid}]
-	return ok, nil
+	b, ok := m.blobs[memKey{userID, sid}]
+	return ok && len(b.data) > 0, nil
 }
 
 func (m *Memory) Delete(_ context.Context, userID tgid.UserID, sid string) error {
+	if !ValidSID(sid) {
+		return errInvalidStoreSID
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.blobs, memKey{userID, sid})
@@ -65,6 +82,9 @@ func (m *Memory) List(_ context.Context) ([]SessionRef, error) {
 }
 
 func (m *Memory) Revoke(_ context.Context, userID tgid.UserID, sid string) error {
+	if !ValidSID(sid) {
+		return errInvalidStoreSID
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	k := memKey{userID, sid}
@@ -74,6 +94,9 @@ func (m *Memory) Revoke(_ context.Context, userID tgid.UserID, sid string) error
 }
 
 func (m *Memory) Revoked(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
+	if !ValidSID(sid) {
+		return false, errInvalidStoreSID
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, ok := m.revoked[memKey{userID, sid}]
@@ -91,9 +114,70 @@ func (m *Memory) ListRevoked(_ context.Context) ([]SessionRef, error) {
 }
 
 func (m *Memory) DeleteRevoked(_ context.Context, userID tgid.UserID, sid string) error {
+	if !ValidSID(sid) {
+		return errInvalidStoreSID
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.revoked, memKey{userID, sid})
+	return nil
+}
+
+func (m *Memory) RedeemCode(_ context.Context, family, sid string, expiresAt time.Time) (bool, error) {
+	if !ValidSID(family) || !ValidSID(sid) {
+		return false, errInvalidStoreSID
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.grants[family]; exists {
+		return false, nil
+	}
+	m.grants[family] = grantRecord{SID: sid, ExpiresAt: expiresAt}
+	return true, nil
+}
+
+func (m *Memory) RotateGrant(_ context.Context, family string, generation int64) (GrantRotation, error) {
+	if !ValidSID(family) {
+		return GrantMissing, errInvalidStoreSID
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	grant, exists := m.grants[family]
+	if !exists || !m.Now().Before(grant.ExpiresAt) {
+		return GrantMissing, nil
+	}
+	if grant.Revoked || grant.Generation != generation {
+		grant.Revoked = true
+		m.grants[family] = grant
+		return GrantReplay, nil
+	}
+	grant.Generation++
+	m.grants[family] = grant
+	return GrantRotated, nil
+}
+
+func (m *Memory) RevokeGrant(_ context.Context, family string) error {
+	if !ValidSID(family) {
+		return errInvalidStoreSID
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	grant, ok := m.grants[family]
+	if ok {
+		grant.Revoked = true
+		m.grants[family] = grant
+	}
+	return nil
+}
+
+func (m *Memory) SweepAuthState(_ context.Context, now time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for family, grant := range m.grants {
+		if !now.Before(grant.ExpiresAt) {
+			delete(m.grants, family)
+		}
+	}
 	return nil
 }
 

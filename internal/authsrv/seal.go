@@ -125,6 +125,9 @@ func openBlob[T issuedAtCarrier](s *sealer, spec blobSpec[T], blob string, now t
 	if err := json.Unmarshal(payload, &v); err != nil {
 		return v, errInvalidBlob
 	}
+	if v.issuedAt() > now.Add(30*time.Second).Unix() {
+		return v, errInvalidBlob
+	}
 	if spec.ttl > 0 && expired(v.issuedAt(), spec.ttl, now) {
 		return v, errBlobExpired
 	}

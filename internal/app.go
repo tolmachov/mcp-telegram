@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/urfave/cli/v3"
 
 	"github.com/tolmachov/mcp-telegram/internal/authsrv"
+	"github.com/tolmachov/mcp-telegram/internal/config"
 	"github.com/tolmachov/mcp-telegram/internal/flags"
 	"github.com/tolmachov/mcp-telegram/internal/server"
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
@@ -28,9 +30,21 @@ const serviceName = "mcp-telegram"
 // `run`, they are interactive and must report missing credentials directly
 // instead of deferring to a JSON-RPC init error.
 func requireCredentials(cmd *cli.Command) (*tgclient.Config, error) {
+	resolver, err := config.NewResolver(cmd)
+	if err != nil {
+		return nil, err
+	}
+	apiID, err := resolver.Int(flags.APIID, flags.EnvTelegramAPIID)
+	if err != nil {
+		return nil, err
+	}
+	apiHash, err := resolver.String(flags.APIHash, flags.EnvTelegramAPIHash)
+	if err != nil {
+		return nil, err
+	}
 	cfg := &tgclient.Config{
-		APIID:   cmd.Int(flags.APIID),
-		APIHash: cmd.String(flags.APIHash),
+		APIID:   apiID,
+		APIHash: apiHash,
 	}
 	if cfg.APIID == 0 || cfg.APIHash == "" {
 		return nil, fmt.Errorf("%s and %s are required (set via env, flags, or 'config set')", flags.EnvTelegramAPIID, flags.EnvTelegramAPIHash)
@@ -38,27 +52,22 @@ func requireCredentials(cmd *cli.Command) (*tgclient.Config, error) {
 	return cfg, nil
 }
 
-// buildAuthOptions assembles the auth config and per-user session store for
-// --auth telegram, or returns (nil, nil, nil) for --auth none. Fails fast on
-// misconfiguration: unlike missing Telegram credentials (reported through the
-// MCP init-error dance for stdio hosts), auth is HTTP-only and has no MCP
-// peer yet, so a plain error is the right surface.
+// buildAuthOptions assembles the mandatory OAuth configuration for HTTP.
 func buildAuthOptions(ctx context.Context, cmd *cli.Command) (*authsrv.Config, sessionstore.Store, error) {
-	if cmd.String(flags.Auth) != flags.AuthModeTelegram {
-		return nil, nil, nil
-	}
-
 	allow, err := authsrv.ParseAllowlist(cmd.StringSlice(flags.AuthAllowedUsers))
 	if err != nil {
 		return nil, nil, fmt.Errorf("--%s: %w", flags.AuthAllowedUsers, err)
 	}
 
 	cfg := &authsrv.Config{
-		IssuerURL:      cmd.String(flags.AuthIssuerURL),
-		Allow:          allow,
-		TokenKeys:      cmd.StringSlice(flags.AuthTokenKey),
-		ExtraRedirects: cmd.StringSlice(flags.AuthAllowedRedirects),
+		IssuerURL:        cmd.String(flags.AuthIssuerURL),
+		Allow:            allow,
+		TokenKeys:        cmd.StringSlice(flags.AuthTokenKey),
+		ExtraRedirects:   cmd.StringSlice(flags.AuthAllowedRedirects),
+		TrustedProxyHops: cmd.Int(flags.AuthTrustedProxyHops),
 	}
+	normalized := cfg.Normalized()
+	cfg = &normalized
 	if err := cfg.Validate(); err != nil {
 		return nil, nil, fmt.Errorf("auth configuration: %w", err)
 	}
@@ -82,7 +91,7 @@ func buildAuthOptions(ctx context.Context, cmd *cli.Command) (*authsrv.Config, s
 		}
 		backend = fs
 	default:
-		return nil, nil, fmt.Errorf("--auth telegram requires exactly one of --%s / --%s", flags.AuthSessionBucket, flags.AuthSessionDir)
+		return nil, nil, fmt.Errorf("HTTP requires exactly one of --%s / --%s", flags.AuthSessionBucket, flags.AuthSessionDir)
 	}
 
 	cipher, err := sessionstore.NewCipher(cfg.TokenKeys, cfg.IssuerURL)
@@ -124,13 +133,13 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					flags.HTTPAddrFlag(),
 					flags.LogFormatFlag(),
 					flags.LogLevelFlag(),
-					flags.AuthFlag(),
 					flags.AuthIssuerURLFlag(),
 					flags.AuthAllowedUsersFlag(),
 					flags.AuthTokenKeyFlag(),
 					flags.AuthAllowedRedirectsFlag(),
 					flags.AuthSessionBucketFlag(),
 					flags.AuthSessionDirFlag(),
+					flags.AuthTrustedProxyHopsFlag(),
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					// Credential validation is intentionally NOT performed here.
@@ -140,13 +149,46 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					// process here would just look like "Server disconnected".
 					// login/logout still pre-flight-validate because they are
 					// interactive commands without an MCP peer to report to.
+					resolver, err := config.NewResolver(cmd)
+					if err != nil {
+						return err
+					}
+					apiID, err := resolver.Int(flags.APIID, flags.EnvTelegramAPIID)
+					if err != nil {
+						return err
+					}
+					apiHash, err := resolver.String(flags.APIHash, flags.EnvTelegramAPIHash)
+					if err != nil {
+						return err
+					}
+					var geminiKey, anthropicKey string
+					summarizeProvider := summarize.ProviderName(cmd.String(flags.SummarizeProvider))
+					if summarizeProvider == summarize.ProviderGemini {
+						geminiKey, err = resolver.String(flags.GeminiAPIKey, flags.EnvGeminiAPIKey)
+						if err != nil {
+							return err
+						}
+					}
+					if summarizeProvider == summarize.ProviderAnthropic {
+						anthropicKey, err = resolver.String(flags.AnthropicAPIKey, flags.EnvAnthropicAPIKey)
+						if err != nil {
+							return err
+						}
+					}
 					cfg := &tgclient.Config{
-						APIID:            cmd.Int(flags.APIID),
-						APIHash:          cmd.String(flags.APIHash),
+						APIID:            apiID,
+						APIHash:          apiHash,
 						FloodWaitMaxWait: time.Duration(cmd.Int(flags.FloodWaitMaxSecs)) * time.Second,
 					}
+					transport := cmd.String(flags.Transport)
+					variant := cmd.String(flags.Variant)
 					allowedPaths := cmd.StringSlice(flags.AllowedPaths)
-					if len(allowedPaths) == 0 {
+					backupEnabled := transport != server.TransportHTTP && variant != server.VariantResearch
+					if !backupEnabled {
+						// HTTP and research never expose BackupMessages, so their startup
+						// must not inspect or create any backup directory either.
+						allowedPaths = nil
+					} else if len(allowedPaths) == 0 {
 						// No flag/env value: fall back to the OS backup directory,
 						// computed here (lazily) rather than at flag construction so
 						// help/version never touch the filesystem. If it can't be
@@ -160,14 +202,22 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 						}
 					}
 					summarizeCfg := summarize.Config{
-						Provider:        summarize.ProviderName(cmd.String(flags.SummarizeProvider)),
+						Provider:        summarizeProvider,
 						Model:           cmd.String(flags.SummarizeModel),
 						OllamaURL:       cmd.String(flags.OllamaURL),
-						GeminiAPIKey:    cmd.String(flags.GeminiAPIKey),
-						AnthropicAPIKey: cmd.String(flags.AnthropicAPIKey),
+						GeminiAPIKey:    geminiKey,
+						AnthropicAPIKey: anthropicKey,
 						BatchTokens:     cmd.Int(flags.SummarizeBatchTokens),
 					}
-					authCfg, store, err := buildAuthOptions(ctx, cmd)
+					var authCfg *authsrv.Config
+					var store sessionstore.Store
+					if transport == server.TransportHTTP {
+						authCfg, store, err = buildAuthOptions(ctx, cmd)
+						if err != nil {
+							return err
+						}
+					}
+					httpAddr, err := config.ResolveHTTPAddr(cmd.String(flags.HTTPAddr), cmd.IsSet(flags.HTTPAddr), os.LookupEnv)
 					if err != nil {
 						return err
 					}
@@ -181,9 +231,9 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 						MediaMaxBytes:  cmd.Int(flags.MediaMaxBytes),
 						TGRateLimitRPS: cmd.Int(flags.TGRateLimitRPS),
 						PinnedRefresh:  time.Duration(cmd.Int(flags.PinnedRefreshSecs)) * time.Second,
-						Variant:        cmd.String(flags.Variant),
-						Transport:      cmd.String(flags.Transport),
-						HTTPAddr:       cmd.String(flags.HTTPAddr),
+						Variant:        variant,
+						Transport:      transport,
+						HTTPAddr:       httpAddr,
 						LogFormat:      cmd.String(flags.LogFormat),
 						LogLevel:       cmd.String(flags.LogLevel),
 						Stdin:          cmd.Root().Reader,
@@ -213,7 +263,7 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					if err != nil {
 						return err
 					}
-					return tgclient.Login(ctx, cfg, cmd.String(flags.Phone))
+					return tgclient.Login(ctx, cfg, cmd.String(flags.Phone), cmd.Root().Reader, cmd.Root().Writer, cmd.Root().ErrWriter)
 				},
 			},
 			{
@@ -228,7 +278,7 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					if err != nil {
 						return err
 					}
-					return tgclient.Logout(ctx, cfg)
+					return tgclient.Logout(ctx, cfg, cmd.Root().Reader, cmd.Root().Writer, cmd.Root().ErrWriter)
 				},
 			},
 			{

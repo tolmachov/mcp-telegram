@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/joho/godotenv"
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -31,7 +30,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tolmachov/mcp-telegram/internal"
-	"github.com/tolmachov/mcp-telegram/internal/config"
 	"github.com/tolmachov/mcp-telegram/internal/flags"
 )
 
@@ -52,33 +50,6 @@ func parseChatIDInt(t *testing.T, s string) int64 {
 	return n
 }
 
-func init() {
-	// Mirror main.go's startup: load .env first, then merge in any keys
-	// stored in the OS secure store (macOS Keychain / Linux file). The
-	// integration test bypasses main.go because it spawns server.New
-	// directly, so without this initialization TELEGRAM_API_ID/HASH stay
-	// empty, urfave/cli's Required flag fails the server goroutine, and
-	// the io.Pipe-backed Initialize call hangs forever waiting for a
-	// reader that will never appear.
-	if err := godotenv.Load("../.env"); err != nil && !errors.Is(err, os.ErrNotExist) {
-		// Warn instead of panic: a malformed or unreadable .env shouldn't abort
-		// the whole suite when credentials may still arrive via the environment
-		// or the secure store below. Tests skip themselves when config is absent.
-		_, _ = fmt.Fprintf(os.Stderr, "[test init] warning: failed to load .env file: %v\n", err)
-	}
-	store, err := config.NewStore()
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "[test init] warning: failed to init secure config store: %v\n", err)
-		return
-	}
-	if err := config.LoadIntoEnv(store); err != nil {
-		// Log to stderr instead of panic — secure store may not be
-		// configured on every dev machine, and tests can still run if
-		// credentials come from .env / environment.
-		_, _ = fmt.Fprintf(os.Stderr, "[test init] warning: failed to load secure config: %v\n", err)
-	}
-}
-
 func setupClient(t *testing.T) (*client.Client, context.Context, func()) {
 	return setupClientWithTimeout(t, 5*time.Minute)
 }
@@ -92,7 +63,7 @@ func setupClientWithTimeout(t *testing.T, timeout time.Duration) (*client.Client
 	// and no live reader). Skipping early gives a clear error instead of a
 	// 5-minute timeout.
 	if os.Getenv(flags.EnvTelegramAPIID) == "" || os.Getenv(flags.EnvTelegramAPIHash) == "" {
-		t.Skipf("%s and %s are required for integration tests; set them via .env, environment, or `mcp-telegram config set`", flags.EnvTelegramAPIID, flags.EnvTelegramAPIHash)
+		t.Skipf("%s and %s are required for integration tests; export them or use `mcp-telegram config set`", flags.EnvTelegramAPIID, flags.EnvTelegramAPIHash)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -459,7 +430,7 @@ func TestBackupMessages(t *testing.T) {
 			t.Logf("failed to remove temp dir: %v", err)
 		}
 	}(tmpDir)
-	t.Setenv("TELEGRAM_ALLOWED_PATHS", tmpDir)
+	t.Setenv("MCP_TELEGRAM_ALLOWED_PATHS", tmpDir)
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -549,11 +520,11 @@ func TestSummarizeChat(t *testing.T) {
 	// mark3labs client that does NOT advertise sampling, so we must switch to
 	// a direct LLM provider for the test. Anthropic is the cheapest/most
 	// reliable; skip if no API key is configured.
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	apiKey := os.Getenv(flags.EnvAnthropicAPIKey)
 	if apiKey == "" {
-		t.Skip("ANTHROPIC_API_KEY not set; cannot test SummarizeChat without a sampling-capable client. Set ANTHROPIC_API_KEY to enable this test.")
+		t.Skipf("%s not set; cannot test SummarizeChat without a sampling-capable client", flags.EnvAnthropicAPIKey)
 	}
-	t.Setenv("SUMMARIZE_PROVIDER", "anthropic")
+	t.Setenv("MCP_SUMMARIZE_PROVIDER", "anthropic")
 
 	c, ctx, cleanup := setupClientWithTimeout(t, 10*time.Minute)
 	defer cleanup()
@@ -589,7 +560,7 @@ func TestSummarizeChatSamplingFallback(t *testing.T) {
 
 	// Force sampling provider; the test client doesn't advertise sampling, so
 	// the server must surface ErrSamplingUnsupported as a tool result error.
-	t.Setenv("SUMMARIZE_PROVIDER", "sampling")
+	t.Setenv("MCP_SUMMARIZE_PROVIDER", "sampling")
 
 	c, ctx, cleanup := setupClient(t)
 	defer cleanup()
@@ -1320,12 +1291,12 @@ func TestErrorRecoveryHints(t *testing.T) {
 			wantHints: []string{"invalid media_type", "photos"},
 		},
 		{
-			name: "SearchMessages with scheduled offset_id",
+			name: "SearchMessages with scheduled before_message_id",
 			tool: "SearchMessages",
 			args: map[string]any{
-				"chat_id":   123,
-				"query":     "hi",
-				"offset_id": "s:42",
+				"chat_id":           123,
+				"query":             "hi",
+				"before_message_id": "s:42",
 			},
 			wantHints: []string{"scheduled"},
 		},
@@ -1382,7 +1353,7 @@ func TestErrorRecoveryHints(t *testing.T) {
 //
 //   * count == len(messages)
 //   * every id is an opaque numeric handle ("42", never "s:…")
-//   * has_more and next_offset_id / next_cursor are consistent
+//   * has_more and next_cursor are consistent
 //   * when a second page is requested via the cursor, message ids do not
 //     overlap the first page
 //
@@ -1408,12 +1379,12 @@ type searchMessageDTO struct {
 
 // searchMessagesResult is the decoded shape of SearchMessages output.
 type searchMessagesResult struct {
-	ChatID       int64              `json:"chat_id"`
-	Query        string             `json:"query"`
-	Messages     []searchMessageDTO `json:"messages"`
-	Count        int                `json:"count"`
-	HasMore      bool               `json:"has_more"`
-	NextOffsetID string             `json:"next_offset_id,omitempty"`
+	ChatID     int64              `json:"chat_id"`
+	Query      string             `json:"query"`
+	Messages   []searchMessageDTO `json:"messages"`
+	Count      int                `json:"count"`
+	HasMore    bool               `json:"has_more"`
+	NextCursor string             `json:"next_cursor,omitempty"`
 }
 
 // searchMessagesGlobalResult is the decoded shape of SearchMessagesGlobal.
@@ -1459,7 +1430,7 @@ func assertSearchMessagesShape(t *testing.T, raw []byte, wantChatID int64, globa
 		if wantChatID != 0 {
 			assert.Equal(t, wantChatID, parsed.ChatID)
 		}
-		msgs, count, hasMore, nextToken, tokenName = parsed.Messages, parsed.Count, parsed.HasMore, parsed.NextOffsetID, "next_offset_id"
+		msgs, count, hasMore, nextToken, tokenName = parsed.Messages, parsed.Count, parsed.HasMore, parsed.NextCursor, "next_cursor"
 	}
 
 	assert.Equal(t, len(msgs), count, "count and len(messages) must match")
@@ -1604,7 +1575,7 @@ func TestSearchMessagesMediaFilter(t *testing.T) {
 }
 
 // TestSearchMessagesPagination fetches one page at limit=1, then pages again
-// via next_offset_id and verifies that the second page does not repeat any
+// via the opaque cursor and verifies that the second page does not repeat any
 // id from the first. Hard-fails if the test query returns fewer than two
 // results — the test account must contain at least two matches so the
 // cursor round-trip is actually exercised in CI.
@@ -1625,7 +1596,7 @@ func TestSearchMessagesPagination(t *testing.T) {
 	// produces multiple pages so the cursor round-trip is always exercised.
 	const limit = 1
 
-	callPage := func(offset string) *searchMessagesResult {
+	callPage := func(cursor string) *searchMessagesResult {
 		req := mcp.CallToolRequest{}
 		req.Params.Name = "SearchMessages"
 		args := map[string]any{
@@ -1633,8 +1604,8 @@ func TestSearchMessagesPagination(t *testing.T) {
 			"query":   searchQueryOrDefault(),
 			"limit":   limit,
 		}
-		if offset != "" {
-			args["offset_id"] = offset
+		if cursor != "" {
+			args = map[string]any{"cursor": cursor}
 		}
 		req.Params.Arguments = args
 
@@ -1648,17 +1619,17 @@ func TestSearchMessagesPagination(t *testing.T) {
 	}
 
 	page1 := callPage("")
-	t.Logf("page 1: count=%d, has_more=%v, next=%s", page1.Count, page1.HasMore, page1.NextOffsetID)
+	t.Logf("page 1: count=%d, has_more=%v, next=%s", page1.Count, page1.HasMore, page1.NextCursor)
 
 	if page1.Count == 0 {
 		t.Skipf("query %q returned no results — test account needs at least 2 matching messages in chat %s", searchQueryOrDefault(), chatID)
 	}
-	if !page1.HasMore || page1.NextOffsetID == "" {
+	if !page1.HasMore || page1.NextCursor == "" {
 		t.Skipf("query %q returned only one result at limit=1 — test account needs at least 2 matching messages to exercise pagination", searchQueryOrDefault())
 	}
 
-	page2 := callPage(page1.NextOffsetID)
-	t.Logf("page 2: count=%d, has_more=%v, next=%s", page2.Count, page2.HasMore, page2.NextOffsetID)
+	page2 := callPage(page1.NextCursor)
+	t.Logf("page 2: count=%d, has_more=%v, next=%s", page2.Count, page2.HasMore, page2.NextCursor)
 
 	seen := make(map[string]bool, len(page1.Messages))
 	for _, m := range page1.Messages {

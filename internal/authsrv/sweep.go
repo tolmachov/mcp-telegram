@@ -40,18 +40,29 @@ func (a *AuthServer) sessionSweeper(ctx context.Context) {
 // List/Delete) is logged and the goroutine survives to the next tick instead of
 // unwinding and crashing the whole auth-server process.
 func (a *AuthServer) runSweep(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			a.logger.Error("session sweep panicked; recovered", "panic", r)
-		}
-	}()
-	a.sweepOrphanSessions(ctx)
-	a.sweepExpiredTombstones(ctx)
+	for name, sweep := range map[string]func(context.Context){
+		"sessions":   a.sweepOrphanSessions,
+		"tombstones": a.sweepExpiredTombstones,
+		"oauth_state": func(ctx context.Context) {
+			if err := a.store.SweepAuthState(ctx, a.now()); err != nil {
+				a.logger.Error("oauth state sweep failed", "err", err)
+			}
+		},
+	} {
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					a.logger.Error("auth sweep panicked; recovered", "sweep", name, "panic", recovered)
+				}
+			}()
+			sweep(ctx)
+		}()
+	}
 }
 
 // sweepOrphanSessions deletes every stored session whose blob is older than
-// the refresh-token TTL (plus margin). Safety invariant: login,
-// upgrade-on-refresh, and every gotd re-store all WRITE the blob, so its
+// the refresh-token TTL (plus margin). Safety invariant: login and every gotd
+// re-store both WRITE the blob, so its
 // mtime >= LoginAt of every token bound to it; the refresh TTL is absolute
 // from LoginAt, so age > TTL means every refresh token for the session has
 // expired and the session can never be used again. Active sessions are

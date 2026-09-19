@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -27,12 +26,13 @@ func NewGetRepliesHandler(provider *messages.Provider) *RepliesGetHandler {
 // topic's messages — pass the topic id from GetForumTopics). Scheduled handles
 // are rejected because they have no thread.
 type GetRepliesInput struct {
-	ChatID    int64  `json:"chat_id" jsonschema:"The channel ID (for post comments) or forum supergroup ID (for topic messages)"`
-	MessageID string `json:"message_id" jsonschema:"Opaque regular-message handle of the thread root: a channel post ID (to read its comments) or a forum topic ID from GetForumTopics (to read the topic's messages)."`
-	Limit     int    `json:"limit,omitempty" jsonschema:"Maximum number of messages to return (default 50\\, max 100)."`
-	OffsetID  string `json:"offset_id,omitempty" jsonschema:"Opaque message handle to paginate from (copy next_offset_id from a previous response). Only regular-message handles are accepted."`
-	FromDate  string `json:"from_date,omitempty" jsonschema:"RFC3339 lower bound (inclusive). Applied as a post-filter\\, so the page may contain fewer than limit messages and has_more is forced to false once the window is exhausted."`
-	ToDate    string `json:"to_date,omitempty" jsonschema:"RFC3339 exclusive upper bound (strictly-less-than). Wired to Telegram's native offset_date. To include a full day\\, pass midnight of the following day."`
+	ChatID          int64  `json:"chat_id,omitempty" jsonschema:"Required on the first page; omit when passing cursor. The channel ID (for post comments) or forum supergroup ID (for topic messages)"`
+	MessageID       string `json:"message_id,omitempty" jsonschema:"Required on the first page; omit when passing cursor. Opaque regular-message handle of the thread root: a channel post ID (to read its comments) or a forum topic ID from GetForumTopics (to read the topic's messages)."`
+	Limit           int    `json:"limit,omitempty" jsonschema:"Maximum number of messages to return (default 50\\, max 100)."`
+	Cursor          string `json:"cursor,omitempty" jsonschema:"Opaque continuation cursor. On continuation pass only this field; the chat, thread root, and filters are embedded in it."`
+	BeforeMessageID string `json:"before_message_id,omitempty" jsonschema:"For the first page only: start strictly before this regular-message handle."`
+	FromDate        string `json:"from_date,omitempty" jsonschema:"RFC3339 lower bound (inclusive). Applied as a post-filter\\, so the page may contain fewer than limit messages and has_more is forced to false once the window is exhausted."`
+	ToDate          string `json:"to_date,omitempty" jsonschema:"RFC3339 exclusive upper bound (strictly-less-than). Wired to Telegram's native offset_date. To include a full day\\, pass midnight of the following day."`
 }
 
 // getRepliesOutput mirrors getMessagesOutput's regular-message envelope (same
@@ -44,7 +44,7 @@ type getRepliesOutput struct {
 	Messages       []messageDTO `json:"messages"`
 	Count          int          `json:"count"`
 	HasMore        bool         `json:"has_more"`
-	NextOffsetID   string       `json:"next_offset_id,omitempty"`
+	NextCursor     string       `json:"next_cursor,omitempty"`
 	PaginationHint string       `json:"pagination_hint,omitempty"`
 }
 
@@ -55,7 +55,7 @@ func (h *RepliesGetHandler) Register(s *mcp.Server) {
 		Description: "Read the discussion thread under a message via Telegram's messages.getReplies. Two uses, same call: " +
 			"(1) comments under a channel post — pass the channel `chat_id` and the post's `message_id`; " +
 			"(2) messages inside a forum-supergroup topic — pass the supergroup `chat_id` and the topic id (the `id` field from GetForumTopics) as `message_id`. " +
-			"Returns up to `limit` messages (default 50, max 100) newest-first, with pagination via `offset_id` and date filtering via `from_date` / `to_date` (RFC3339; `to_date` exclusive). " +
+			"Returns up to `limit` messages (default 50, max 100) newest-first. Continue with `cursor` alone; use `before_message_id` only for an initial anchor. Date filtering uses inclusive `from_date` and exclusive `to_date`. " +
 			"A message's `replies.count` (from GetMessages/SearchMessages) tells you how many comments a post has before you fetch them here. " +
 			"An empty result (count 0) may mean the message has no thread, comments are disabled, or the id is wrong.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
@@ -63,50 +63,54 @@ func (h *RepliesGetHandler) Register(s *mcp.Server) {
 }
 
 func (h *RepliesGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in GetRepliesInput) (*mcp.CallToolResult, *getRepliesOutput, error) {
-	if in.ChatID == 0 {
-		return errChatIDRequired(), nil, nil
-	}
-
-	rootRef, err := ParseMessageRef(in.MessageID)
-	if err != nil {
-		return errInvalidMessageID(in.MessageID, err), nil, nil
-	}
-	if rootRef.Scheduled {
-		return errResult("message_id cannot reference a scheduled message; scheduled messages have no reply thread."), nil, nil
-	}
-
 	opts := messages.DefaultFetchOptions()
-	if in.Limit > 0 {
-		opts.Limit = clampLimit(in.Limit, opts.Limit, 100)
-	}
-
-	if in.OffsetID != "" {
-		ref, err := ParseMessageRef(in.OffsetID)
+	state := messagePageCursor{Kind: cursorKindReplies}
+	var rootRef MessageRef
+	if in.Cursor != "" {
+		if in.ChatID != 0 || in.MessageID != "" || in.Limit != 0 || in.BeforeMessageID != "" || in.FromDate != "" || in.ToDate != "" {
+			return errResult("cursor is incompatible with every other field; pass the cursor alone"), nil, nil
+		}
+		var err error
+		state, err = parseMessagePageCursor(in.Cursor, cursorKindReplies)
 		if err != nil {
-			return errInvalidMessageID(in.OffsetID, err), nil, nil
+			return errResult(fmt.Sprintf("invalid cursor: %v", err)), nil, nil
 		}
-		if ref.Scheduled {
-			return errResult("offset_id cannot reference a scheduled message; reply threads paginate over regular messages only."), nil, nil
+		in.ChatID, in.Limit = state.ChatID, state.Limit
+		in.FromDate, in.ToDate = state.FromDate, state.ToDate
+		rootRef = MessageRef{ID: state.RootMessageID}
+		opts.OffsetID, opts.Limit = state.OffsetID, state.Limit
+	} else {
+		if in.ChatID == 0 {
+			return errChatIDRequired(), nil, nil
 		}
-		opts.OffsetID = ref.ID
+		var err error
+		rootRef, err = ParseMessageRef(in.MessageID)
+		if err != nil {
+			return errInvalidMessageID(in.MessageID, err), nil, nil
+		}
+		if rootRef.Scheduled {
+			return errResult("message_id cannot reference a scheduled message; scheduled messages have no reply thread."), nil, nil
+		}
+		opts.Limit = clampLimit(in.Limit, opts.Limit, 100)
+		if in.BeforeMessageID != "" {
+			ref, err := ParseMessageRef(in.BeforeMessageID)
+			if err != nil {
+				return errInvalidMessageID(in.BeforeMessageID, err), nil, nil
+			}
+			if ref.Scheduled {
+				return errResult("before_message_id cannot reference a scheduled message"), nil, nil
+			}
+			opts.OffsetID = ref.ID
+		}
 	}
 
-	if in.FromDate != "" {
-		t, errRes, ok := parseDateFilter("from_date", in.FromDate)
-		if !ok {
-			return errRes, nil, nil
-		}
-		opts.MinDate = t
+	var dateErr *mcp.CallToolResult
+	opts.MinDate, opts.MaxDate, dateErr = parseDateWindow(in.FromDate, in.ToDate)
+	if dateErr != nil {
+		return dateErr, nil, nil
 	}
-	if in.ToDate != "" {
-		t, errRes, ok := parseDateFilter("to_date", in.ToDate)
-		if !ok {
-			return errRes, nil, nil
-		}
-		opts.MaxDate = t
-	}
-	if !opts.MinDate.IsZero() && !opts.MaxDate.IsZero() && opts.MinDate.After(opts.MaxDate) {
-		return errResult(fmt.Sprintf("from_date (%s) is after to_date (%s); the window is empty.", opts.MinDate.Format(time.RFC3339), opts.MaxDate.Format(time.RFC3339))), nil, nil
+	if in.Cursor == "" {
+		state = messagePageCursor{Kind: cursorKindReplies, ChatID: in.ChatID, Limit: opts.Limit, FromDate: in.FromDate, ToDate: in.ToDate, RootMessageID: rootRef.ID}
 	}
 
 	result, err := h.provider.FetchReplies(ctx, in.ChatID, rootRef.ID, opts)
@@ -122,7 +126,7 @@ func (h *RepliesGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest
 
 	out := &getRepliesOutput{
 		ChatID:    in.ChatID,
-		MessageID: in.MessageID,
+		MessageID: rootRef.Format(),
 		Messages:  make([]messageDTO, 0, len(result.Messages)),
 		Count:     result.Count,
 		HasMore:   result.HasMore,
@@ -131,8 +135,9 @@ func (h *RepliesGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest
 		out.Messages = append(out.Messages, toMessageDTO(m, false))
 	}
 	if result.HasMore && result.NextID > 0 {
-		out.NextOffsetID = FormatRegularRef(result.NextID)
-		out.PaginationHint = fmt.Sprintf("More replies available. Call GetReplies again with offset_id=%q to fetch the next page.", out.NextOffsetID)
+		state.OffsetID = result.NextID
+		out.NextCursor = formatMessagePageCursor(state)
+		out.PaginationHint = "More replies available. Call GetReplies again with next_cursor copied verbatim into cursor and omit every other field."
 	}
 
 	return nil, out, nil

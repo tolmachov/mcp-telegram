@@ -21,9 +21,8 @@ type sessionVault interface {
 	SessionDelete() error
 }
 
-// SessionStorage implements session.Storage over the shared macOS Keychain
-// vault. The session bytes live in the same keychain item as the config blob,
-// so reading/writing the session never triggers a separate password prompt.
+// SessionStorage implements session.Storage over the versioned macOS Keychain
+// vault. Session data and every config value live in distinct items.
 type SessionStorage struct {
 	vault sessionVault
 }

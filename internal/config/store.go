@@ -34,7 +34,7 @@ type Store interface {
 }
 
 // ResolveKey translates a user-facing alias (e.g. "api-id") to its canonical
-// env-var name (e.g. "TELEGRAM_API_ID").
+// env-var name (e.g. "MCP_TELEGRAM_API_ID").
 func ResolveKey(alias string) (string, error) {
 	canonical, ok := configKeys[strings.ToLower(alias)]
 	if !ok {
