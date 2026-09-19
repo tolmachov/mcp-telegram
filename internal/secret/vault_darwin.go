@@ -64,11 +64,18 @@ func (keychainBackend) Load(account string) ([]byte, error) {
 	query.SetMatchLimit(keychain.MatchLimitOne)
 	query.SetReturnData(true)
 	results, err := keychain.QueryItem(query)
-	if errors.Is(err, keychain.ErrorItemNotFound) || len(results) == 0 {
+	return keychainItemData(account, results, err)
+}
+
+func keychainItemData(account string, results []keychain.QueryResult, err error) ([]byte, error) {
+	if errors.Is(err, keychain.ErrorItemNotFound) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("querying keychain item %q: %w", account, err)
+	}
+	if len(results) == 0 {
+		return nil, ErrNotFound
 	}
 	return append([]byte(nil), results[0].Data...), nil
 }

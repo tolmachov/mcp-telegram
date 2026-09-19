@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/keybase/go-keychain"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -96,4 +98,36 @@ func TestVaultDeleteIsScoped(t *testing.T) {
 	value, err := v.ConfigGet("B")
 	require.NoError(t, err)
 	assert.Equal(t, "two", value)
+}
+
+func TestKeychainItemData(t *testing.T) {
+	denied := errors.New("keychain access denied")
+	for _, tc := range []struct {
+		name    string
+		results []keychain.QueryResult
+		err     error
+		wantErr error
+	}{
+		{name: "access failure with no results", err: denied, wantErr: denied},
+		{name: "access failure with results", results: []keychain.QueryResult{{Data: []byte("secret")}}, err: denied, wantErr: denied},
+		{name: "explicit not found", err: keychain.ErrorItemNotFound, wantErr: ErrNotFound},
+		{name: "empty successful query", wantErr: ErrNotFound},
+		{name: "success", results: []keychain.QueryResult{{Data: []byte("secret")}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := keychainItemData("config/test", tc.results, tc.err)
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				assert.Nil(t, data)
+				if errors.Is(tc.wantErr, denied) {
+					assert.NotErrorIs(t, err, ErrNotFound)
+				}
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, []byte("secret"), data)
+			data[0] = 'X'
+			assert.Equal(t, []byte("secret"), tc.results[0].Data)
+		})
+	}
 }
