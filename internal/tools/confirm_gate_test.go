@@ -18,6 +18,14 @@ import (
 // guarded against lives in how the SDK serializes handler results.
 func callTool(t *testing.T, register func(*mcp.Server), name string, args map[string]any) *mcp.CallToolResult {
 	t.Helper()
+	cs := connectToolClient(t, register)
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: name, Arguments: args})
+	require.NoError(t, err)
+	return res
+}
+
+func connectToolClient(t *testing.T, register func(*mcp.Server)) *mcp.ClientSession {
+	t.Helper()
 	ctx := context.Background()
 	srv := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
 	register(srv)
@@ -36,9 +44,7 @@ func callTool(t *testing.T, register func(*mcp.Server), name string, args map[st
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cs.Close() })
 
-	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
-	require.NoError(t, err)
-	return res
+	return cs
 }
 
 // structured decodes a result's StructuredContent into a generic map.

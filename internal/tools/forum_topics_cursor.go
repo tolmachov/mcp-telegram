@@ -22,8 +22,9 @@ type forumTopicsCursorEnvelope struct {
 
 func (e forumTopicsCursorEnvelope) cursorVersion() int { return e.Version }
 
-// forumTopicsCursorVersion is the current envelope schema version.
-const forumTopicsCursorVersion = 2
+// Version 3 requires a coherent live-topic anchor and counts only entries
+// through that anchor. Version 2 could combine offsets from different topics.
+const forumTopicsCursorVersion = 3
 
 // FormatForumTopicsCursor renders the offset tuple as an opaque base64 string.
 // Invariant: ParseForumTopicsCursor(FormatForumTopicsCursor(...)) round-trips
@@ -53,6 +54,9 @@ func ParseForumTopicsCursor(s string) (forumTopicsCursorEnvelope, error) {
 	}
 	if env.ChatID == 0 || env.Limit <= 0 || env.Limit > 100 {
 		return forumTopicsCursorEnvelope{}, fmt.Errorf("cursor contains invalid source filters")
+	}
+	if env.OffsetTopic <= 0 || env.OffsetID <= 0 || env.OffsetDate <= 0 || env.Seen <= 0 {
+		return forumTopicsCursorEnvelope{}, fmt.Errorf("cursor contains invalid pagination anchor")
 	}
 	return env, nil
 }

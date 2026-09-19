@@ -31,8 +31,8 @@ func NewMessagesSearchHandler(provider *messages.Provider) *MessagesSearchHandle
 // path as ChatID). MediaType is a whitelisted enum; leave empty for plain
 // text search across all message types.
 type SearchMessagesInput struct {
-	ChatID          int64  `json:"chat_id" jsonschema:"The chat ID to search in"`
-	Query           string `json:"query" jsonschema:"Substring to search for. Telegram's server-side search does token/prefix matching\\, not arbitrary regex."`
+	ChatID          int64  `json:"chat_id,omitempty" jsonschema:"Required on the first page; omit when passing cursor. The chat ID to search in"`
+	Query           string `json:"query,omitempty" jsonschema:"Required on the first page; omit when passing cursor. Substring to search for. Telegram's server-side search does token/prefix matching\\, not arbitrary regex."`
 	Limit           int    `json:"limit,omitempty" jsonschema:"Maximum number of results to return (default 50\\, max 100)."`
 	Cursor          string `json:"cursor,omitempty" jsonschema:"Opaque continuation cursor. On continuation pass only this field; all original filters are embedded in it."`
 	BeforeMessageID string `json:"before_message_id,omitempty" jsonschema:"For the first page only: search strictly before this regular-message handle."`

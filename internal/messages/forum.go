@@ -3,7 +3,6 @@ package messages
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"strconv"
 	"time"
 
@@ -87,19 +86,34 @@ func (p *Provider) fetchForumTopicsWithPeer(ctx context.Context, peer tg.InputPe
 		return nil, fmt.Errorf("getting forum topics: %w", err)
 	}
 
-	return buildForumTopicsResult(resp, seen), nil
+	// Check before using Count: a repeated page must not look terminal just
+	// because its entries were counted twice.
+	if offsetTopic > 0 {
+		for i := len(resp.Topics) - 1; i >= 0; i-- {
+			if topic, ok := resp.Topics[i].(*tg.ForumTopic); ok {
+				if topic.ID == offsetTopic {
+					return nil, fmt.Errorf("forum pagination did not advance past topic %d", offsetTopic)
+				}
+				break
+			}
+		}
+	}
+	return buildForumTopicsResult(resp, seen)
 }
 
 // buildForumTopicsResult converts a messages.getForumTopics response into a
 // paginated ForumTopicsResult. Split out from FetchForumTopics so the parsing,
 // HasMore computation, and next-offset derivation are testable without a live
 // client (mirroring processHistory).
-func buildForumTopicsResult(resp *tg.MessagesForumTopics, seen int) *ForumTopicsResult {
+func buildForumTopicsResult(resp *tg.MessagesForumTopics, seen int) (*ForumTopicsResult, error) {
 	// Index related messages by ID so we can recover each topic's
 	// top-message date for the pagination cursor.
 	msgDates := make(map[int]int, len(resp.Messages))
 	for _, mc := range resp.Messages {
-		if m, ok := mc.(*tg.Message); ok {
+		switch m := mc.(type) {
+		case *tg.Message:
+			msgDates[m.ID] = m.Date
+		case *tg.MessageService:
 			msgDates[m.ID] = m.Date
 		}
 	}
@@ -111,14 +125,8 @@ func buildForumTopicsResult(resp *tg.MessagesForumTopics, seen int) *ForumTopics
 	}
 
 	var lastTopic *tg.ForumTopic
-	var lastRawTopicID int
-	for _, tc := range resp.Topics {
-		switch raw := tc.(type) {
-		case *tg.ForumTopic:
-			lastRawTopicID = raw.ID
-		case *tg.ForumTopicDeleted:
-			lastRawTopicID = raw.ID
-		}
+	var anchorSeen int
+	for i, tc := range resp.Topics {
 		topic, ok := tc.(*tg.ForumTopic)
 		if !ok {
 			// *tg.ForumTopicDeleted carries only an ID — nothing to render.
@@ -140,38 +148,31 @@ func buildForumTopicsResult(resp *tg.MessagesForumTopics, seen int) *ForumTopics
 		}
 		result.Topics = append(result.Topics, ft)
 		lastTopic = topic
+		anchorSeen = seen + i + 1
 	}
 	result.Count = len(result.Topics)
 
-	// More pages remain while the raw topics consumed across all pages (seen
-	// carries the running total from the cursor) fall short of the forum's
-	// reported total. Page fullness is deliberately not a signal: Telegram may
-	// return fewer topics than requested even when more exist. The anchor is
-	// the last raw topic, deleted ones included, so a page consisting only of
-	// ForumTopicDeleted entries still advances instead of restarting from the
-	// first page.
-	consumed := seen + len(resp.Topics)
-	if len(resp.Topics) > 0 && consumed < resp.Count && lastRawTopicID > 0 {
-		offset := &ForumTopicsOffset{
-			Topic: lastRawTopicID,
-			Seen:  consumed,
+	// Telegram can return a short page before the end. Deleted topics have no
+	// message/date anchor, so resume after the last live topic and count only
+	// entries through that anchor. Trailing tombstones may be returned again.
+	if len(resp.Topics) > 0 && seen+len(resp.Topics) < resp.Count {
+		if lastTopic == nil {
+			return nil, fmt.Errorf("cannot paginate forum topics: page contains only deleted topics")
 		}
-		if lastTopic != nil {
-			offset.ID = lastTopic.TopMessage
-			if d, ok := msgDates[lastTopic.TopMessage]; ok {
-				offset.Date = d
-			} else {
-				// The last topic's top message wasn't in resp.Messages (e.g. it was
-				// deleted); fall back to the topic creation date. It can differ from
-				// the message date, so log it — a wrong offset_date can skip or
-				// duplicate topics and would otherwise be invisible.
-				offset.Date = lastTopic.Date
-				slog.Warn("buildForumTopicsResult: top message missing for last topic; using topic date as pagination offset_date (cursor may be approximate)",
-					"topic_id", lastTopic.ID, "top_message", lastTopic.TopMessage)
-			}
+		date := msgDates[lastTopic.TopMessage]
+		if resp.OrderByCreateDate {
+			date = lastTopic.Date
 		}
-		result.NextOffset = offset
+		if lastTopic.ID <= 0 || lastTopic.TopMessage <= 0 || date <= 0 {
+			return nil, fmt.Errorf("cannot paginate forum topics: missing anchor data for topic %d", lastTopic.ID)
+		}
+		result.NextOffset = &ForumTopicsOffset{
+			Topic: lastTopic.ID,
+			ID:    lastTopic.TopMessage,
+			Date:  date,
+			Seen:  anchorSeen,
+		}
 	}
 
-	return result
+	return result, nil
 }

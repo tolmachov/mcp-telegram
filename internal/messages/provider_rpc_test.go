@@ -270,3 +270,113 @@ func TestFetchUnreadUsesDialogReadBoundary(t *testing.T) {
 	assert.Equal(t, 41, got.Messages[0].ID)
 	assert.Zero(t, inv.Remaining())
 }
+
+func TestForumPaginationCountsOnlyThroughLiveAnchor(t *testing.T) {
+	const channelID = int64(85)
+	inv := telegramfake.New(
+		resolveMessageChannelStep(t, channelID, 108),
+		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetForumTopicsRequest, out *tg.MessagesForumTopics) error {
+			assert.Zero(t, req.OffsetTopic)
+			assert.Equal(t, 100, req.Limit) // default limit
+			out.Count = 4
+			out.Topics = []tg.ForumTopicClass{&tg.ForumTopic{ID: 7, TopMessage: 70, Date: 10}, &tg.ForumTopicDeleted{ID: 8}}
+			out.Messages = []tg.MessageClass{&tg.Message{ID: 70, Date: 100}}
+			return nil
+		}),
+		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetForumTopicsRequest, out *tg.MessagesForumTopics) error {
+			assert.Equal(t, 7, req.OffsetTopic)
+			assert.Equal(t, 70, req.OffsetID)
+			assert.Equal(t, 100, req.OffsetDate)
+			out.Count = 4
+			out.Topics = []tg.ForumTopicClass{&tg.ForumTopicDeleted{ID: 8}, &tg.ForumTopic{ID: 9, TopMessage: 90, Date: 9}}
+			out.Messages = []tg.MessageClass{&tg.Message{ID: 90, Date: 90}}
+			return nil
+		}),
+		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetForumTopicsRequest, out *tg.MessagesForumTopics) error {
+			assert.Equal(t, 9, req.OffsetTopic)
+			assert.Equal(t, 90, req.OffsetID)
+			assert.Equal(t, 90, req.OffsetDate)
+			out.Count = 4
+			out.Topics = []tg.ForumTopicClass{&tg.ForumTopic{ID: 10, TopMessage: 100, Date: 8}}
+			return nil
+		}),
+	)
+	p := NewProviderWithRate(tg.NewClient(inv), 100_000)
+	offset := ForumTopicsOffset{}
+	var ids []int
+	for range 3 {
+		got, err := p.FetchForumTopics(t.Context(), messageChannelID(channelID), "", 0, offset.Topic, offset.ID, offset.Date, offset.Seen)
+		require.NoError(t, err)
+		for _, topic := range got.Topics {
+			ids = append(ids, topic.ID)
+		}
+		if got.NextOffset == nil {
+			break
+		}
+		offset = *got.NextOffset
+	}
+	assert.Equal(t, []int{7, 9, 10}, ids)
+	assert.Zero(t, inv.Remaining(), "trailing tombstones must not truncate the next page")
+}
+
+func TestForumPaginationRejectsRepeatedAnchorEvenAtReportedEnd(t *testing.T) {
+	inv := telegramfake.New(
+		resolveMessageChannelStep(t, 85, 108),
+		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetForumTopicsRequest, out *tg.MessagesForumTopics) error {
+			out.Count = 2
+			out.Topics = []tg.ForumTopicClass{&tg.ForumTopic{ID: 7, TopMessage: 70, Date: 10}, &tg.ForumTopicDeleted{ID: 8}}
+			return nil
+		}),
+	)
+	p := NewProviderWithRate(tg.NewClient(inv), 100_000)
+	got, err := p.FetchForumTopics(t.Context(), messageChannelID(85), "", 2, 7, 70, 100, 1)
+	require.ErrorContains(t, err, "did not advance")
+	assert.Nil(t, got)
+	assert.Zero(t, inv.Remaining())
+}
+
+func TestFetchPreservesMediaAndMetadataForBackup(t *testing.T) {
+	photo := &tg.MessageMediaPhoto{}
+	photo.SetPhoto(&tg.Photo{ID: 101, AccessHash: 202, DCID: 2, FileReference: []byte("ref"), Sizes: []tg.PhotoSizeClass{
+		&tg.PhotoSize{Type: "s", W: 100, H: 80},
+		&tg.PhotoSizeProgressive{Type: "x", W: 1280, H: 960},
+		&tg.PhotoCachedSize{Type: "m", W: 320, H: 240},
+		&tg.PhotoSizeEmpty{Type: "i"},
+	}})
+	doc := &tg.MessageMediaDocument{}
+	doc.SetDocument(&tg.Document{Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: "report.pdf"}}})
+	picture := &tg.Message{ID: 3, Date: 100, FromID: &tg.PeerUser{UserID: 42}, Media: photo, ReplyTo: &tg.MessageReplyHeader{ReplyToMsgID: 1}}
+	picture.SetReactions(tg.MessageReactions{Results: []tg.ReactionCount{
+		{Reaction: &tg.ReactionEmoji{Emoticon: "👍"}, Count: 2},
+		{Reaction: &tg.ReactionCustomEmoji{DocumentID: 77}, Count: 1},
+		{Reaction: &tg.ReactionPaid{}, Count: 3},
+	}})
+	inv := telegramfake.New(
+		resolveMessageChannelStep(t, 86, 109),
+		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
+			out.Messages = &tg.MessagesMessages{Messages: []tg.MessageClass{
+				picture,
+				&tg.Message{ID: 2, Date: 90, Media: doc},
+				&tg.Message{ID: 1, Date: 80, Message: "😀 https://example.com link", Entities: []tg.MessageEntityClass{
+					&tg.MessageEntityURL{Offset: 3, Length: 19},
+					&tg.MessageEntityTextURL{Offset: 23, Length: 4, URL: "https://hidden.example"},
+				}},
+			}, Users: []tg.UserClass{&tg.User{ID: 42, FirstName: "Alice"}}}
+			return nil
+		}),
+	)
+	p := NewProviderWithRate(tg.NewClient(inv), 100_000)
+	got, err := p.Fetch(t.Context(), messageChannelID(86), DefaultFetchOptions())
+	require.NoError(t, err)
+	require.Len(t, got.Messages, 3)
+	assert.Equal(t, &MediaInfo{Type: "photo", Width: 1280, Height: 960, ResourceURI: "telegram://media/101/202/2/x?ref=cmVm"}, got.Messages[0].Media)
+	assert.Equal(t, "Alice", got.Messages[0].SenderName)
+	assert.Equal(t, 1, got.Messages[0].ReplyToID)
+	assert.Equal(t, &MediaInfo{Type: "document", FileName: "report.pdf"}, got.Messages[1].Media)
+	assert.Equal(t, []string{"https://example.com", "https://hidden.example"}, got.Messages[2].Entities)
+	backup := FormatBatchForBackup(got.Messages)
+	assert.Contains(t, backup, "[Alice] [id=3] [reply_to=1] [reactions: 👍x2, custom:77x1, ⭐x3]")
+	assert.Contains(t, backup, "[media: photo, resource=telegram://media/101/202/2/x?ref=cmVm, size=1280x960]")
+	assert.Contains(t, backup, "[media: document, file=report.pdf]")
+	assert.Zero(t, inv.Remaining())
+}

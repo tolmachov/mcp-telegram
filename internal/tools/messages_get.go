@@ -26,7 +26,7 @@ func NewMessagesGetHandler(provider *messages.Provider) *MessagesGetHandler {
 // first-page anchor, BeforeMessageID must be a regular-message handle ("42");
 // scheduled handles ("s:...") are rejected because they do not paginate.
 type GetMessagesInput struct {
-	ChatID           int64  `json:"chat_id" jsonschema:"The chat ID to get messages from"`
+	ChatID           int64  `json:"chat_id,omitempty" jsonschema:"Required on the first page; omit when passing cursor. The chat ID to get messages from"`
 	Limit            int    `json:"limit,omitempty" jsonschema:"Maximum number of regular messages to return (default 50\\, max 100). Does not affect scheduled_messages which are always returned in full."`
 	Cursor           string `json:"cursor,omitempty" jsonschema:"Opaque continuation cursor. On continuation pass only this field; all original filters are embedded in it."`
 	BeforeMessageID  string `json:"before_message_id,omitempty" jsonschema:"For the first page only: start strictly before this regular-message handle. Use cursor for subsequent pages."`

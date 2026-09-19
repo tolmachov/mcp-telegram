@@ -12,7 +12,6 @@ import (
 func TestForumTopicsCursorRoundTrip(t *testing.T) {
 	cases := [][4]int{
 		{7, 510, 1717000000, 100},
-		{0, 0, 0, 0},
 		{1, 2, 3, 4},
 	}
 	for _, c := range cases {
@@ -60,4 +59,15 @@ func TestParseForumTopicsCursorVersionTooNew(t *testing.T) {
 	_, err = ParseForumTopicsCursor(encoded)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported")
+}
+
+func TestForumTopicsCursorRejectsInvalidAnchors(t *testing.T) {
+	for _, offsets := range [][4]int{{0, 20, 100, 1}, {7, 0, 100, 1}, {7, 20, 0, 1}, {7, 20, 100, 0}, {7, 20, 100, -1}} {
+		_, err := ParseForumTopicsCursor(FormatForumTopicsCursor(123, "", 50, offsets[0], offsets[1], offsets[2], offsets[3]))
+		require.ErrorContains(t, err, "invalid pagination anchor")
+	}
+	// Old cursors may contain mixed anchors and must be restarted.
+	old := encodeCursor(forumTopicsCursorEnvelope{Version: 2, ChatID: 123, Limit: 50, OffsetTopic: 8, OffsetID: 20, OffsetDate: 100, Seen: 2})
+	_, err := ParseForumTopicsCursor(old)
+	require.ErrorContains(t, err, "unsupported")
 }

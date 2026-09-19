@@ -26,8 +26,8 @@ func NewGetRepliesHandler(provider *messages.Provider) *RepliesGetHandler {
 // topic's messages — pass the topic id from GetForumTopics). Scheduled handles
 // are rejected because they have no thread.
 type GetRepliesInput struct {
-	ChatID          int64  `json:"chat_id" jsonschema:"The channel ID (for post comments) or forum supergroup ID (for topic messages)"`
-	MessageID       string `json:"message_id" jsonschema:"Opaque regular-message handle of the thread root: a channel post ID (to read its comments) or a forum topic ID from GetForumTopics (to read the topic's messages)."`
+	ChatID          int64  `json:"chat_id,omitempty" jsonschema:"Required on the first page; omit when passing cursor. The channel ID (for post comments) or forum supergroup ID (for topic messages)"`
+	MessageID       string `json:"message_id,omitempty" jsonschema:"Required on the first page; omit when passing cursor. Opaque regular-message handle of the thread root: a channel post ID (to read its comments) or a forum topic ID from GetForumTopics (to read the topic's messages)."`
 	Limit           int    `json:"limit,omitempty" jsonschema:"Maximum number of messages to return (default 50\\, max 100)."`
 	Cursor          string `json:"cursor,omitempty" jsonschema:"Opaque continuation cursor. On continuation pass only this field; the chat, thread root, and filters are embedded in it."`
 	BeforeMessageID string `json:"before_message_id,omitempty" jsonschema:"For the first page only: start strictly before this regular-message handle."`
