@@ -13,6 +13,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
+	"github.com/tolmachov/mcp-telegram/internal/tools"
 )
 
 // loginRequiredTool is the only tool exposed while Telegram is unreachable.
@@ -141,7 +142,7 @@ func (s *Server) runLoginRequired(ctx context.Context, reason string) error {
 		Instructions: loginRequiredInstructions(reason),
 		Logger:       s.logger,
 	})
-	mcp.AddTool(srv, &mcp.Tool{
+	tools.AddTool(srv, &mcp.Tool{
 		Name: loginRequiredTool,
 		Description: "mcp-telegram is NOT connected to Telegram — every Telegram tool (sending, reading, searching, summarizing) is missing from this server for that reason. " +
 			"Reason: " + reason + " " +

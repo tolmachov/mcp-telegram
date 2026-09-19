@@ -87,7 +87,7 @@ type LeaveChatResult struct {
 
 // Register adds the JoinChat tool to the MCP server.
 func (h *JoinChatHandler) Register(s *mcp.Server) {
-	mcp.AddTool(s, &mcp.Tool{
+	AddTool(s, &mcp.Tool{
 		Name:        "JoinChat",
 		Description: "Join a Telegram channel, group, or supergroup. Accepts a public @username, a numeric chat ID, or an invite link (t.me/+hash or t.me/joinchat/hash) for private chats. Joining is reversible — use LeaveChat to undo. Some chats require admin approval; in that case the result status is \"requested\" rather than \"joined\". If joining is gated behind an in-app verification step, the status is \"action_required\" and detail explains what the user must do in an official Telegram client to finish. Legacy basic groups can only be joined via an invite link.",
 		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},
@@ -96,7 +96,7 @@ func (h *JoinChatHandler) Register(s *mcp.Server) {
 
 // Register adds the LeaveChat tool to the MCP server.
 func (h *LeaveChatHandler) Register(s *mcp.Server) {
-	mcp.AddTool(s, &mcp.Tool{
+	AddTool(s, &mcp.Tool{
 		Name:        "LeaveChat",
 		Description: "Leave a Telegram channel, group, or supergroup you are a member of. Accepts a public @username or a numeric chat ID. This removes the chat from your dialog list; rejoining a private chat afterwards requires a fresh invite link, so the host may ask you to confirm. You cannot leave a channel you own.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptrTrue(), OpenWorldHint: ptrTrue()},
@@ -217,28 +217,17 @@ func (h *LeaveChatHandler) handle(ctx context.Context, req *mcp.CallToolRequest,
 	channelPeer, isChannel := peer.(*tg.InputPeerChannel)
 	chatPeer, isChat := peer.(*tg.InputPeerChat)
 	if !isChannel && !isChat {
-		return errResult(fmt.Sprintf("%q is a private (one-to-one) chat, not a group or channel — there's nothing to leave. Use DeleteMessage or your client to clear the conversation instead.", chat)), nil, nil
+		return errResult(fmt.Sprintf("%q is a private (one-to-one) chat, not a group or channel — there's nothing to leave. Use DeleteMessages or your client to clear the conversation instead.", chat)), nil, nil
 	}
 
-	// in.Confirm lets the caller confirm in-band (per Server.Instructions, the
-	// model asks the user before destructive actions). This is the only path
-	// that works in non-interactive clients, where the elicitation form below
-	// can never be accepted. Fall back to elicitation only when confirm is unset.
-	if !in.Confirm {
-		confirmed, err := confirmDestructive(ctx, req, fmt.Sprintf(
-			"Leave chat %q? You'll lose access; rejoining a private chat requires a fresh invite link.", chat,
-		))
-		if err != nil {
-			return errResult(fmt.Sprintf("confirmation failed: %v", err)), nil, nil
-		}
-		if !confirmed {
-			// Return a populated result (not a bare text result with a nil typed
-			// output): the SDK fills StructuredContent from the zero value of a nil
-			// pointer output, so a text-only cancel surfaces as an empty
-			// {"chat":"","status":""} that masks the reason. An explicit
-			// "cancelled" status keeps the outcome legible.
-			return nil, &LeaveChatResult{Status: statusCancelled, Chat: chat}, nil
-		}
+	confirmed, err := confirmDestructive(ctx, req, in.Confirm, fmt.Sprintf(
+		"Leave chat %q? You'll lose access; rejoining a private chat requires a fresh invite link.", chat,
+	))
+	if err != nil {
+		return errResult(fmt.Sprintf("confirmation failed: %v", err)), nil, nil
+	}
+	if !confirmed {
+		return nil, &LeaveChatResult{Status: statusCancelled, Chat: chat}, nil
 	}
 
 	if isChannel {

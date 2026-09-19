@@ -27,7 +27,7 @@ type GetMeInput struct{}
 // The SDK serialises the tgdata.UserInfo return value as both text and
 // structured output automatically.
 func (h *MeGetHandler) Register(s *mcp.Server) {
-	mcp.AddTool(s, &mcp.Tool{
+	AddTool(s, &mcp.Tool{
 		Name:        "GetMe",
 		Description: "Get information about the currently authenticated Telegram user, including ID, name, username, and phone number.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},

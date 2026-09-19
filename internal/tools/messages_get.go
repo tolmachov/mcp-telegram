@@ -69,7 +69,7 @@ type getMessagesOutput struct {
 
 // Register adds the tool to the MCP server.
 func (h *MessagesGetHandler) Register(s *mcp.Server) {
-	mcp.AddTool(s, &mcp.Tool{
+	AddTool(s, &mcp.Tool{
 		Name:        "GetMessages",
 		Description: "Get messages from a specific chat. Returns up to `limit` regular messages (default 50, max 100). Supports pagination via `offset_id` (copy `next_offset_id` from a previous response) and date filtering via `from_date` / `to_date` (RFC3339; `to_date` is exclusive — pass midnight of the next day to include a full day, e.g. 2026-04-11T00:00:00Z to include all of 2026-04-10). Note: `limit` is applied before the `from_date` filter, so with `from_date` set you may receive fewer than `limit` results on the final page. Set `include_scheduled=true` to additionally fetch pending scheduled messages in a separate `scheduled_messages` field — these have opaque handles of the form \"s:<id>\" and are not paginated or affected by date filters. For bulk export, use BackupMessages instead.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},

@@ -61,7 +61,7 @@ var mediaFilterMap = map[string]func() tg.MessagesFilterClass{
 // searchMessagesOutput mirrors getMessagesOutput but is declared separately
 // so schema generation doesn't alias the two tools. The per-message DTO
 // shape is identical (both use messageDTO) so downstream tools
-// (EditMessage, DeleteMessage, GetMessageContext) can consume either.
+// (EditMessage, DeleteMessages, GetMessageContext) can consume either.
 // The envelope differs: this one adds Query, NextOffsetID, and PaginationHint
 // for search-specific pagination.
 type searchMessagesOutput struct {
@@ -76,7 +76,7 @@ type searchMessagesOutput struct {
 
 // Register adds the SearchMessages tool to the MCP server.
 func (h *MessagesSearchHandler) Register(s *mcp.Server) {
-	mcp.AddTool(s, &mcp.Tool{
+	AddTool(s, &mcp.Tool{
 		Name: "SearchMessages",
 		Description: "Search messages by substring within a specific chat via Telegram's server-side messages.search. Returns up to `limit` messages (default 50, max 100) sorted newest-first. " +
 			"Supports pagination via `offset_id` (copy `next_offset_id` from a previous response), date range via `from_date` / `to_date` (RFC3339; `to_date` is exclusive — pass midnight of the next day to include a full day), sender filtering via `from_sender_id`, and media-type filtering via `media_type`. " +

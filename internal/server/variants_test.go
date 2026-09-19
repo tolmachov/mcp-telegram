@@ -96,7 +96,7 @@ func TestVariantHandlerSplit(t *testing.T) {
 
 	// The mutating/admin tools must not leak into the research variant.
 	mutating := []string{
-		"SendMessage", "MarkAsRead", "EditMessage", "DeleteMessage", "ForwardMessage",
+		"SendMessage", "MarkAsRead", "EditMessage", "DeleteMessages", "ForwardMessage",
 		"SetReaction", "JoinChat", "LeaveChat", "SetChatMute",
 		"CreateFolder", "DeleteFolder", "AddChatsToFolder", "RemoveChatsFromFolder",
 	}
@@ -153,7 +153,7 @@ func TestBuildVariantsServerMetadata(t *testing.T) {
 	researchNames := listToolNames(t, inners[2])
 	assert.Len(t, fullNames, 29)
 	assert.Len(t, researchNames, 16)
-	for _, name := range []string{"SendMessage", "DeleteMessage", "ForwardMessage", "MarkAsRead", "CreateFolder"} {
+	for _, name := range []string{"SendMessage", "DeleteMessages", "ForwardMessage", "MarkAsRead", "CreateFolder"} {
 		_, leaked := researchNames[name]
 		assert.Falsef(t, leaked, "mutating tool %q leaked into research via buildVariantsServer", name)
 	}

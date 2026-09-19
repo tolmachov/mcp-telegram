@@ -27,7 +27,7 @@ type GetChatInfoInput struct {
 
 // Register adds the tool to the MCP server.
 func (h *ChatInfoGetHandler) Register(s *mcp.Server) {
-	mcp.AddTool(s, &mcp.Tool{
+	AddTool(s, &mcp.Tool{
 		Name:        "GetChatInfo",
 		Description: "Get detailed information about a specific chat, group, or channel including member count, description, and settings. Requires a chat ID — use SearchChats to find one.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},

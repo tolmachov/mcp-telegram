@@ -124,7 +124,7 @@ the tools below, the server is up but Telegram is not authorized — see
 | `GetForumTopics` | List a forum supergroup's topics with opaque cursor-based pagination |
 | `SendMessage` | Send, reply, schedule, or draft a message. `mode` = `send` (default) / `schedule` / `draft`; `reply_to_message_id` works with any mode; `schedule_at` is RFC3339 |
 | `EditMessage` | Edit a message; for scheduled handles, `schedule_at` reschedules delivery in the same call |
-| `DeleteMessage` | Delete a message; `"s:<id>"` handles cancel pending scheduled messages |
+| `DeleteMessages` | Delete up to 100 messages per call with a per-message outcome (`deleted` / `not_found` / `forbidden`); `"s:<id>"` handles cancel pending scheduled messages |
 | `ForwardMessage` | Forward a delivered message (scheduled handles are rejected) |
 | `SetReaction` | Set or clear your emoji reactions on a message (empty list clears) |
 | `JoinChat` | Join a channel/group/supergroup by @username, numeric ID, or invite link (`t.me/+hash`) |
@@ -410,7 +410,7 @@ to connect claude.ai / Claude Desktop / Claude Code are in
 
 ## Destructive Actions
 
-Tools like `DeleteMessage` request user confirmation via [MCP elicitation](https://modelcontextprotocol.io/docs/concepts/elicitation) before proceeding. If your MCP client does not support elicitation, the server proceeds automatically without a confirmation dialog.
+`DeleteMessages`, `ForwardMessage`, `DeleteFolder` and `LeaveChat` take a `confirm` input. With `confirm: true` (set by the model after the user agreed) they proceed directly — the only path that works in non-interactive clients. Otherwise they request confirmation via [MCP elicitation](https://modelcontextprotocol.io/docs/concepts/elicitation); a declined or unanswerable prompt returns `status: "cancelled"` and changes nothing. If your MCP client does not support elicitation, the server proceeds without a confirmation dialog.
 
 ## When Telegram Isn't Authorized
 

@@ -173,18 +173,33 @@ func TestMessageDeleteHandlerValidation(t *testing.T) {
 
 	cases := []struct {
 		name        string
-		in          DeleteMessageInput
+		in          DeleteMessagesInput
 		wantErrPart string
 	}{
 		{
 			name:        "zero chat_id",
-			in:          DeleteMessageInput{MessageID: "42"},
+			in:          DeleteMessagesInput{MessageIDs: []string{"42"}},
 			wantErrPart: "chat_id is required",
 		},
 		{
+			name:        "no message_ids",
+			in:          DeleteMessagesInput{ChatID: 1},
+			wantErrPart: "message_ids must hold 1-100 handles, got 0",
+		},
+		{
+			name:        "too many message_ids",
+			in:          DeleteMessagesInput{ChatID: 1, MessageIDs: make([]string, maxDeleteBatch+1)},
+			wantErrPart: "got 101",
+		},
+		{
 			name:        "invalid message_id",
-			in:          DeleteMessageInput{ChatID: 1, MessageID: "abc"},
+			in:          DeleteMessagesInput{ChatID: 1, MessageIDs: []string{"42", "abc"}},
 			wantErrPart: "invalid message_id",
+		},
+		{
+			name:        "mixed regular and scheduled",
+			in:          DeleteMessagesInput{ChatID: 1, MessageIDs: []string{"42", "s:43"}},
+			wantErrPart: "mixes regular",
 		},
 	}
 

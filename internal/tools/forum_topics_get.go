@@ -56,7 +56,7 @@ type getForumTopicsOutput struct {
 
 // Register adds the GetForumTopics tool to the MCP server.
 func (h *ForumTopicsGetHandler) Register(s *mcp.Server) {
-	mcp.AddTool(s, &mcp.Tool{
+	AddTool(s, &mcp.Tool{
 		Name: "GetForumTopics",
 		Description: "List the topics (thematic threads) of a forum supergroup via Telegram's messages.getForumTopics. " +
 			"Large thematic communities split their chat into topics; this exposes that structure instead of a flat feed. " +
