@@ -56,7 +56,7 @@ type EditMessageResult struct {
 
 // Register adds the tool to the MCP server.
 func (h *MessageEditHandler) Register(s *mcp.Server) {
-	mcp.AddTool(s, &mcp.Tool{
+	AddTool(s, &mcp.Tool{
 		Name:        "EditMessage",
 		Description: "Edit a message you previously sent. Only your own messages can be edited. For channel posts, admin rights may be required. To edit a scheduled (pending) message, pass its \"s:...\" handle and provide a new schedule_at — the edit both rewrites the text and sets the new send time.",
 		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},

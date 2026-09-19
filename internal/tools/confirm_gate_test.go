@@ -1,0 +1,150 @@
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"testing"
+
+	"github.com/gotd/td/bin"
+	"github.com/gotd/td/tg"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// callTool registers tools on a fresh server, connects an in-memory client
+// whose elicitation handler declines every prompt (what a non-interactive host
+// does), and calls one tool. Going through the real SDK is the point: the bug
+// being guarded against lives in how the SDK serializes handler results.
+func callTool(t *testing.T, register func(*mcp.Server), name string, args map[string]any) *mcp.CallToolResult {
+	t.Helper()
+	ctx := context.Background()
+	srv := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
+	register(srv)
+
+	serverT, clientT := mcp.NewInMemoryTransports()
+	ss, err := srv.Connect(ctx, serverT, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ss.Close() })
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, &mcp.ClientOptions{
+		ElicitationHandler: func(context.Context, *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			return &mcp.ElicitResult{Action: "decline"}, nil
+		},
+	})
+	cs, err := client.Connect(ctx, clientT, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+	require.NoError(t, err)
+	return res
+}
+
+// structured decodes a result's StructuredContent into a generic map.
+func structured(t *testing.T, res *mcp.CallToolResult) map[string]any {
+	t.Helper()
+	require.NotNil(t, res.StructuredContent, "expected structured output")
+	raw, err := json.Marshal(res.StructuredContent)
+	require.NoError(t, err)
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(raw, &m))
+	return m
+}
+
+type wrapperOut struct {
+	Status string `json:"status"`
+}
+
+// TestAddToolNeverSerializesZeroOutput guards the root cause of the empty
+// {"status":""} responses: without the wrapper the SDK fills
+// StructuredContent from the zero value whenever a handler returns no typed
+// output, masking errors and cancellations alike.
+func TestAddToolNeverSerializesZeroOutput(t *testing.T) {
+	register := func(h mcp.ToolHandlerFor[struct{}, *wrapperOut]) func(*mcp.Server) {
+		return func(s *mcp.Server) { AddTool(s, &mcp.Tool{Name: "T"}, h) }
+	}
+
+	t.Run("error result carries text and no structured content", func(t *testing.T) {
+		res := callTool(t, register(func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, *wrapperOut, error) {
+			return errResult("Failed to delete messages: rpc error code 403: MESSAGE_DELETE_FORBIDDEN"), nil, nil
+		}), "T", nil)
+		assert.True(t, res.IsError)
+		assert.Nil(t, res.StructuredContent)
+		assert.Contains(t, toolResultText(res), "MESSAGE_DELETE_FORBIDDEN")
+	})
+
+	t.Run("non-error result without output is an error", func(t *testing.T) {
+		res := callTool(t, register(func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, *wrapperOut, error) {
+			return textResult("Cancelled by user."), nil, nil
+		}), "T", nil)
+		assert.True(t, res.IsError)
+		assert.Nil(t, res.StructuredContent)
+		assert.Contains(t, toolResultText(res), "returned no result")
+	})
+
+	t.Run("typed output passes through", func(t *testing.T) {
+		res := callTool(t, register(func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, *wrapperOut, error) {
+			return nil, &wrapperOut{Status: "ok"}, nil
+		}), "T", nil)
+		assert.False(t, res.IsError)
+		assert.Equal(t, "ok", structured(t, res)["status"])
+	})
+}
+
+// gateInvoker serves the reads the confirm-gated tools make before asking
+// for confirmation and fails loudly on anything that would change state.
+type gateInvoker struct {
+	writes int
+}
+
+func (f *gateInvoker) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
+	switch req := input.(type) {
+	case *tg.MessagesGetChatsRequest:
+		output.(*tg.MessagesChatsBox).Chats = &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Chat{ID: req.ID[0]}}}
+	case *tg.MessagesGetDialogFiltersRequest:
+		*output.(*tg.MessagesDialogFilters) = tg.MessagesDialogFilters{Filters: []tg.DialogFilterClass{&tg.DialogFilter{ID: 2}}}
+	default:
+		f.writes++
+		return fmt.Errorf("gateInvoker: unexpected request %T", input)
+	}
+	return nil
+}
+
+// TestConfirmGatedToolsCancelLegibly reproduces the reported bug end to end:
+// a host that declines the confirmation prompt must get status "cancelled",
+// and nothing may reach Telegram.
+func TestConfirmGatedToolsCancelLegibly(t *testing.T) {
+	cases := []struct {
+		name     string
+		register func(*mcp.Server, *tg.Client)
+		args     map[string]any
+	}{
+		{
+			name:     "DeleteMessages",
+			register: func(s *mcp.Server, c *tg.Client) { NewMessageDeleteHandler(c).Register(s) },
+			args:     map[string]any{"chat_id": -testBasicChatID, "message_ids": []string{"559966"}},
+		},
+		{
+			name:     "ForwardMessage",
+			register: func(s *mcp.Server, c *tg.Client) { NewMessageForwardHandler(c).Register(s) },
+			args:     map[string]any{"from_chat_id": -11, "message_id": "5", "to_chat_id": -12},
+		},
+		{
+			name:     "DeleteFolder",
+			register: func(s *mcp.Server, c *tg.Client) { NewDeleteFolderHandler(c).Register(s) },
+			args:     map[string]any{"folder_id": 2},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := &gateInvoker{}
+			client := tg.NewClient(inv)
+			res := callTool(t, func(s *mcp.Server) { tc.register(s, client) }, tc.name, tc.args)
+			assert.False(t, res.IsError, toolResultText(res))
+			assert.Equal(t, statusCancelled, structured(t, res)["status"])
+			assert.Zero(t, inv.writes, "a cancelled call must not reach Telegram")
+		})
+	}
+}

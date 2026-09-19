@@ -50,7 +50,7 @@ type getRepliesOutput struct {
 
 // Register adds the GetReplies tool to the MCP server.
 func (h *RepliesGetHandler) Register(s *mcp.Server) {
-	mcp.AddTool(s, &mcp.Tool{
+	AddTool(s, &mcp.Tool{
 		Name: "GetReplies",
 		Description: "Read the discussion thread under a message via Telegram's messages.getReplies. Two uses, same call: " +
 			"(1) comments under a channel post — pass the channel `chat_id` and the post's `message_id`; " +

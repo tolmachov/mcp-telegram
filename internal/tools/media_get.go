@@ -104,6 +104,8 @@ type GetMediaInput struct {
 
 // Register adds the tool to the MCP server.
 func (h *MediaGetHandler) Register(s *mcp.Server) {
+	// Plain mcp.AddTool: GetMedia returns image content with no typed output
+	// (Out is any), so the SDK has no zero value to serialize.
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "GetMedia",
 		Description: "Download a photo from Telegram using a media resource URI (telegram://media/...) returned by GetMessages. Returns MCP image content plus a short text status message.",

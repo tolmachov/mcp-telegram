@@ -41,7 +41,7 @@ type getMessageContextOutput struct {
 
 // Register adds the tool to the MCP server.
 func (h *MessageContextGetHandler) Register(s *mcp.Server) {
-	mcp.AddTool(s, &mcp.Tool{
+	AddTool(s, &mcp.Tool{
 		Name:        "GetMessageContext",
 		Description: "Get a window of messages around a specific anchor message: `before` messages before it, the anchor itself, and `after` messages after it, returned in chronological order. Defaults to 5+5 (max 50 each). Useful for understanding a message in conversation context. For plain pagination, use GetMessages.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},

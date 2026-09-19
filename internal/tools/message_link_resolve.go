@@ -60,9 +60,9 @@ type ResolveMessageLinkResult struct {
 
 // Register adds the tool to the MCP server.
 func (h *MessageLinkResolveHandler) Register(s *mcp.Server) {
-	mcp.AddTool(s, &mcp.Tool{
+	AddTool(s, &mcp.Tool{
 		Name:        "ResolveMessageLink",
-		Description: "Parse a Telegram message URL into a chat_id + opaque message handle ready for GetMessages / GetMessageContext / DeleteMessage. Supports public (t.me/<username>/<id>), private-channel (t.me/c/<internal_id>/<id>), and forum (…/<topic_id>/<id>) link forms. Forum links also return topic_message_id, an opaque handle ready for SearchMessages.top_msg_id. Returns chat metadata from Telegram for public links; private-channel links are resolved offline (no API call) and carry no chat_title.",
+		Description: "Parse a Telegram message URL into a chat_id + opaque message handle ready for GetMessages / GetMessageContext / DeleteMessages. Supports public (t.me/<username>/<id>), private-channel (t.me/c/<internal_id>/<id>), and forum (…/<topic_id>/<id>) link forms. Forum links also return topic_message_id, an opaque handle ready for SearchMessages.top_msg_id. Returns chat metadata from Telegram for public links; private-channel links are resolved offline (no API call) and carry no chat_title.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
 	}, h.handle)
 }

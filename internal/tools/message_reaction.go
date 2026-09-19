@@ -47,7 +47,7 @@ type SetReactionResult struct {
 
 // Register adds the tool to the MCP server.
 func (h *MessageReactionHandler) Register(s *mcp.Server) {
-	mcp.AddTool(s, &mcp.Tool{
+	AddTool(s, &mcp.Tool{
 		Name:        "SetReaction",
 		Description: "Set or clear your emoji reactions on a message. Pass one or more emoji in `emojis` to react (this replaces any reactions you previously set); pass an empty list (or omit it) to remove all your reactions. Only standard emoji reactions are supported (not custom or paid). Works on regular messages only — scheduled handles (\"s:...\") are rejected. The chat must permit the chosen reaction, otherwise Telegram returns an error.",
 		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},

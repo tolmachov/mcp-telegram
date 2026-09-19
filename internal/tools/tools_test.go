@@ -156,15 +156,23 @@ func TestClampLimit(t *testing.T) {
 // TestConfirmDestructiveNilSession verifies that a nil session returns an error
 // (fail-closed) rather than silently declining with a misleading return value.
 func TestConfirmDestructiveNilSession(t *testing.T) {
-	confirmed, err := confirmDestructive(context.Background(), nil, "delete this?")
+	confirmed, err := confirmDestructive(context.Background(), nil, false, "delete this?")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no MCP session")
 	assert.False(t, confirmed)
 }
 
+// TestConfirmDestructiveInBand verifies that an in-band confirm proceeds
+// without a session, i.e. without ever attempting elicitation.
+func TestConfirmDestructiveInBand(t *testing.T) {
+	confirmed, err := confirmDestructive(context.Background(), nil, true, "delete this?")
+	require.NoError(t, err)
+	assert.True(t, confirmed)
+}
+
 // TestConfirmDestructiveNilRequest verifies that a nil request also fails closed.
 func TestConfirmDestructiveNilRequest(t *testing.T) {
-	confirmed, err := confirmDestructive(context.Background(), &mcp.CallToolRequest{}, "delete this?")
+	confirmed, err := confirmDestructive(context.Background(), &mcp.CallToolRequest{}, false, "delete this?")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no MCP session")
 	assert.False(t, confirmed)

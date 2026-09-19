@@ -47,7 +47,7 @@ type SetChatMuteResult struct {
 
 // Register adds the tool to the MCP server.
 func (h *ChatMuteHandler) Register(s *mcp.Server) {
-	mcp.AddTool(s, &mcp.Tool{
+	AddTool(s, &mcp.Tool{
 		Name:        "SetChatMute",
 		Description: "Mute or unmute chat notifications. When muted=true: duration_seconds=0 mutes forever, positive value mutes for N seconds (each call resets the timer — not idempotent). When muted=false: unmutes immediately (idempotent); duration_seconds is ignored.",
 		// Note: IdempotentHint is intentionally not set. The tool is

@@ -63,7 +63,7 @@ type searchMessagesGlobalOutput struct {
 
 // Register adds the SearchMessagesGlobal tool to the MCP server.
 func (h *MessagesSearchGlobalHandler) Register(s *mcp.Server) {
-	mcp.AddTool(s, &mcp.Tool{
+	AddTool(s, &mcp.Tool{
 		Name: "SearchMessagesGlobal",
 		Description: "Search messages by substring across ALL chats the user participates in, via Telegram's messages.searchGlobal. Returns up to `limit` matches (default 50, max 100) from any chat, each tagged with its own chat_id and chat_title. " +
 			"Supports date range via `from_date` / `to_date` (RFC3339; `to_date` is exclusive — pass midnight of the next day to include a full day) and pagination via the opaque `cursor` string (copy `next_cursor` from a previous response). " +

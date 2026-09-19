@@ -2,10 +2,8 @@ package tools
 
 import (
 	"context"
-	"strings"
 	"testing"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -109,19 +107,4 @@ func TestMediaFilterMapCoverage(t *testing.T) {
 		require.True(t, ok, "mediaFilterMap missing %q", k)
 		require.NotNil(t, ctor())
 	}
-}
-
-// toolResultText extracts the concatenated TextContent from a CallToolResult
-// for error-assertion tests. Non-text content is ignored.
-func toolResultText(r *mcp.CallToolResult) string {
-	if r == nil {
-		return ""
-	}
-	var b strings.Builder
-	for _, c := range r.Content {
-		if tc, ok := c.(*mcp.TextContent); ok {
-			b.WriteString(tc.Text)
-		}
-	}
-	return b.String()
 }

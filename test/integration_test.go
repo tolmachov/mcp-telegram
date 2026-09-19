@@ -1189,13 +1189,11 @@ func TestErrorRecoveryHints(t *testing.T) {
 			wantHints: []string{"invalid", "message_id"},
 		},
 		{
-			// message_id is an opaque string handle ("42") since the opaque-
-			// handles migration — passing an int is now a schema-level error.
-			name: "DeleteMessage with zero chat_id",
-			tool: "DeleteMessage",
+			name: "DeleteMessages with zero chat_id",
+			tool: "DeleteMessages",
 			args: map[string]any{
-				"chat_id":    0,
-				"message_id": "1",
+				"chat_id":     0,
+				"message_ids": []string{"1"},
 			},
 			wantHints: []string{"chat_id is required", "SearchChats"},
 		},

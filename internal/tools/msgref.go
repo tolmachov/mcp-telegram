@@ -21,7 +21,7 @@ import (
 // Regular and scheduled IDs are independent namespaces — ID 42 in one does
 // not refer to the same message as ID 42 in the other. The handle form
 // ("42" vs "s:42") carries this distinction across the MCP boundary so
-// tools like DeleteMessage can route to the right API without a round-trip
+// tools like DeleteMessages can route to the right API without a round-trip
 // probe.
 type MessageRef struct {
 	ID        int

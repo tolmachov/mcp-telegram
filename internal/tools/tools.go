@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -166,6 +167,48 @@ func cryptoRandInt64() int64 {
 	return int64(binary.LittleEndian.Uint64(b[:]))
 }
 
+// AddTool registers a typed tool so that a non-success outcome can never reach
+// the client as a zero-valued output. For a pointer output type the SDK fills
+// StructuredContent from the zero value whenever the handler returns a nil
+// output, and hosts that render structured content then show an empty
+// {"status":""} object instead of the error text or the real outcome. So:
+//   - an IsError result is turned into a Go error, which the SDK sends as
+//     IsError + text with no structured content;
+//   - a non-error result without a typed output is a handler bug and is
+//     reported as an error rather than an empty success.
+//
+// Every tool with a typed output must be registered through this instead of
+// mcp.AddTool.
+func AddTool[In, Out any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, *Out]) {
+	mcp.AddTool(s, t, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, *Out, error) {
+		res, out, err := h(ctx, req, in)
+		if err != nil {
+			return nil, nil, err
+		}
+		if res != nil && res.IsError {
+			return nil, nil, errors.New(toolResultText(res))
+		}
+		if out == nil {
+			return nil, nil, fmt.Errorf("%s returned no result (server bug): the outcome of this call is unknown", t.Name)
+		}
+		return res, out, nil
+	})
+}
+
+// toolResultText concatenates the text blocks of a tool result.
+func toolResultText(r *mcp.CallToolResult) string {
+	if r == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, c := range r.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			b.WriteString(tc.Text)
+		}
+	}
+	return b.String()
+}
+
 // textResult constructs a CallToolResult with a single TextContent.
 func textResult(text string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{
@@ -208,7 +251,7 @@ func errInvalidMessageID(s string, err error) *mcp.CallToolResult {
 // scheduled message", e.g. "forward", "reply to".
 func errCannotOnScheduled(verb string) *mcp.CallToolResult {
 	return errResult(fmt.Sprintf(
-		"cannot %s a scheduled message: it has not been sent yet and only exists in Telegram's schedule queue. Wait until it is delivered, or cancel it via DeleteMessage and create a new regular message.",
+		"cannot %s a scheduled message: it has not been sent yet and only exists in Telegram's schedule queue. Wait until it is delivered, or cancel it via DeleteMessages and create a new regular message.",
 		verb,
 	))
 }
@@ -275,8 +318,12 @@ func errResolvePeer(chatID int64, err error) *mcp.CallToolResult {
 	))
 }
 
-// confirmDestructive asks the user to confirm a destructive action via MCP
-// elicitation. Returns (true, nil) when the user confirms, or when the client
+// confirmDestructive gates a destructive action. confirmed=true is the
+// caller's in-band confirmation (per Server.Instructions the model asks the
+// user first); it is the only path that works in non-interactive clients,
+// where an elicitation form can never be accepted, so it skips elicitation.
+// Otherwise it asks the user via MCP elicitation. Returns (true, nil) when the
+// user confirms, or when the client
 // has a session but doesn't advertise elicitation capability (graceful
 // fallback — Claude is already instructed via Server.Instructions to confirm
 // verbally before proceeding). Returns (false, error) when there is no MCP
@@ -290,7 +337,10 @@ func errResolvePeer(chatID int64, err error) *mcp.CallToolResult {
 //
 // The flat-form schema below complies with the elicitation spec's "primitives
 // only, no nesting" constraint.
-func confirmDestructive(ctx context.Context, req *mcp.CallToolRequest, message string) (bool, error) {
+func confirmDestructive(ctx context.Context, req *mcp.CallToolRequest, confirmed bool, message string) (bool, error) {
+	if confirmed {
+		return true, nil
+	}
 	if req == nil || req.Session == nil {
 		// Fail closed: no session means we cannot present a confirmation UI.
 		// Return an error so callers can surface a clear diagnostic instead of

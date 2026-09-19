@@ -61,7 +61,7 @@ const MetaWarning = "mcp-telegram/warning"
 
 // Register adds the tool to the MCP server.
 func (h *ChatSummarizeHandler) Register(s *mcp.Server) {
-	mcp.AddTool(s, &mcp.Tool{
+	AddTool(s, &mcp.Tool{
 		Name:        "SummarizeChat",
 		Description: "Use this whenever the user asks to summarize, digest, recap, or 'catch up on' a Telegram chat. Prefer it over fetching messages with GetMessages and summarizing them yourself: it performs rolling/incremental summarization server-side, so it handles long histories (weeks/months, hundreds of messages) without loading every message into the conversation context. Specify a goal (e.g. 'key decisions', 'action items', 'what did I miss') and a time period (day/week/month) or a since date.",
 		InputSchema: inputSchemaWithEnums[SummarizeChatInput](map[string][]any{
