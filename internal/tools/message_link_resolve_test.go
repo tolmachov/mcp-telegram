@@ -153,7 +153,6 @@ func TestResolveMessageLinkPrivateForumTopicID(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, out)
 	assert.Equal(t, FormatRegularRef(11), out.TopicMessageID, "TopicMessageID should be opaque handle for topic root")
-	assert.Equal(t, 11, out.TopicID)
 	assert.Equal(t, FormatRegularRef(42), out.MessageID)
 	assert.Equal(t, int64(1234567890), out.ChatID)
 }
@@ -170,7 +169,6 @@ func TestResolveMessageLinkNoTopicIDWhenNonForum(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, out)
 	assert.Empty(t, out.TopicMessageID)
-	assert.Equal(t, 0, out.TopicID)
 	assert.Equal(t, FormatRegularRef(42), out.MessageID)
 }
 

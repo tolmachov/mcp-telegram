@@ -15,6 +15,7 @@ import (
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
+	"github.com/tolmachov/mcp-telegram/internal/xdg"
 )
 
 // backupProgress state constants
@@ -169,22 +170,6 @@ func (h *MessageBackupHandler) Register(s *mcp.Server) {
 // prompt. Defaulting to Local would silently shift windows by hours
 // depending on where the server happens to run. Callers that want a
 // specific local window should pass RFC3339 with an explicit offset.
-func parseDate(s string) (time.Time, error) {
-	if s == "" {
-		return time.Time{}, nil
-	}
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t, nil
-	}
-	if t, err := time.ParseInLocation("2006-01-02 15:04:05", s, time.UTC); err == nil {
-		return t, nil
-	}
-	if t, err := time.ParseInLocation("2006-01-02", s, time.UTC); err == nil {
-		return t, nil
-	}
-	return time.Time{}, fmt.Errorf("invalid date format %q, expected YYYY-MM-DD, YYYY-MM-DD HH:MM:SS (UTC), or RFC3339 with explicit offset", s)
-}
-
 // backupProgress handles progress tracking and notifications for message backup.
 type backupProgress struct {
 	ctx           context.Context
@@ -358,16 +343,9 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 
 	// to_date is exclusive (strictly-less-than), matching every other tool's
 	// date window — no inclusive-day fixup here.
-	fromDate, err := parseDate(fromStr)
-	if err != nil {
-		return errResult(err.Error()), nil, nil
-	}
-	toDate, err := parseDate(toStr)
-	if err != nil {
-		return errResult(err.Error()), nil, nil
-	}
-	if !fromDate.IsZero() && !toDate.IsZero() && !fromDate.Before(toDate) {
-		return errResult(fmt.Sprintf("from_date (%s) is not before to_date (%s); the date window is empty.", fromDate.Format(time.RFC3339), toDate.Format(time.RFC3339))), nil, nil
+	fromDate, toDate, errRes := parseDateWindow(fromStr, toStr)
+	if errRes != nil {
+		return errRes, nil, nil
 	}
 
 	// Default to 1000 messages if no filters specified.
@@ -381,23 +359,14 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 		return errResolvePeer(in.ChatID, err), nil, nil
 	}
 
-	// Build the effective allow-list for this request: configured --allowed-paths
-	// PLUS any directories the MCP client exposes via the roots capability. Roots
-	// let an IDE-like host (Claude Code, Cursor) auto-grant the active workspace
-	// without requiring users to pass paths via flags. Per MCP spec, roots use
-	// file:// URIs and the client must declare the roots capability.
+	// Only operator-configured server paths are authority. MCP roots are
+	// client-controlled metadata and must never widen a server-side write ACL.
 	allowedPaths := h.allowedPaths
-	if rootPaths := rootsFromClient(ctx, req.Session); len(rootPaths) > 0 {
-		allowedPaths = append(append([]string(nil), allowedPaths...), rootPaths...)
-		mcpLog(ctx, req.Session, logLevelDebug, "BackupMessages", map[string]any{
-			"merged_roots": rootPaths,
-		})
-	}
 
 	// Generate filename if not provided.
 	if targetPath == "" {
 		if len(allowedPaths) == 0 {
-			return errResult("no allowed paths configured for backup. Pass --allowed-paths / TELEGRAM_ALLOWED_PATHS, or grant the server access via your MCP client's workspace roots."), nil, nil
+			return errResult("no allowed paths configured for backup. Pass --allowed-paths / MCP_TELEGRAM_ALLOWED_PATHS."), nil, nil
 		}
 		chatName, nameOK := getChatName(ctx, h.client, peer, in.ChatID)
 		if !nameOK {
@@ -420,8 +389,8 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	// in that case backupProgress.Send becomes a no-op via sendProgressWithToken.
 	progress := newBackupProgress(
 		ctx,
-		req.Session,
-		req.Params.GetProgressToken(),
+		requestSession(req),
+		requestProgressToken(req),
 		fromDate, toDate,
 		count,
 	)
@@ -503,8 +472,9 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 		return errResult(fmt.Sprintf("Failed to create directory: %v", err)), nil, nil
 	}
 
-	// Write to a file.
-	if err := os.WriteFile(targetPath, []byte(content), 0o600); err != nil {
+	// Replace the destination atomically so a crash cannot leave a truncated
+	// backup that looks successful.
+	if err := xdg.WriteFileAtomic(targetPath, []byte(content), 0o600, ".backup-*.tmp"); err != nil {
 		if partialErr != nil {
 			return errResult(fmt.Sprintf("Failed to write file (%v) while trying to save %d partial messages from upstream error: %v", err, len(result.Messages), partialErr)), nil, nil
 		}

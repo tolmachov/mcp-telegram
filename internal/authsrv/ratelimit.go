@@ -33,21 +33,26 @@ type ipBucket struct {
 
 // ipRateLimiter is a token-bucket limiter keyed by client IP.
 type ipRateLimiter struct {
-	mu      sync.Mutex
-	buckets map[string]*ipBucket
-	rps     rate.Limit
-	burst   int
-	now     func() time.Time
+	mu               sync.Mutex
+	buckets          map[string]*ipBucket
+	rps              rate.Limit
+	burst            int
+	now              func() time.Time
+	trustedProxyHops int
 }
 
-func newIPRateLimiter(rps rate.Limit, burst int) *ipRateLimiter {
-	return &ipRateLimiter{buckets: map[string]*ipBucket{}, rps: rps, burst: burst, now: time.Now}
+func newIPRateLimiter(rps rate.Limit, burst int, trustedProxyHops ...int) *ipRateLimiter {
+	hops := 0
+	if len(trustedProxyHops) > 0 {
+		hops = trustedProxyHops[0]
+	}
+	return &ipRateLimiter{buckets: map[string]*ipBucket{}, rps: rps, burst: burst, now: time.Now, trustedProxyHops: hops}
 }
 
 // wrap returns next guarded by the per-IP limiter.
 func (l *ipRateLimiter) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !l.allow(clientIP(r)) {
+		if !l.allow(clientIP(r, l.trustedProxyHops)) {
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 			return
@@ -101,25 +106,33 @@ func (l *ipRateLimiter) evictStalestLocked() {
 
 // clientIP extracts the caller's IP for rate-limit bucketing.
 //
-// Trust model: proxies APPEND to X-Forwarded-For, so on Cloud Run the
-// rightmost entry is the connection IP recorded by the trusted Google front
-// end, while everything to its left (and the whole header when no proxy is
-// involved) is attacker-supplied. We therefore take the LAST entry and fall
-// back to RemoteAddr when the header is absent. When the server runs
-// without a trusted proxy, a client can still choose its own bucket by
-// setting the header — the map cap plus per-bucket limits keep that
-// spoofing bounded, and the limiter is defense in depth, not the security
-// boundary.
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		entries := strings.Split(xff, ",")
-		if ip := strings.TrimSpace(entries[len(entries)-1]); ip != "" {
-			return ip
-		}
-	}
+// Trust model: a zero trusted-hop count ignores forwarding headers completely.
+// With N trusted hops, every X-Forwarded-For element must be a valid IP and the
+// selected client is the address immediately to the left of those N proxies;
+// malformed or incomplete chains fall back to RemoteAddr.
+func clientIP(r *http.Request, trustedProxyHops int) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
 	}
-	return host
+	remote := net.ParseIP(host)
+	if remote == nil || trustedProxyHops == 0 {
+		return host
+	}
+
+	entries := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	chain := make([]string, 0, len(entries)+1)
+	for _, raw := range entries {
+		ip := strings.TrimSpace(raw)
+		if net.ParseIP(ip) == nil {
+			return host
+		}
+		chain = append(chain, ip)
+	}
+	chain = append(chain, remote.String())
+	idx := len(chain) - 1 - trustedProxyHops
+	if idx < 0 || idx >= len(chain) {
+		return host
+	}
+	return chain[idx]
 }

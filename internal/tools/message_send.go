@@ -16,6 +16,22 @@ import (
 // UTF-16 code units per the API docs.
 const telegramMaxMessageLength = 4096
 
+// errMessageTooLong returns the shared over-limit error for a message text
+// field (SendMessage.message, EditMessage.new_text), or nil when text fits.
+func errMessageTooLong(field, text string) *mcp.CallToolResult {
+	n := 0
+	for _, r := range text {
+		n += utf16.RuneLen(r)
+	}
+	if n <= telegramMaxMessageLength {
+		return nil
+	}
+	return errResult(fmt.Sprintf(
+		"%s is too long: %d UTF-16 code units (Telegram limit is %d). Split it into multiple messages or shorten the text.",
+		field, n, telegramMaxMessageLength,
+	))
+}
+
 // Mode values accepted by SendMessage. Reply is not a mode — it's an
 // orthogonal property that combines with any mode via ReplyToMessageID.
 const (
@@ -99,11 +115,8 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	if in.Message == "" {
 		return errResult("message is required and must be non-empty"), nil, nil
 	}
-	if n := len(utf16.Encode([]rune(in.Message))); n > telegramMaxMessageLength {
-		return errResult(fmt.Sprintf(
-			"message is too long: %d characters (Telegram limit is %d). Split it into multiple messages or shorten the text.",
-			n, telegramMaxMessageLength,
-		)), nil, nil
+	if errRes := errMessageTooLong("message", in.Message); errRes != nil {
+		return errRes, nil, nil
 	}
 
 	// Normalize and validate mode first so the LLM gets a clear error when

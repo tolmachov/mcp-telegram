@@ -46,7 +46,7 @@ func TestGeminiProviderSummarizeConcatenatesTextParts(t *testing.T) {
 		}, nil
 	})
 
-	summary, err := provider.Summarize(context.Background(), "prompt")
+	summary, err := provider.Summarize(context.Background(), providerTestRequest())
 	require.NoError(t, err)
 	assert.Equal(t, "First paragraph.\n\nSecond paragraph.", summary)
 }
@@ -70,7 +70,7 @@ func TestAnthropicProviderSummarizeConcatenatesTextBlocks(t *testing.T) {
 		}, nil
 	})
 
-	summary, err := provider.Summarize(context.Background(), "prompt")
+	summary, err := provider.Summarize(context.Background(), providerTestRequest())
 	require.NoError(t, err)
 	assert.Equal(t, "First block.\n\nSecond block.", summary)
 }
@@ -94,7 +94,7 @@ func TestAnthropicProviderSummarizeAllWhitespaceBlocks(t *testing.T) {
 		}, nil
 	})
 
-	_, err := provider.Summarize(context.Background(), "prompt")
+	_, err := provider.Summarize(context.Background(), providerTestRequest())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no text content")
 }
@@ -115,7 +115,7 @@ func TestAnthropicProviderSummarizeErrorsWithoutTextBlocks(t *testing.T) {
 		}, nil
 	})
 
-	_, err := provider.Summarize(context.Background(), "prompt")
+	_, err := provider.Summarize(context.Background(), providerTestRequest())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no text content")
 }
@@ -132,7 +132,7 @@ func TestAnthropicProviderSummarizeNonOKStatus(t *testing.T) {
 		}, nil
 	})
 
-	_, err := provider.Summarize(context.Background(), "prompt")
+	_, err := provider.Summarize(context.Background(), providerTestRequest())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "429")
 }
@@ -151,7 +151,7 @@ func TestAnthropicProviderSummarizeInlineAPIError(t *testing.T) {
 		}, nil
 	})
 
-	_, err := provider.Summarize(context.Background(), "prompt")
+	_, err := provider.Summarize(context.Background(), providerTestRequest())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Invalid API key")
 }
@@ -168,7 +168,7 @@ func TestGeminiProviderSummarizeNonOKStatus(t *testing.T) {
 		}, nil
 	})
 
-	_, err := provider.Summarize(context.Background(), "prompt")
+	_, err := provider.Summarize(context.Background(), providerTestRequest())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "401")
 }
@@ -191,7 +191,7 @@ func TestGeminiProviderSummarizeInlineAPIError(t *testing.T) {
 		}, nil
 	})
 
-	_, err := provider.Summarize(context.Background(), "prompt")
+	_, err := provider.Summarize(context.Background(), providerTestRequest())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "API quota exceeded")
 	assert.Contains(t, err.Error(), "429")
@@ -209,7 +209,7 @@ func TestGeminiProviderSummarizeNoCandidates(t *testing.T) {
 		}, nil
 	})
 
-	_, err := provider.Summarize(context.Background(), "prompt")
+	_, err := provider.Summarize(context.Background(), providerTestRequest())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no candidates")
 }
@@ -232,7 +232,7 @@ func TestGeminiProviderSummarizeAllWhitespaceParts(t *testing.T) {
 		}, nil
 	})
 
-	_, err := provider.Summarize(context.Background(), "prompt")
+	_, err := provider.Summarize(context.Background(), providerTestRequest())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no text parts")
 }
@@ -251,7 +251,7 @@ func TestGeminiProviderSummarizeNoParts(t *testing.T) {
 		}, nil
 	})
 
-	_, err := provider.Summarize(context.Background(), "prompt")
+	_, err := provider.Summarize(context.Background(), providerTestRequest())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no parts")
 }
@@ -268,7 +268,7 @@ func TestAnthropicProviderSummarizeNoContent(t *testing.T) {
 		}, nil
 	})
 
-	_, err := provider.Summarize(context.Background(), "prompt")
+	_, err := provider.Summarize(context.Background(), providerTestRequest())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no content")
 }
@@ -281,7 +281,7 @@ func TestAnthropicProviderSummarizeNetworkError(t *testing.T) {
 		return nil, errors.New("connection refused")
 	})
 
-	_, err := provider.Summarize(context.Background(), "prompt")
+	_, err := provider.Summarize(context.Background(), providerTestRequest())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "sending request")
 }
@@ -294,7 +294,7 @@ func TestGeminiProviderSummarizeNetworkError(t *testing.T) {
 		return nil, errors.New("connection refused")
 	})
 
-	_, err := provider.Summarize(context.Background(), "prompt")
+	_, err := provider.Summarize(context.Background(), providerTestRequest())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "sending request")
 }
@@ -315,7 +315,7 @@ func TestOllamaProviderSummarizeSuccess(t *testing.T) {
 		}, nil
 	})
 
-	summary, err := provider.Summarize(context.Background(), "prompt")
+	summary, err := provider.Summarize(context.Background(), providerTestRequest())
 	require.NoError(t, err)
 	assert.Equal(t, "Summary text.", summary)
 }
@@ -332,7 +332,7 @@ func TestOllamaProviderSummarizeNonOKStatus(t *testing.T) {
 		}, nil
 	})
 
-	_, err := provider.Summarize(context.Background(), "prompt")
+	_, err := provider.Summarize(context.Background(), providerTestRequest())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "503")
 }
@@ -351,7 +351,7 @@ func TestOllamaProviderSummarizeInlineError(t *testing.T) {
 		}, nil
 	})
 
-	_, err := provider.Summarize(context.Background(), "prompt")
+	_, err := provider.Summarize(context.Background(), providerTestRequest())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "model not found")
 }
@@ -364,7 +364,7 @@ func TestOllamaProviderSummarizeNetworkError(t *testing.T) {
 		return nil, errors.New("connection refused")
 	})
 
-	_, err := provider.Summarize(context.Background(), "prompt")
+	_, err := provider.Summarize(context.Background(), providerTestRequest())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "sending request")
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -95,22 +94,10 @@ func (h *MessagesSearchGlobalHandler) handle(ctx context.Context, req *mcp.CallT
 		opts.Cursor = cursor
 	}
 
-	if in.FromDate != "" {
-		t, errRes, ok := parseDateFilter("from_date", in.FromDate)
-		if !ok {
-			return errRes, nil, nil
-		}
-		opts.MinDate = t
-	}
-	if in.ToDate != "" {
-		t, errRes, ok := parseDateFilter("to_date", in.ToDate)
-		if !ok {
-			return errRes, nil, nil
-		}
-		opts.MaxDate = t
-	}
-	if !opts.MinDate.IsZero() && !opts.MaxDate.IsZero() && opts.MinDate.After(opts.MaxDate) {
-		return errResult(fmt.Sprintf("from_date (%s) is after to_date (%s); the window is empty.", opts.MinDate.Format(time.RFC3339), opts.MaxDate.Format(time.RFC3339))), nil, nil
+	var dateErr *mcp.CallToolResult
+	opts.MinDate, opts.MaxDate, dateErr = parseDateWindow(in.FromDate, in.ToDate)
+	if dateErr != nil {
+		return dateErr, nil, nil
 	}
 
 	result, err := h.provider.SearchGlobal(ctx, opts)

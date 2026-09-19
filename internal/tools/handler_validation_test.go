@@ -132,6 +132,11 @@ func TestMessageEditHandlerValidation(t *testing.T) {
 			wantErrPart: "new_text is required",
 		},
 		{
+			name:        "new_text too long",
+			in:          EditMessageInput{ChatID: 1, MessageID: "42", NewText: strings.Repeat("x", telegramMaxMessageLength+1)},
+			wantErrPart: "too long",
+		},
+		{
 			name:        "scheduled handle requires schedule_at",
 			in:          EditMessageInput{ChatID: 1, MessageID: "s:42", NewText: "hi"},
 			wantErrPart: "schedule_at is required",
@@ -386,7 +391,7 @@ func TestGetMessagesDateInversionValidation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, errRes)
 	require.True(t, errRes.IsError)
-	assert.Contains(t, toolResultText(errRes), "after")
+	assert.Contains(t, toolResultText(errRes), "not before")
 }
 
 // TestSearchMessagesDateInversionValidation checks the same guard in the
@@ -404,7 +409,7 @@ func TestSearchMessagesDateInversionValidation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, errRes)
 	require.True(t, errRes.IsError)
-	assert.Contains(t, toolResultText(errRes), "after")
+	assert.Contains(t, toolResultText(errRes), "not before")
 }
 
 // TestSearchMessagesGlobalDateInversionValidation checks the same guard in the
@@ -422,7 +427,7 @@ func TestSearchMessagesGlobalDateInversionValidation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, errRes)
 	require.True(t, errRes.IsError)
-	assert.Contains(t, toolResultText(errRes), "after")
+	assert.Contains(t, toolResultText(errRes), "not before")
 }
 
 // TestMarkAsReadHandlerValidation covers the input-validation layer of
@@ -476,4 +481,12 @@ func TestBackupMessagesDateInversionValidation(t *testing.T) {
 	require.NotNil(t, errRes)
 	require.True(t, errRes.IsError)
 	assert.Contains(t, toolResultText(errRes), "empty")
+}
+
+// TestErrMessageTooLongCountsUTF16 pins that the limit is measured in UTF-16
+// code units, where an astral-plane emoji costs two.
+func TestErrMessageTooLongCountsUTF16(t *testing.T) {
+	half := telegramMaxMessageLength / 2
+	assert.Nil(t, errMessageTooLong("message", strings.Repeat("😀", half)))
+	assert.NotNil(t, errMessageTooLong("message", strings.Repeat("😀", half)+"x"))
 }

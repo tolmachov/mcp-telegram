@@ -360,14 +360,17 @@ func TestFinishRunClassifiesByPhase(t *testing.T) {
 	// routing decision directly observable without standing up a session.
 	newHTTP := func(t *testing.T) *Server {
 		t.Helper()
+		auth, store := testAuth(t, "http://127.0.0.1")
 		srv, err := New(Options{
-			Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
-			Version:   "test",
-			Transport: TransportHTTP,
-			HTTPAddr:  ":0",
-			Stdin:     &bytes.Buffer{},
-			Stdout:    &bytes.Buffer{},
-			ErrOut:    &bytes.Buffer{},
+			Config:       &tgclient.Config{APIID: 1, APIHash: "hash"},
+			Version:      "test",
+			Transport:    TransportHTTP,
+			HTTPAddr:     ":0",
+			Auth:         auth,
+			SessionStore: store,
+			Stdin:        &bytes.Buffer{},
+			Stdout:       &bytes.Buffer{},
+			ErrOut:       &bytes.Buffer{},
 		})
 		require.NoError(t, err)
 		return srv
@@ -402,26 +405,6 @@ func TestFinishRunClassifiesByPhase(t *testing.T) {
 	t.Run("clean run stays clean", func(t *testing.T) {
 		assert.NoError(t, newHTTP(t).finishRun(t.Context(), nil, true))
 	})
-}
-
-// TestRunHTTPMissingCredentialsFailsFast pins the transport split end to end:
-// over HTTP there is no MCP peer to tell, so the process must die rather than
-// bind a listener it can never serve.
-func TestRunHTTPMissingCredentialsFailsFast(t *testing.T) {
-	srv, err := New(Options{
-		Config:    &tgclient.Config{},
-		Version:   "test",
-		Transport: TransportHTTP,
-		HTTPAddr:  ":0",
-		Stdin:     &bytes.Buffer{},
-		Stdout:    &bytes.Buffer{},
-		ErrOut:    &bytes.Buffer{},
-	})
-	require.NoError(t, err)
-
-	err = srv.Run(t.Context())
-	require.Error(t, err)
-	assert.Equal(t, missingCredentialsMessage, err.Error())
 }
 
 func TestLoginCommandUsesRunningBinaryPath(t *testing.T) {

@@ -27,10 +27,12 @@ func TestBuildForumTopicsResult(t *testing.T) {
 		},
 	}
 
-	got := buildForumTopicsResult(resp, 4)
+	got := buildForumTopicsResult(resp, 0)
 
 	require.Len(t, got.Topics, 3)
-	assert.Equal(t, 50, got.Count)
+	assert.Equal(t, 3, got.Count)
+	assert.Equal(t, 50, got.Total)
+	assert.Equal(t, 4, got.RawCount)
 
 	assert.Equal(t, "General", got.Topics[0].Title)
 	assert.True(t, got.Topics[0].Hidden)
@@ -60,17 +62,15 @@ func TestBuildForumTopicsResultLastPage(t *testing.T) {
 		},
 	}
 
-	got := buildForumTopicsResult(resp, 100)
+	got := buildForumTopicsResult(resp, 0)
 
 	require.Len(t, got.Topics, 2)
 	assert.Nil(t, got.NextOffset)
 }
 
 // TestBuildForumTopicsResultAllDeleted locks in the fix for the pagination
-// loop: a full page consisting only of deleted topics (with Count reporting
-// more) must NOT advertise a next page, because there is no real topic to
-// anchor an advancing offset on. NextOffset stays nil so the tool emits no
-// (zero) cursor that would restart from the first page forever.
+// loop: a page consisting only of deleted topics still advances using the raw
+// topic ID rather than silently truncating the list.
 func TestBuildForumTopicsResultAllDeleted(t *testing.T) {
 	resp := &tg.MessagesForumTopics{
 		Count: 50,
@@ -80,10 +80,12 @@ func TestBuildForumTopicsResultAllDeleted(t *testing.T) {
 		},
 	}
 
-	got := buildForumTopicsResult(resp, 2)
+	got := buildForumTopicsResult(resp, 0)
 
 	assert.Empty(t, got.Topics)
-	assert.Nil(t, got.NextOffset)
+	require.NotNil(t, got.NextOffset)
+	assert.Equal(t, 2, got.NextOffset.Topic)
+	assert.Equal(t, 2, got.NextOffset.Seen)
 }
 
 // TestBuildForumTopicsResultDateFallback exercises the offset_date fallback:
@@ -99,7 +101,7 @@ func TestBuildForumTopicsResultDateFallback(t *testing.T) {
 		// no Messages → top message 40 not found → fallback to lastTopic.Date
 	}
 
-	got := buildForumTopicsResult(resp, 2)
+	got := buildForumTopicsResult(resp, 0)
 
 	require.NotNil(t, got.NextOffset)
 	assert.Equal(t, 4, got.NextOffset.Topic)

@@ -69,14 +69,21 @@ func TestParseAllowlist(t *testing.T) {
 }
 
 func TestConfigValidate(t *testing.T) {
+	t.Run("nil config rejected", func(t *testing.T) {
+		var cfg *Config
+		assert.Error(t, cfg.Validate())
+	})
 	t.Run("valid https config passes", func(t *testing.T) {
 		assert.NoError(t, validConfig(t).Validate())
 	})
-	t.Run("trailing slash is normalized", func(t *testing.T) {
+	t.Run("validation is pure and normalization is explicit", func(t *testing.T) {
 		cfg := validConfig(t)
 		cfg.IssuerURL = "https://mcp.example.com/"
 		require.NoError(t, cfg.Validate())
-		assert.Equal(t, "https://mcp.example.com", cfg.IssuerURL)
+		assert.Equal(t, "https://mcp.example.com/", cfg.IssuerURL)
+		normalized := cfg.Normalized()
+		assert.Equal(t, "https://mcp.example.com", normalized.IssuerURL)
+		assert.Equal(t, "https://mcp.example.com/", cfg.IssuerURL)
 	})
 	t.Run("http localhost allowed for development", func(t *testing.T) {
 		cfg := validConfig(t)
@@ -95,6 +102,7 @@ func TestConfigValidate(t *testing.T) {
 	}
 
 	fail("http non-loopback issuer", func(c *Config) { c.IssuerURL = "http://intranet.example" }, "must be https")
+	fail("malformed issuer", func(c *Config) { c.IssuerURL = "https://%" }, "invalid issuer URL")
 	fail("issuer with query", func(c *Config) { c.IssuerURL = "https://mcp.example.com?x=1" }, "query or fragment")
 	fail("issuer with fragment", func(c *Config) { c.IssuerURL = "https://mcp.example.com#frag" }, "query or fragment")
 	fail("empty allowlist", func(c *Config) { c.Allow = Allowlist{} }, "allowed Telegram user ID")
@@ -103,11 +111,14 @@ func TestConfigValidate(t *testing.T) {
 	fail("no token keys", func(c *Config) { c.TokenKeys = nil }, "token key")
 	fail("bad token key", func(c *Config) { c.TokenKeys = []string{"nope"} }, "invalid token keys")
 	fail("negative refresh TTL", func(c *Config) { c.RefreshTokenTTL = -time.Hour }, "must not be negative")
+	fail("malformed extra redirect", func(c *Config) { c.ExtraRedirects = []string{"https://%"} }, "invalid extra redirect")
+	fail("negative trusted hops", func(c *Config) { c.TrustedProxyHops = -1 }, "trusted proxy hops")
+	fail("too many trusted hops", func(c *Config) { c.TrustedProxyHops = 17 }, "trusted proxy hops")
 }
 
 func TestNewCopiesConfig(t *testing.T) {
 	cfg := validConfig(t)
-	a, err := New(cfg, nil, sessionstore.NewMemory(), neverStartLogin)
+	a, err := New(cfg, nil, sessionstore.NewMemory(), neverStartLogin, nil)
 	require.NoError(t, err)
 	t.Cleanup(a.Close)
 
@@ -118,10 +129,10 @@ func TestNewCopiesConfig(t *testing.T) {
 }
 
 func TestNewRequiresCollaborators(t *testing.T) {
-	_, err := New(validConfig(t), nil, nil, neverStartLogin)
+	_, err := New(validConfig(t), nil, nil, neverStartLogin, nil)
 	assert.ErrorContains(t, err, "session store")
 
-	_, err = New(validConfig(t), nil, sessionstore.NewMemory(), nil)
+	_, err = New(validConfig(t), nil, sessionstore.NewMemory(), nil, nil)
 	assert.ErrorContains(t, err, "start-login")
 }
 

@@ -3,6 +3,7 @@ package authsrv
 import (
 	"net/http"
 
+	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
@@ -16,9 +17,6 @@ import (
 //     expire (<= accessTokenTTL); revocation stops renewal (the refresh grant),
 //     not the current short-lived access token. The pooled assembly is dropped
 //     best-effort to free the connection.
-//   - A legacy token (empty sid) tombstones the shared legacy per-user session,
-//     revoking ALL of that account's not-yet-upgraded legacy clients —
-//     acceptable while the legacy fallback exists at all.
 //   - This does NOT terminate the Telegram-side device authorization (it stays
 //     listed in Settings → Devices until Telegram expires it); a full
 //     auth.LogOut on revoke is a possible follow-up.
@@ -46,7 +44,7 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		ok()
 		return
 	}
-	sub, sid, clientID, opened := a.openRevocationTarget(token, r.PostForm.Get("token_type_hint"))
+	sub, sid, family, clientID, opened := a.openRevocationTarget(token, r.PostForm.Get("token_type_hint"))
 	if !opened {
 		a.logger.Debug("revocation of an unrecognized token acknowledged")
 		ok()
@@ -66,7 +64,7 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	// A non-empty sid becomes a storage object-name/path suffix below; a
 	// malformed one means a forged/corrupt token — acknowledge without touching
 	// storage.
-	if sid != "" && !validSessionID(sid) {
+	if !sessionstore.ValidSID(sid) || !sessionstore.ValidSID(family) {
 		a.logger.Warn("revocation ignored: malformed session id", "user_id", userID)
 		ok()
 		return
@@ -77,6 +75,12 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	// Revoked, so the grant stays dead regardless. The already-issued access
 	// token remains valid until it expires (<= accessTokenTTL); revocation stops
 	// renewal, matching the short-lived-access / revocable-refresh model.
+	if err := a.store.RevokeGrant(r.Context(), family); err != nil {
+		a.logger.Error("grant revocation could not be recorded", "user_id", userID, "err", err)
+		w.Header().Set("Retry-After", "60")
+		a.tokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "revocation could not be recorded, retry")
+		return
+	}
 	if err := a.store.Revoke(r.Context(), userID, sid); err != nil {
 		// The tombstone is the reliable part of revocation; if it cannot be
 		// written the grant is still live, so we must NOT answer 200 (which the
@@ -98,13 +102,13 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 // openRevocationTarget opens a token presented for revocation and returns its
 // subject, session id, and client id. Per RFC 7009 §2.1 token_type_hint only
 // orders the attempts: the hinted kind is tried first, then the other kind.
-func (a *AuthServer) openRevocationTarget(token, hint string) (sub, sid, clientID string, ok bool) {
+func (a *AuthServer) openRevocationTarget(token, hint string) (sub, sid, family, clientID string, ok bool) {
 	tryRefresh := func() bool {
 		rc, err := openBlob(a.sealer, refreshBlob, token, a.now())
 		if err != nil {
 			return false
 		}
-		sub, sid, clientID = rc.Subject, rc.SessionID, rc.ClientID
+		sub, sid, family, clientID = rc.Subject, rc.SessionID, rc.Family, rc.ClientID
 		return true
 	}
 	tryAccess := func() bool {
@@ -112,7 +116,7 @@ func (a *AuthServer) openRevocationTarget(token, hint string) (sub, sid, clientI
 		if err != nil {
 			return false
 		}
-		sub, sid, clientID = ac.Subject, ac.SessionID, ac.ClientID
+		sub, sid, family, clientID = ac.Subject, ac.SessionID, ac.Family, ac.ClientID
 		return true
 	}
 	if hint == "access_token" {
@@ -120,5 +124,5 @@ func (a *AuthServer) openRevocationTarget(token, hint string) (sub, sid, clientI
 	} else {
 		ok = tryRefresh() || tryAccess()
 	}
-	return sub, sid, clientID, ok
+	return sub, sid, family, clientID, ok
 }

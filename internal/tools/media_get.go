@@ -163,8 +163,8 @@ func (h *MediaGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest, 
 	// Total size is unknown until the download completes, so report total=0 (indeterminate).
 	dl := downloader.NewDownloader()
 	var buf bytes.Buffer
-	token := req.Params.GetProgressToken()
-	session := req.Session
+	token := requestProgressToken(req)
+	session := requestSession(req)
 
 	mcpLog(ctx, session, logLevelInfo, "GetMedia", map[string]any{
 		"media_id":   mediaID,
@@ -189,7 +189,7 @@ func (h *MediaGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest, 
 				"reason":     "size cap exceeded",
 			})
 			return errResult(fmt.Sprintf(
-				"Media exceeds the configured size limit of %d bytes (downloaded at least %d bytes before aborting). Use a smaller thumb_size, or raise --media-max-bytes / TELEGRAM_MEDIA_MAX_BYTES if you really need the full file.",
+				"Media exceeds the configured size limit of %d bytes (downloaded at least %d bytes before aborting). Use a smaller thumb_size, or raise --media-max-bytes / MCP_TELEGRAM_MEDIA_MAX_BYTES if you really need the full file.",
 				h.maxBytes, buf.Len(),
 			)), nil, nil
 		}

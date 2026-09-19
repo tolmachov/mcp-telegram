@@ -15,14 +15,17 @@ import (
 // AuthServer is the embedded OAuth 2.1 authorization server protecting the
 // MCP HTTP transport.
 type AuthServer struct {
-	cfg        *Config
-	sealer     *sealer
-	policy     *redirectPolicy
-	limiter    *ipRateLimiter
-	logger     *slog.Logger
-	store      sessionstore.Store
-	startLogin StartLoginFunc
-	now        func() time.Time
+	cfg         *Config
+	sealer      *sealer
+	policy      *redirectPolicy
+	limiter     *ipRateLimiter
+	logger      *slog.Logger
+	store       sessionstore.Store
+	startLogin  StartLoginFunc
+	now         func() time.Time
+	lifecycleMu sync.Mutex
+	started     bool
+	closed      bool
 
 	// loginCtx carries values to login flows and signals shutdown to the
 	// janitor and the orphan-session sweeper; canceling it (via Close) stops
@@ -35,33 +38,12 @@ type AuthServer struct {
 	sweepDone   chan struct{}
 
 	// invalidate tears down any live client assembly for a (userID, sid)
-	// session so it cannot re-store the blob after we delete it (revocation,
-	// legacy upgrade). Set via SetSessionInvalidator; nil when no pool is wired
+	// session so it cannot re-store the blob after we delete it. Nil when no pool is wired
 	// (tests, or a caller that does not run the user pool).
 	invalidate func(userID tgid.UserID, sid string)
 
-	// upgradeLocks serializes legacy→split-key upgrades PER ACCOUNT so two
-	// concurrent legacy refreshes for one account cannot each mint a separate
-	// split-key copy of the same MTProto auth key (which Telegram punishes with
-	// AUTH_KEY_DUPLICATED). Per-account (not global) so a slow/hung upgrade for
-	// one account never blocks unrelated accounts' refreshes. A single-instance
-	// deployment (README: --max-instances=1) makes an in-process lock
-	// sufficient; upgrades are rare and one-time per session. The map is not
-	// pruned — one tiny *sync.Mutex per account that ever upgrades — which is
-	// bounded by the allowlist and negligible.
-	upgradeLocksMu sync.Mutex
-	upgradeLocks   map[tgid.UserID]*sync.Mutex
-
 	pendingMu sync.Mutex
 	pending   map[string]*pendingLogin
-}
-
-// SetSessionInvalidator wires the callback that stops a live client for a
-// session before its blob is deleted. The user pool is built after the auth
-// server, so this is a setter rather than a constructor argument. Safe to leave
-// unset: invalidation is then a no-op.
-func (a *AuthServer) SetSessionInvalidator(fn func(userID tgid.UserID, sid string)) {
-	a.invalidate = fn
 }
 
 // invalidateSession invokes the configured invalidator, if any.
@@ -71,33 +53,24 @@ func (a *AuthServer) invalidateSession(userID tgid.UserID, sid string) {
 	}
 }
 
-// lockUpgrade acquires the per-account legacy-upgrade lock and returns its
-// unlock. Only same-account upgrades serialize; different accounts proceed
-// concurrently.
-func (a *AuthServer) lockUpgrade(userID tgid.UserID) func() {
-	a.upgradeLocksMu.Lock()
-	if a.upgradeLocks == nil {
-		a.upgradeLocks = map[tgid.UserID]*sync.Mutex{}
-	}
-	l, ok := a.upgradeLocks[userID]
-	if !ok {
-		l = &sync.Mutex{}
-		a.upgradeLocks[userID] = l
-	}
-	a.upgradeLocksMu.Unlock()
-	l.Lock()
-	return l.Unlock
-}
-
 // New validates cfg and builds the authorization server. store persists the
 // per-authorization Telegram sessions produced by successful QR logins (and
 // gates the refresh grant); startLogin launches one QR login flow per /authorize.
 // Callers must Close the returned server to stop the pending-login janitor
 // and abort in-flight logins.
-func New(cfg *Config, logger *slog.Logger, store sessionstore.Store, startLogin StartLoginFunc) (*AuthServer, error) {
+func New(
+	cfg *Config,
+	logger *slog.Logger,
+	store sessionstore.Store,
+	startLogin StartLoginFunc,
+	invalidate func(userID tgid.UserID, sid string),
+) (*AuthServer, error) {
 	// Work on a private copy: a caller mutating cfg after construction must
 	// not desynchronize the sealer's AAD from the metadata endpoints.
-	cfgCopy := *cfg
+	if cfg == nil {
+		return nil, fmt.Errorf("invalid auth config: auth config must not be nil")
+	}
+	cfgCopy := cfg.Normalized()
 	if err := cfgCopy.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid auth config: %w", err)
 	}
@@ -114,33 +87,75 @@ func New(cfg *Config, logger *slog.Logger, store sessionstore.Store, startLogin 
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
 	a := &AuthServer{
-		cfg:         &cfgCopy,
-		sealer:      newSealer(ring, cfgCopy.IssuerURL),
-		policy:      newRedirectPolicy(cfgCopy.ExtraRedirects),
-		limiter:     newIPRateLimiter(rateLimitPerSecond, rateLimitBurst),
-		logger:      logger,
-		store:       store,
-		startLogin:  startLogin,
-		now:         time.Now,
-		loginCtx:    ctx,
-		cancelLogin: cancel,
-		janitorDone: make(chan struct{}),
-		sweepDone:   make(chan struct{}),
-		pending:     map[string]*pendingLogin{},
+		cfg:        &cfgCopy,
+		sealer:     newSealer(ring, cfgCopy.IssuerURL),
+		policy:     newRedirectPolicy(cfgCopy.ExtraRedirects),
+		limiter:    newIPRateLimiter(rateLimitPerSecond, rateLimitBurst, cfgCopy.TrustedProxyHops),
+		logger:     logger,
+		store:      store,
+		startLogin: startLogin,
+		now:        time.Now,
+		invalidate: invalidate,
+		pending:    map[string]*pendingLogin{},
 	}
-	go a.janitor(ctx)
-	go a.sessionSweeper(ctx)
 	return a, nil
+}
+
+// Start launches the independent login and storage maintenance loops. It is
+// separated from New so all collaborators are wired before background work can
+// observe the server. Repeated calls are harmless.
+func (a *AuthServer) Start(parent context.Context) error {
+	if parent == nil {
+		return fmt.Errorf("auth server start context is required")
+	}
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	if a.closed {
+		return fmt.Errorf("auth server is closed")
+	}
+	if a.started {
+		return nil
+	}
+	ctx, cancel := context.WithCancel(parent)
+	a.loginCtx = ctx
+	a.cancelLogin = cancel
+	a.janitorDone = make(chan struct{})
+	a.sweepDone = make(chan struct{})
+	a.started = true
+	go a.runLoop("login janitor", a.janitor, ctx)
+	go a.runLoop("session sweeper", a.sessionSweeper, ctx)
+	return nil
+}
+
+func (a *AuthServer) runLoop(name string, loop func(context.Context), ctx context.Context) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			a.logger.Error("auth background loop panicked; recovered", "loop", name, "panic", recovered)
+		}
+	}()
+	loop(ctx)
 }
 
 // Close stops the janitor and the orphan-session sweeper, then aborts every
 // in-flight Telegram login. Idempotent.
 func (a *AuthServer) Close() {
-	a.cancelLogin()
-	<-a.janitorDone
-	<-a.sweepDone
+	a.lifecycleMu.Lock()
+	if a.closed {
+		a.lifecycleMu.Unlock()
+		return
+	}
+	a.closed = true
+	started := a.started
+	cancel := a.cancelLogin
+	janitorDone := a.janitorDone
+	sweepDone := a.sweepDone
+	a.lifecycleMu.Unlock()
+	if started {
+		cancel()
+		<-janitorDone
+		<-sweepDone
+	}
 
 	a.pendingMu.Lock()
 	stale := make([]*pendingLogin, 0, len(a.pending))
@@ -150,7 +165,9 @@ func (a *AuthServer) Close() {
 	}
 	a.pendingMu.Unlock()
 	for _, p := range stale {
-		p.flow.Abort()
+		if p.flow != nil {
+			p.flow.Abort()
+		}
 	}
 }
 

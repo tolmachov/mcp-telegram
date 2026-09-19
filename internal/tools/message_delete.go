@@ -51,7 +51,7 @@ func NewMessageDeleteHandler(client *tg.Client) *MessageDeleteHandler {
 type DeleteMessagesInput struct {
 	ChatID     int64    `json:"chat_id" jsonschema:"The ID of the chat containing the messages"`
 	MessageIDs []string `json:"message_ids" jsonschema:"1-100 opaque message handles from GetMessages or SendMessage. All regular (\"42\") or all scheduled (\"s:42\")\\, not mixed."`
-	Confirm    bool     `json:"confirm,omitempty" jsonschema:"Set to true to proceed with deleting. Deletion is irreversible\\, so only set this after the user has confirmed. When false/omitted\\, the host may present its own confirmation prompt\\, and in non-interactive clients the call is cancelled without deleting (status cancelled)."`
+	Confirm    bool     `json:"confirm" jsonschema:"Must be true after the user explicitly confirms this irreversible deletion"`
 }
 
 // DeletedMessage is the outcome for one requested handle.
@@ -64,7 +64,7 @@ type DeletedMessage struct {
 // verified by re-reading the messages after the call, never assumed from the
 // call succeeding.
 type DeleteMessagesResult struct {
-	Status  string           `json:"status"` // "completed" | "cancelled"
+	Status  string           `json:"status"` // "completed"
 	ChatID  int64            `json:"chat_id"`
 	Deleted int              `json:"deleted"`
 	Results []DeletedMessage `json:"results,omitempty"`
@@ -75,7 +75,7 @@ type DeleteMessagesResult struct {
 func (h *MessageDeleteHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "DeleteMessages",
-		Description: "Delete up to 100 messages from one chat in a single call. Regular handles (\"42\") delete delivered messages for all participants and cannot be undone; scheduled handles (\"s:42\") cancel pending delivery. One kind per call. Reports each message as deleted (verified gone), not_found (no such message in this chat) or forbidden (you lack the right to delete it for everyone — left untouched rather than deleted only for you). Use GetMessages first (with include_scheduled=true for the scheduled queue) to get the handles.",
+		Description: "Delete up to 100 messages from one chat in a single call. Regular handles (\"42\") delete delivered messages for all participants and cannot be undone; scheduled handles (\"s:42\") cancel pending delivery. One kind per call. Reports each message as deleted (verified gone), not_found (no such message in this chat) or forbidden (you lack the right to delete it for everyone — left untouched rather than deleted only for you). The call is rejected unless confirm=true. Use GetMessages first (with include_scheduled=true for the scheduled queue) to get the handles.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptrTrue(), OpenWorldHint: ptrTrue()},
 	}, h.handle)
 }
@@ -104,22 +104,13 @@ func (h *MessageDeleteHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 			ids = append(ids, ref.ID)
 		}
 	}
+	if errRes := requireExplicitConfirmation(in.Confirm, "delete the messages"); errRes != nil {
+		return errRes, nil, nil
+	}
 
 	peer, err := tgclient.ResolvePeer(ctx, h.client, in.ChatID)
 	if err != nil {
 		return errResolvePeer(in.ChatID, err), nil, nil
-	}
-
-	prompt := fmt.Sprintf("Delete %d message(s) in chat %d? This deletes them for all participants and cannot be undone.", len(ids), in.ChatID)
-	if scheduled {
-		prompt = fmt.Sprintf("Cancel %d scheduled message(s) in chat %d? They have not been sent yet.", len(ids), in.ChatID)
-	}
-	confirmed, err := confirmDestructive(ctx, req, in.Confirm, prompt)
-	if err != nil {
-		return errResult(fmt.Sprintf("confirmation failed: %v", err)), nil, nil
-	}
-	if !confirmed {
-		return nil, &DeleteMessagesResult{Status: statusCancelled, ChatID: in.ChatID}, nil
 	}
 
 	var statuses map[int]string

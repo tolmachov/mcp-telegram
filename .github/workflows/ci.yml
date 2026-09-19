@@ -9,43 +9,83 @@ permissions:
   contents: read
 
 jobs:
-  build-test:
-    runs-on: ubuntu-latest
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
-
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
           cache: true
+      - run: go mod verify
+      - run: go test ./...
 
-      - name: Build
-        run: go build ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      # Runs on Linux, so the macOS Keychain-backed secret tests take their
-      # file-store (!darwin) path and don't prompt. Integration tests are
-      # behind the `integration` build tag and are excluded here.
-      - name: Test
-        run: go test ./...
-
-  lint:
+  race:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
           cache: true
+      - run: go test -race ./...
 
-      # Pin golangci-lint to a v2 release built with Go 1.26. "latest" on the
-      # old action major resolved to a v1 build (Go 1.24) that refuses to load a
-      # go 1.26 module ("build Go version lower than targeted"). The action major
-      # must be v9+ — v8 and earlier still run on the deprecated Node 20.
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+      - run: ./scripts/check-coverage.sh
+
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+      - run: go vet ./...
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
+
+  windows-cross-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+      - run: GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./...
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: mcp-telegram:ci
+      - name: Scan image
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: mcp-telegram:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'

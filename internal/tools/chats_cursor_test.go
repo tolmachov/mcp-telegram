@@ -62,21 +62,14 @@ func TestParseChatsCursorInvalid(t *testing.T) {
 	}
 }
 
-// A pre-versioning cursor (v==0 or absent) is tolerated by the shared codec:
-// it decodes to its session/offset, and a stale session ID is caught by the
-// handler's cache-session check rather than being rejected here. This matches
-// the version policy used by the search and forum-topics cursors.
-func TestParseChatsCursorAcceptsLegacyVersion(t *testing.T) {
+func TestParseChatsCursorRejectsLegacyVersion(t *testing.T) {
 	for _, cursor := range []string{
 		base64.RawURLEncoding.EncodeToString([]byte(`{"v":0,"s":7,"o":3}`)),
 		base64.RawURLEncoding.EncodeToString([]byte(`{"s":7,"o":3}`)),
 	} {
-		sid, off, err := ParseChatsCursor(cursor)
-		if err != nil {
-			t.Fatalf("ParseChatsCursor(%q) unexpected error: %v", cursor, err)
-		}
-		if sid != 7 || off != 3 {
-			t.Errorf("ParseChatsCursor(%q) = (%d, %d), want (7, 3)", cursor, sid, off)
+		_, _, err := ParseChatsCursor(cursor)
+		if err == nil {
+			t.Errorf("ParseChatsCursor(%q) accepted obsolete cursor", cursor)
 		}
 	}
 }

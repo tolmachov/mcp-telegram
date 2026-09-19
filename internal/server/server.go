@@ -54,7 +54,7 @@ const happyInstructions = "Use SearchChats or GetChats to find chat IDs before c
 // the process's exit error.
 //
 //nolint:gosec // G101: this is a user-facing help string naming the env vars, not a credential.
-const missingCredentialsMessage = "mcp-telegram is not configured: TELEGRAM_API_ID and TELEGRAM_API_HASH are required. Set them via environment variables, a .env file, CLI flags (--api-id / --api-hash), or `mcp-telegram config set api-id <id>` / `mcp-telegram config set api-hash <hash>`. You can obtain an API ID/Hash from https://my.telegram.org."
+const missingCredentialsMessage = "mcp-telegram is not configured: MCP_TELEGRAM_API_ID and MCP_TELEGRAM_API_HASH are required. Set them via process environment, CLI flags (--api-id / --api-hash), or `mcp-telegram config set api-id <id>` / `mcp-telegram config set api-hash <hash>`. You can obtain an API ID/Hash from https://my.telegram.org."
 
 const notLoggedInMessage = "mcp-telegram is not logged in to Telegram — the stored session is missing, expired, or was revoked from Telegram's Devices/Active sessions list. Run `mcp-telegram login --phone <+countrycode…>` in a terminal to authenticate, then " + reconnectHint
 
@@ -75,8 +75,8 @@ type Options struct {
 	LogFormat      string        // "json" | "text"; "" → json for http, text for stdio
 	LogLevel       string        // "debug" | "info" | "warn" | "error"; "" → info
 	// Auth enables the embedded OAuth authorization server with per-user
-	// Telegram sessions (HTTP transport only). SessionStore is required with
-	// it and holds those sessions.
+	// Telegram sessions. It and SessionStore (which holds those sessions) are
+	// required with the http transport and rejected with stdio.
 	Auth         *authsrv.Config
 	SessionStore sessionstore.Store
 	Stdin        io.Reader
@@ -133,16 +133,14 @@ func New(opts Options) (*Server, error) {
 		if opts.HTTPAddr == "" {
 			return nil, fmt.Errorf("server.New: Options.HTTPAddr is required for the http transport")
 		}
+		if opts.Auth == nil || opts.SessionStore == nil {
+			return nil, fmt.Errorf("server.New: the http transport requires Options.Auth and Options.SessionStore")
+		}
 	default:
 		return nil, fmt.Errorf("server.New: unknown transport %q; expected %q or %q", opts.Transport, TransportStdio, TransportHTTP)
 	}
-	if opts.Auth != nil {
-		if opts.Transport != TransportHTTP {
-			return nil, fmt.Errorf("server.New: Options.Auth requires the http transport")
-		}
-		if opts.SessionStore == nil {
-			return nil, fmt.Errorf("server.New: Options.SessionStore is required with Options.Auth")
-		}
+	if opts.Auth != nil && opts.Transport != TransportHTTP {
+		return nil, fmt.Errorf("server.New: Options.Auth requires the http transport")
 	}
 	if opts.Stdin == nil {
 		opts.Stdin = os.Stdin
@@ -191,32 +189,32 @@ func New(opts Options) (*Server, error) {
 	return srv, nil
 }
 
-// Run starts the MCP server on the configured transport (stdio or streamable
-// HTTP). When Telegram cannot be reached at all — missing credentials, client
+// Run starts the MCP server on the configured transport (stdio, or streamable
+// HTTP behind the embedded OAuth server). When Telegram cannot be reached at all — missing credentials, client
 // construction failure, a connect-phase failure, a failed auth check, or a
 // session that is simply not authorized — the stdio path comes up in
 // login-required mode instead of failing: a server exposing one loudly-named
 // tool that reports the problem, plus instructions that say the same thing to
 // the model. See runLoginRequired for why that beats failing the connection.
 //
-// Over HTTP there is no MCP peer to tell, so those conditions still fail the
-// process; in auth mode only the missing-credentials one can arise, because
-// the per-user clients are connected lazily by the pool.
+// Over HTTP only the missing-credentials condition can arise, because the
+// per-user clients are connected lazily by the pool; with no MCP peer to tell,
+// it fails the process.
 func (s *Server) Run(ctx context.Context) error {
 	if s.tgConfig.APIID == 0 || s.tgConfig.APIHash == "" {
 		s.logger.Warn("no Telegram access", "reason", "missing Telegram API credentials")
 		return s.startBlocked(ctx, missingCredentialsMessage)
 	}
 
-	// The auth mode has no ambient single-account client: each user's client
-	// is connected lazily by the pool on their stored session.
-	if s.authCfg != nil {
+	// HTTP has no ambient single-account client: each user's client is
+	// connected lazily by the pool on their stored session.
+	if s.transport == TransportHTTP {
 		return s.runHTTPWithAuth(ctx)
 	}
 
 	client, waiter, err := tgclient.CreateClient(s.tgConfig, s.floodWaitLogger())
 	if err != nil {
-		msg := fmt.Sprintf("mcp-telegram: failed to construct Telegram client: %v. Verify TELEGRAM_API_ID/HASH and the session file; `mcp-telegram logout` followed by `mcp-telegram login` often recovers a corrupt session.", err)
+		msg := fmt.Sprintf("mcp-telegram: failed to construct Telegram client: %v. Verify MCP_TELEGRAM_API_ID/MCP_TELEGRAM_API_HASH and the session file; `mcp-telegram logout` followed by `mcp-telegram login` often recovers a corrupt session.", err)
 		s.logger.Error("no Telegram access", "reason", "telegram client construction failed", "err", err)
 		return s.startBlocked(ctx, msg)
 	}
@@ -385,17 +383,14 @@ func (s *Server) runHappy(ctx context.Context, client *telegram.Client) error {
 		return err
 	}
 
-	// run is the serve loop (stdio frames or streamable HTTP, per
-	// --transport). With no --variant override we expose every variant via
-	// the SEP-2053 proxy and mirror pinned resources onto all of them (one
-	// poller). With an override we expose just that variant as a plain server.
+	// run is the stdio serve loop; HTTP never reaches here (it serves per-user
+	// assemblies through runHTTPWithAuth). With no --variant override we expose
+	// every variant via the SEP-2053 proxy and mirror pinned resources onto all
+	// of them (one poller). With an override we expose just that variant as a
+	// plain server.
 	var run func() error
 	if asm.variants != nil {
-		if s.transport == TransportHTTP {
-			run = func() error { return s.runVariantsHTTP(ctx, asm.variants, s.httpAddr) }
-		} else {
-			run = func() error { return asm.variants.Run(ctx, s.stdioTransport()) }
-		}
+		run = func() error { return asm.variants.Run(ctx, s.stdioTransport()) }
 		// The variants proxy cannot forward async resources/list_changed
 		// notifications (they fire from the watcher goroutine on a background
 		// context with no front session to redirect to — a documented library
@@ -405,11 +400,7 @@ func (s *Server) runHappy(ctx context.Context, client *telegram.Client) error {
 		// Pin a single --variant to restore live notifications.
 		s.logger.Info("multi-variant mode: pinned-chat resources are exposed on every variant and refreshed by one poller, but live resources/list_changed notifications are not delivered through the variants proxy; pin a single --variant for live updates")
 	} else {
-		if s.transport == TransportHTTP {
-			run = func() error { return s.runMCPHTTP(ctx, asm.single, s.httpAddr) }
-		} else {
-			run = func() error { return asm.single.Run(ctx, s.stdioTransport()) }
-		}
+		run = func() error { return asm.single.Run(ctx, s.stdioTransport()) }
 	}
 	pinnedServers := asm.pinnedServers
 	msgProvider := asm.msgProvider
@@ -452,8 +443,10 @@ func (s *Server) runHappy(ctx context.Context, client *telegram.Client) error {
 // buildHandlers constructs every tool handler once and returns the full set and
 // the read-only research subset. The same handler instances are shared: they
 // carry no per-server state, so registering one on several inner servers is
-// safe. research holds tools that only read Telegram (search, fetch, summarize,
-// export); the remaining 13 mutate state (send, edit, delete, forward, react,
+// safe. research holds tools that do not mutate Telegram or the local
+// filesystem; the remaining tools mutate Telegram state. BackupMessages is
+// local-stdio-only and is exposed solely by the full variant.
+// The remaining 13 mutate state (send, edit, delete, forward, react,
 // mark-as-read, join/leave, mute, and the four folder edits) and are excluded
 // from the research variant.
 func (s *Server) buildHandlers(api *tg.Client, msgProvider *messages.Provider, chatsCache *tools.ChatsCache) (full, research []tools.Handler) {
@@ -470,7 +463,6 @@ func (s *Server) buildHandlers(api *tg.Client, msgProvider *messages.Provider, c
 		tools.NewGetForumTopicsHandler(msgProvider),
 		tools.NewUsernameResolveHandler(api),
 		tools.NewMessageLinkResolveHandler(api),
-		tools.NewMessageBackupHandler(api, msgProvider, s.allowedPaths),
 		tools.NewChatSummarizeHandler(msgProvider, s.summarizeCfg),
 		tools.NewMediaGetHandler(api, s.mediaMaxBytes),
 		tools.NewGetFoldersHandler(api),
@@ -490,8 +482,11 @@ func (s *Server) buildHandlers(api *tg.Client, msgProvider *messages.Provider, c
 		tools.NewAddChatsToFolderHandler(api),
 		tools.NewRemoveChatsFromFolderHandler(api),
 	}
-	full = make([]tools.Handler, 0, len(research)+len(mutating))
+	full = make([]tools.Handler, 0, len(research)+len(mutating)+1)
 	full = append(full, research...)
+	if s.transport != TransportHTTP {
+		full = append(full, tools.NewMessageBackupHandler(api, msgProvider, s.allowedPaths))
+	}
 	full = append(full, mutating...)
 	return full, research
 }

@@ -22,16 +22,21 @@ func (p *Provider) Search(ctx context.Context, chatID int64, opts SearchOptions)
 	if opts.Limit <= 0 {
 		opts.Limit = 50
 	}
-	if !opts.MinDate.IsZero() && !opts.MaxDate.IsZero() && opts.MinDate.After(opts.MaxDate) {
-		return nil, fmt.Errorf("min_date (%s) is after max_date (%s): the date window is empty",
+	if !opts.MinDate.IsZero() && !opts.MaxDate.IsZero() && !opts.MinDate.Before(opts.MaxDate) {
+		return nil, fmt.Errorf("min_date (%s) is not before max_date (%s): the date window is empty",
 			opts.MinDate.Format(time.RFC3339), opts.MaxDate.Format(time.RFC3339))
 	}
 
-	peer, err := p.peers.Resolve(ctx, p.client, chatID)
-	if err != nil {
-		return nil, fmt.Errorf("resolving peer: %w", err)
+	var related []int64
+	if opts.FromSenderID != 0 {
+		related = append(related, opts.FromSenderID)
 	}
+	return withPeerRetry(ctx, p, chatID, related, func(peer tg.InputPeerClass) (*FetchResult, error) {
+		return p.searchWithPeer(ctx, chatID, peer, opts)
+	})
+}
 
+func (p *Provider) searchWithPeer(ctx context.Context, chatID int64, peer tg.InputPeerClass, opts SearchOptions) (*FetchResult, error) {
 	filter := opts.Filter
 	if filter == nil {
 		filter = &tg.InputMessagesFilterEmpty{}
@@ -45,10 +50,10 @@ func (p *Provider) Search(ctx context.Context, chatID int64, opts SearchOptions)
 		Limit:    opts.Limit,
 	}
 	if !opts.MinDate.IsZero() {
-		req.MinDate = int(opts.MinDate.Unix())
+		req.MinDate = telegramFromInclusive(opts.MinDate)
 	}
 	if !opts.MaxDate.IsZero() {
-		req.MaxDate = int(opts.MaxDate.Unix())
+		req.MaxDate = telegramBefore(opts.MaxDate)
 	}
 	if opts.TopMsgID > 0 {
 		req.SetTopMsgID(opts.TopMsgID)
@@ -68,7 +73,9 @@ func (p *Provider) Search(ctx context.Context, chatID int64, opts SearchOptions)
 		req.SetFromID(fromPeer)
 	}
 
-	p.limiter.Take()
+	if err := p.limiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("waiting for Telegram rate limit: %w", err)
+	}
 
 	history, err := p.client.MessagesSearch(ctx, req)
 	if err != nil {
@@ -96,8 +103,8 @@ func (p *Provider) SearchGlobal(ctx context.Context, opts GlobalSearchOptions) (
 	if opts.Limit <= 0 {
 		opts.Limit = 50
 	}
-	if !opts.MinDate.IsZero() && !opts.MaxDate.IsZero() && opts.MinDate.After(opts.MaxDate) {
-		return nil, fmt.Errorf("min_date (%s) is after max_date (%s): the date window is empty",
+	if !opts.MinDate.IsZero() && !opts.MaxDate.IsZero() && !opts.MinDate.Before(opts.MaxDate) {
+		return nil, fmt.Errorf("min_date (%s) is not before max_date (%s): the date window is empty",
 			opts.MinDate.Format(time.RFC3339), opts.MaxDate.Format(time.RFC3339))
 	}
 
@@ -114,13 +121,15 @@ func (p *Provider) SearchGlobal(ctx context.Context, opts GlobalSearchOptions) (
 		req.OffsetPeer = &tg.InputPeerEmpty{}
 	}
 	if !opts.MinDate.IsZero() {
-		req.MinDate = int(opts.MinDate.Unix())
+		req.MinDate = telegramFromInclusive(opts.MinDate)
 	}
 	if !opts.MaxDate.IsZero() {
-		req.MaxDate = int(opts.MaxDate.Unix())
+		req.MaxDate = telegramBefore(opts.MaxDate)
 	}
 
-	p.limiter.Take()
+	if err := p.limiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("waiting for Telegram rate limit: %w", err)
+	}
 
 	history, err := p.client.MessagesSearchGlobal(ctx, req)
 	if err != nil {
@@ -136,12 +145,13 @@ func (p *Provider) SearchGlobal(ctx context.Context, opts GlobalSearchOptions) (
 // chat it belongs to and look up the display title. It also extracts the
 // next pagination cursor from the last message when the response is a slice
 // and exposes next_rate.
-func (p *Provider) processGlobalHistory(history tg.MessagesMessagesClass, limit int) (*GlobalSearchResult, error) {
+func (p *Provider) processGlobalHistory(history tg.MessagesMessagesClass, _ int) (*GlobalSearchResult, error) {
 	var rawMessages []tg.MessageClass
 	var users []tg.UserClass
 	var chats []tg.ChatClass
 	var nextRate int
 	var hasNextRate bool
+	var paginatable bool
 
 	switch hist := history.(type) {
 	case *tg.MessagesMessages:
@@ -149,6 +159,7 @@ func (p *Provider) processGlobalHistory(history tg.MessagesMessagesClass, limit 
 		users = hist.Users
 		chats = hist.Chats
 	case *tg.MessagesMessagesSlice:
+		paginatable = true
 		rawMessages = hist.Messages
 		users = hist.Users
 		chats = hist.Chats
@@ -157,6 +168,7 @@ func (p *Provider) processGlobalHistory(history tg.MessagesMessagesClass, limit 
 			hasNextRate = true
 		}
 	case *tg.MessagesChannelMessages:
+		paginatable = true
 		rawMessages = hist.Messages
 		users = hist.Users
 		chats = hist.Chats
@@ -243,13 +255,13 @@ func (p *Provider) processGlobalHistory(history tg.MessagesMessagesClass, limit 
 	result.Count = len(result.Messages)
 	result.SkippedCount = skipped
 
-	// Build the next cursor when the raw page came back full AND we have a
+	// Build the next cursor for every non-empty slice response when we have a
 	// last-message anchor. Gating on the *raw* page length (not the filtered
 	// result) matters: Telegram may return MessageService / MessageEmpty
 	// slots that we drop above, so filtering could otherwise make a full
 	// page look partial and silently end pagination mid-stream. next_rate is
 	// optional and defaults to 0 when absent.
-	if len(rawMessages) >= limit {
+	if paginatable && len(rawMessages) > 0 {
 		lastPeerKind, lastPeerID, lastAccessHash, lastMsgID := lastGlobalCursorAnchor(rawMessages, userByID, channelByID)
 		if lastPeerKind == "" || lastMsgID <= 0 {
 			return result, nil

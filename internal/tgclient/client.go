@@ -3,7 +3,9 @@ package tgclient
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -37,6 +39,12 @@ type Config struct {
 	FloodWaitMaxWait time.Duration
 }
 
+func (c Config) String() string {
+	return fmt.Sprintf("tgclient.Config{APIID:%d APIHash:<redacted> FloodWaitMaxWait:%s}", c.APIID, c.FloodWaitMaxWait)
+}
+
+func (c Config) GoString() string { return c.String() }
+
 // EffectiveFloodWaitMaxWait resolves the configured flood-wait ceiling,
 // substituting DefaultFloodWaitMaxWait for a zero/negative value. It is the
 // single source of truth for that fallback: both the middleware (CreateClient)
@@ -49,9 +57,27 @@ func (c *Config) EffectiveFloodWaitMaxWait() time.Duration {
 	return c.FloodWaitMaxWait
 }
 
-// userAuthenticator implements auth.UserAuthenticator
+// userAuthenticator implements auth.UserAuthenticator. Every line-based read
+// goes through the one shared lines reader: a fresh bufio.Reader per prompt
+// would buffer past the newline and strand the next answer (e.g. the 2FA
+// password piped after the login code) inside a discarded buffer.
 type userAuthenticator struct {
 	phone string
+	in    io.Reader
+	lines *bufio.Reader
+	out   io.Writer
+}
+
+func newUserAuthenticator(phone string, in io.Reader, out io.Writer) userAuthenticator {
+	return userAuthenticator{phone: phone, in: in, lines: bufio.NewReader(in), out: out}
+}
+
+func (a userAuthenticator) readLine(what string) (string, error) {
+	line, err := a.lines.ReadString('\n')
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", what, err)
+	}
+	return strings.TrimSpace(line), nil
 }
 
 func (a userAuthenticator) Phone(_ context.Context) (string, error) {
@@ -59,36 +85,28 @@ func (a userAuthenticator) Phone(_ context.Context) (string, error) {
 }
 
 func (a userAuthenticator) Code(_ context.Context, _ *tg.AuthSentCode) (string, error) {
-	fmt.Print("Enter login code: ")
-	reader := bufio.NewReader(os.Stdin)
-	code, err := reader.ReadString('\n')
-	if err != nil {
-		return "", fmt.Errorf("reading code: %w", err)
-	}
-	return strings.TrimSpace(code), nil
+	_, _ = fmt.Fprint(a.out, "Enter login code: ")
+	return a.readLine("code")
 }
 
 func (a userAuthenticator) Password(_ context.Context) (string, error) {
-	fmt.Print("Enter 2FA password: ")
+	_, _ = fmt.Fprint(a.out, "Enter 2FA password: ")
 
-	// Use hidden input if running in a real terminal, otherwise fall back to plain input.
-	//nolint:gosec // G115: os.Stdin.Fd() is always a small non-negative fd; no realistic overflow.
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		password, err := term.ReadPassword(int(os.Stdin.Fd())) //nolint:gosec // G115: same as above.
-		fmt.Println()                                          // Print newline after hidden input
+	// Use hidden input if running in a real terminal, otherwise fall back to
+	// plain line input. A terminal is line-buffered by the kernel, so the
+	// shared lines reader holds nothing past the code's newline here.
+	//nolint:gosec // G115: a file descriptor is always a small non-negative int; no realistic overflow.
+	if inputFile, ok := a.in.(*os.File); ok && term.IsTerminal(int(inputFile.Fd())) {
+		password, err := term.ReadPassword(int(inputFile.Fd())) //nolint:gosec // G115: file descriptors fit in int on supported platforms.
+		_, _ = fmt.Fprintln(a.out)
 		if err != nil {
 			return "", fmt.Errorf("reading password: %w", err)
 		}
 		return string(password), nil
 	}
 
-	// Fallback for non-TTY environments (e.g., IDE)
-	reader := bufio.NewReader(os.Stdin)
-	password, err := reader.ReadString('\n')
-	if err != nil {
-		return "", fmt.Errorf("reading password: %w", err)
-	}
-	return strings.TrimSpace(password), nil
+	// Fallback for non-TTY environments (e.g., IDE, piped input).
+	return a.readLine("password")
 }
 
 func (a userAuthenticator) AcceptTermsOfService(_ context.Context, _ tg.HelpTermsOfService) error {
@@ -129,7 +147,8 @@ func CreateClient(cfg *Config, onFloodWait FloodWaitCallback) (*telegram.Client,
 }
 
 // Login performs interactive sign-in to Telegram
-func Login(ctx context.Context, cfg *Config, phone string) error {
+func Login(ctx context.Context, cfg *Config, phone string, in io.Reader, out, errOut io.Writer) error {
+	_ = errOut
 	client, waiter, err := CreateClient(cfg, nil)
 	if err != nil {
 		return fmt.Errorf("creating Telegram client: %w", err)
@@ -146,16 +165,16 @@ func Login(ctx context.Context, cfg *Config, phone string) error {
 			if status.Authorized {
 				user, err := client.Self(ctx)
 				if err != nil {
-					fmt.Printf("Already logged in (could not fetch display name: %v)\n", err)
+					_, _ = fmt.Fprintf(out, "Already logged in (could not fetch display name: %v)\n", err)
 				} else {
-					fmt.Printf("Already logged in as %s\n", UserName(user))
+					_, _ = fmt.Fprintf(out, "Already logged in as %s\n", UserName(user))
 				}
 				return nil
 			}
 
 			// Perform authentication
 			flow := auth.NewFlow(
-				userAuthenticator{phone: phone},
+				newUserAuthenticator(phone, in, out),
 				auth.SendCodeOptions{},
 			)
 
@@ -168,8 +187,8 @@ func Login(ctx context.Context, cfg *Config, phone string) error {
 				return fmt.Errorf("getting user info: %w", err)
 			}
 
-			fmt.Printf("Successfully logged in as %s\n", UserName(user))
-			fmt.Println("You can now use the mcp-telegram server.")
+			_, _ = fmt.Fprintf(out, "Successfully logged in as %s\n", UserName(user))
+			_, _ = fmt.Fprintln(out, "You can now use the mcp-telegram server.")
 
 			return nil
 		})
@@ -181,13 +200,14 @@ func Login(ctx context.Context, cfg *Config, phone string) error {
 }
 
 // Logout logs out from Telegram
-func Logout(ctx context.Context, cfg *Config) error {
+func Logout(ctx context.Context, cfg *Config, _ io.Reader, out, errOut io.Writer) error {
+	_ = errOut
 	client, waiter, err := CreateClient(cfg, nil)
 	if err != nil {
 		return fmt.Errorf("creating Telegram client: %w", err)
 	}
 
-	err = waiter.Run(ctx, func(ctx context.Context) error {
+	remoteErr := waiter.Run(ctx, func(ctx context.Context) error {
 		return client.Run(ctx, func(ctx context.Context) error {
 			if _, err := client.API().AuthLogOut(ctx); err != nil {
 				return fmt.Errorf("calling auth logout: %w", err)
@@ -195,22 +215,27 @@ func Logout(ctx context.Context, cfg *Config) error {
 			return nil
 		})
 	})
-	if err != nil {
-		return fmt.Errorf("logging out: %w", err)
-	}
-
-	// Delete the stored session only after client.Run has returned. gotd
+	// Delete the stored session after client.Run has returned even when the
+	// remote logout failed (offline, revoked, or expired session). gotd
 	// persists session state while Run is active, so deleting inside the
 	// callback races with a final save that could resurrect the dead session
 	// and cause a silent re-auth failure on next start.
 	ss, err := NewSessionStorage()
 	if err != nil {
-		return fmt.Errorf("logged out from Telegram but failed to init session storage: %w", err)
+		return errors.Join(wrapIf(remoteErr, "logging out"), fmt.Errorf("initializing session storage for local cleanup: %w", err))
 	}
-	if err := ss.DeleteSession(); err != nil {
-		return fmt.Errorf("logged out from Telegram but failed to delete local session: %w", err)
+	cleanupErr := ss.DeleteSession()
+	if remoteErr != nil || cleanupErr != nil {
+		return errors.Join(wrapIf(remoteErr, "logging out"), wrapIf(cleanupErr, "deleting local session"))
 	}
 
-	fmt.Println("Successfully logged out from Telegram.")
+	_, _ = fmt.Fprintln(out, "Successfully logged out from Telegram.")
 	return nil
+}
+
+func wrapIf(err error, operation string) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", operation, err)
 }

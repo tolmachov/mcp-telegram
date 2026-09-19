@@ -9,6 +9,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tolmachov/mcp-telegram/internal/summarize"
 )
 
 // TestFloodWaitResult verifies the flood-wait detector extracts the retry
@@ -68,50 +70,6 @@ func TestMcpLogSlogFallback(t *testing.T) {
 	mcpLog(ctx, nil, logLevelDebug, "test-debug", map[string]any{"k": "v"})
 }
 
-// TestRootsFromClientNilSession verifies that rootsFromClient handles nil
-// sessions gracefully without panicking.
-func TestRootsFromClientNilSession(t *testing.T) {
-	paths := rootsFromClient(context.Background(), nil)
-	assert.Nil(t, paths)
-}
-
-func TestFileURIToPath(t *testing.T) {
-	tests := []struct {
-		name    string
-		raw     string
-		want    string
-		wantErr bool
-	}{
-		{
-			name: "posix path",
-			raw:  "file:///tmp/project",
-			want: "/tmp/project",
-		},
-		{
-			name: "percent decoded",
-			raw:  "file:///tmp/My%20Project",
-			want: "/tmp/My Project",
-		},
-		{
-			name:    "non-file scheme rejected",
-			raw:     "https://example.com",
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := fileURIToPath(tt.raw)
-			if tt.wantErr {
-				require.Error(t, err)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
 func TestClampWindow(t *testing.T) {
 	tests := []struct {
 		name string
@@ -153,27 +111,47 @@ func TestClampLimit(t *testing.T) {
 	}
 }
 
-// TestConfirmDestructiveNilSession verifies that a nil session returns an error
-// (fail-closed) rather than silently declining with a misleading return value.
-func TestConfirmDestructiveNilSession(t *testing.T) {
-	confirmed, err := confirmDestructive(context.Background(), nil, false, "delete this?")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no MCP session")
-	assert.False(t, confirmed)
+func TestRequireExplicitConfirmation(t *testing.T) {
+	assert.Nil(t, requireExplicitConfirmation(true, "delete"))
+	res := requireExplicitConfirmation(false, "delete")
+	require.NotNil(t, res)
+	assert.True(t, res.IsError)
+	assert.Contains(t, toolResultText(res), "confirm=true")
 }
 
-// TestConfirmDestructiveInBand verifies that an in-band confirm proceeds
-// without a session, i.e. without ever attempting elicitation.
-func TestConfirmDestructiveInBand(t *testing.T) {
-	confirmed, err := confirmDestructive(context.Background(), nil, true, "delete this?")
-	require.NoError(t, err)
-	assert.True(t, confirmed)
-}
-
-// TestConfirmDestructiveNilRequest verifies that a nil request also fails closed.
-func TestConfirmDestructiveNilRequest(t *testing.T) {
-	confirmed, err := confirmDestructive(context.Background(), &mcp.CallToolRequest{}, false, "delete this?")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no MCP session")
-	assert.False(t, confirmed)
+func TestEveryToolHandlerRegisters(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
+	cache := NewChatsCache(nil)
+	handlers := []Handler{
+		NewMeGetHandler(nil),
+		NewChatsGetHandler(cache),
+		NewChatsSearchHandler(nil, cache),
+		NewChatInfoGetHandler(nil),
+		NewMessagesGetHandler(nil),
+		NewMessagesSearchHandler(nil),
+		NewMessagesSearchGlobalHandler(nil),
+		NewMessageContextGetHandler(nil),
+		NewGetRepliesHandler(nil),
+		NewGetForumTopicsHandler(nil),
+		NewUsernameResolveHandler(nil),
+		NewMessageLinkResolveHandler(nil),
+		NewChatSummarizeHandler(nil, summarize.Config{}),
+		NewMediaGetHandler(nil, 1),
+		NewGetFoldersHandler(nil),
+		NewMessageBackupHandler(nil, nil, []string{t.TempDir()}),
+		NewMessageSendHandler(nil),
+		NewMessageReadHandler(nil),
+		NewMessageEditHandler(nil),
+		NewMessageDeleteHandler(nil),
+		NewMessageForwardHandler(nil),
+		NewSetReactionHandler(nil),
+		NewJoinChatHandler(nil),
+		NewLeaveChatHandler(nil),
+		NewChatMuteHandler(nil),
+		NewCreateFolderHandler(nil),
+		NewDeleteFolderHandler(nil),
+		NewAddChatsToFolderHandler(nil),
+		NewRemoveChatsFromFolderHandler(nil),
+	}
+	RegisterTools(server, handlers)
 }

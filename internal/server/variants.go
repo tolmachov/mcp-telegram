@@ -17,9 +17,11 @@ import (
 // Server variant IDs (SEP-2053). full is the default/highest-priority variant,
 // so clients that don't understand variants transparently get it.
 const (
-	variantFull     = "full"
-	variantCompact  = "compact"
-	variantResearch = "research"
+	variantFull    = "full"
+	variantCompact = "compact"
+	// VariantResearch is shared with startup code so the read-only surface can
+	// suppress filesystem initialization as well as filesystem tools.
+	VariantResearch = "research"
 )
 
 // JSON-RPC method names the middlewares key off. The SDK's own constants are
@@ -83,8 +85,8 @@ var variantDefs = []variantDef{
 	},
 	{
 		meta: variants.ServerVariant{
-			ID:          variantResearch,
-			Description: "Telegram read-only research subset: search, fetch, summarize, and export to a local file — no sending, editing, or admin. For read-heavy context-loading agents.",
+			ID:          VariantResearch,
+			Description: "Telegram research subset with no Telegram or filesystem mutations. Summarization may send selected message text to the configured external LLM provider.",
 			Hints:       map[string]string{variants.HintUseCase: "autonomous-agent", variants.HintContextSize: "compact"},
 			Status:      variants.Experimental,
 		},

@@ -14,10 +14,10 @@ import (
 
 // Environment variable name constants.
 const (
-	EnvTelegramAPIID   = "TELEGRAM_API_ID"
-	EnvTelegramAPIHash = "TELEGRAM_API_HASH"
-	EnvAnthropicAPIKey = "ANTHROPIC_API_KEY" //nolint:gosec // env var name, not a credential
-	EnvGeminiAPIKey    = "GEMINI_API_KEY"    //nolint:gosec // env var name, not a credential
+	EnvTelegramAPIID   = "MCP_TELEGRAM_API_ID"
+	EnvTelegramAPIHash = "MCP_TELEGRAM_API_HASH"
+	EnvAnthropicAPIKey = "MCP_SUMMARIZE_ANTHROPIC_API_KEY" //nolint:gosec // env var name, not a credential
+	EnvGeminiAPIKey    = "MCP_SUMMARIZE_GEMINI_API_KEY"    //nolint:gosec // env var name, not a credential
 )
 
 // Flag name constants.
@@ -41,19 +41,13 @@ const (
 	HTTPAddr             = "http-addr"
 	LogFormat            = "log-format"
 	LogLevel             = "log-level"
-	Auth                 = "auth"
 	AuthIssuerURL        = "auth-issuer-url"
 	AuthAllowedUsers     = "auth-allowed-users"
 	AuthTokenKey         = "auth-token-key" //nolint:gosec // flag name, not a credential
 	AuthAllowedRedirects = "auth-allowed-redirects"
 	AuthSessionBucket    = "auth-session-bucket"
 	AuthSessionDir       = "auth-session-dir"
-)
-
-// Auth mode values for --auth.
-const (
-	AuthModeNone     = "none"
-	AuthModeTelegram = "telegram"
+	AuthTrustedProxyHops = "auth-trusted-proxy-hops"
 )
 
 // DefaultPinnedRefreshSeconds is the default polling interval for the
@@ -98,7 +92,7 @@ func AllowedPathsFlag() *cli.StringSliceFlag {
 	return &cli.StringSliceFlag{
 		Name:    AllowedPaths,
 		Usage:   "Allowed directories for file operations (defaults to the OS backup directory when unset)",
-		Sources: cli.EnvVars("TELEGRAM_ALLOWED_PATHS"),
+		Sources: cli.EnvVars("MCP_TELEGRAM_ALLOWED_PATHS"),
 	}
 }
 
@@ -116,7 +110,7 @@ func SummarizeProviderFlag() *cli.StringFlag {
 		Name:    SummarizeProvider,
 		Value:   string(summarize.ProviderSampling),
 		Usage:   "Provider for summarization: 'sampling', 'ollama', 'gemini', or 'anthropic'",
-		Sources: cli.EnvVars("SUMMARIZE_PROVIDER"),
+		Sources: cli.EnvVars("MCP_SUMMARIZE_PROVIDER"),
 		Action: func(_ context.Context, _ *cli.Command, value string) error {
 			return summarize.ValidateProviderName(value)
 		},
@@ -127,7 +121,7 @@ func SummarizeModelFlag() *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:    SummarizeModel,
 		Usage:   "Model for summarization (provider-specific)",
-		Sources: cli.EnvVars("SUMMARIZE_MODEL"),
+		Sources: cli.EnvVars("MCP_SUMMARIZE_MODEL"),
 	}
 }
 
@@ -136,7 +130,7 @@ func OllamaURLFlag() *cli.StringFlag {
 		Name:    OllamaURL,
 		Value:   "http://localhost:11434",
 		Usage:   "Ollama API URL (used when summarize-provider is 'ollama')",
-		Sources: cli.EnvVars("OLLAMA_URL"),
+		Sources: cli.EnvVars("MCP_SUMMARIZE_OLLAMA_URL"),
 	}
 }
 
@@ -161,7 +155,7 @@ func SummarizeBatchTokensFlag() *cli.IntFlag {
 		Name:    SummarizeBatchTokens,
 		Value:   summarize.DefaultBatchTokens,
 		Usage:   "Approximate number of tokens per batch for summarization",
-		Sources: cli.EnvVars("SUMMARIZE_BATCH_TOKENS"),
+		Sources: cli.EnvVars("MCP_SUMMARIZE_BATCH_TOKENS"),
 	}
 }
 
@@ -170,7 +164,7 @@ func MediaMaxBytesFlag() *cli.IntFlag {
 		Name:    MediaMaxBytes,
 		Value:   DefaultMediaMaxBytes,
 		Usage:   "Maximum bytes that GetMedia will download in a single call (cap to avoid OOM on huge attachments)",
-		Sources: cli.EnvVars("TELEGRAM_MEDIA_MAX_BYTES"),
+		Sources: cli.EnvVars("MCP_TELEGRAM_MEDIA_MAX_BYTES"),
 	}
 }
 
@@ -179,7 +173,7 @@ func TGRateLimitRPSFlag() *cli.IntFlag {
 		Name:    TGRateLimitRPS,
 		Value:   0, // 0 → use messages.DefaultRateLimitRPS at provider construction
 		Usage:   "Requests-per-second ceiling for history-fetching calls to Telegram. 0 uses the safe default. Raise with care: exceeding Telegram's FLOOD_WAIT thresholds will pause all tools.",
-		Sources: cli.EnvVars("TELEGRAM_RATE_LIMIT_RPS"),
+		Sources: cli.EnvVars("MCP_TELEGRAM_RATE_LIMIT_RPS"),
 	}
 }
 
@@ -188,7 +182,7 @@ func PinnedRefreshSecsFlag() *cli.IntFlag {
 		Name:    PinnedRefreshSecs,
 		Value:   DefaultPinnedRefreshSeconds,
 		Usage:   "Polling interval (seconds) for the pinned-chat resource watcher. 0 disables the watcher entirely.",
-		Sources: cli.EnvVars("TELEGRAM_PINNED_REFRESH_SECONDS"),
+		Sources: cli.EnvVars("MCP_TELEGRAM_PINNED_REFRESH_SECONDS"),
 	}
 }
 
@@ -199,7 +193,7 @@ func FloodWaitMaxSecsFlag() *cli.IntFlag {
 		Name:    FloodWaitMaxSecs,
 		Value:   int(tgclient.DefaultFloodWaitMaxWait / time.Second),
 		Usage:   "Maximum seconds to wait out a Telegram FLOOD_WAIT before failing fast with a retry-after hint. Keep it below your MCP client's tool-call timeout (Claude Desktop cancels at ~240s) — waiting longer just makes the client time out instead. Raise only for headless/automation runs with no such timeout.",
-		Sources: cli.EnvVars("TELEGRAM_FLOOD_WAIT_MAX_SECONDS"),
+		Sources: cli.EnvVars("MCP_TELEGRAM_FLOOD_WAIT_MAX_SECONDS"),
 	}
 }
 
@@ -219,43 +213,25 @@ func TransportFlag() *cli.StringFlag {
 func HTTPAddrFlag() *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:    HTTPAddr,
-		Value:   ":8080",
+		Value:   "127.0.0.1:8080",
 		Usage:   "Listen address for the streamable HTTP transport (used with --transport http)",
 		Sources: cli.EnvVars("MCP_HTTP_ADDR"),
-	}
-}
-
-// AuthFlag selects the HTTP authorization mode. 'none' serves MCP without
-// authentication (put a trusted proxy in front); 'telegram' enables the
-// embedded OAuth 2.1 server with per-user Telegram QR login.
-func AuthFlag() *cli.StringFlag {
-	return &cli.StringFlag{
-		Name:    Auth,
-		Value:   AuthModeNone,
-		Usage:   "HTTP authorization mode: 'none' or 'telegram' (embedded OAuth + per-user Telegram QR login; requires --transport http)",
-		Sources: cli.EnvVars("MCP_AUTH"),
-		Action: func(_ context.Context, _ *cli.Command, value string) error {
-			if value != AuthModeNone && value != AuthModeTelegram {
-				return fmt.Errorf("--%s must be %q or %q, got %q", Auth, AuthModeNone, AuthModeTelegram, value)
-			}
-			return nil
-		},
 	}
 }
 
 func AuthIssuerURLFlag() *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:    AuthIssuerURL,
-		Usage:   "Public base URL of this server (OAuth issuer), e.g. https://mcp.example.com. Required with --auth telegram.",
-		Sources: cli.EnvVars("AUTH_ISSUER_URL"),
+		Usage:   "Public base URL of this server (OAuth issuer). Required for the HTTP transport.",
+		Sources: cli.EnvVars("MCP_AUTH_ISSUER_URL"),
 	}
 }
 
 func AuthAllowedUsersFlag() *cli.StringSliceFlag {
 	return &cli.StringSliceFlag{
 		Name:    AuthAllowedUsers,
-		Usage:   "Telegram user ids allowed to log in (comma-separated), or '*' alone to allow ANY account (only as private as the URL). '*' cannot be combined with specific ids. Required with --auth telegram.",
-		Sources: cli.EnvVars("AUTH_ALLOWED_USERS"),
+		Usage:   "Telegram user ids allowed to log in (comma-separated), or '*' alone to allow any account. Required for HTTP.",
+		Sources: cli.EnvVars("MCP_AUTH_ALLOWED_USERS"),
 		// Validate the wildcard/ids rule at parse time so a bad value fails
 		// fast with a clear message, using the same parser server startup does.
 		Action: func(_ context.Context, _ *cli.Command, value []string) error {
@@ -270,8 +246,8 @@ func AuthAllowedUsersFlag() *cli.StringSliceFlag {
 func AuthTokenKeyFlag() *cli.StringSliceFlag {
 	return &cli.StringSliceFlag{
 		Name:    AuthTokenKey,
-		Usage:   "Base64-encoded 32-byte master key(s) for sealing tokens and encrypting sessions (comma-separated; first seals, all open — enables rotation). Required with --auth telegram.",
-		Sources: cli.EnvVars("AUTH_TOKEN_KEY"),
+		Usage:   "Base64-encoded 32-byte master keys for tokens and session encryption. Required for HTTP.",
+		Sources: cli.EnvVars("MCP_AUTH_TOKEN_KEYS"),
 	}
 }
 
@@ -279,23 +255,37 @@ func AuthAllowedRedirectsFlag() *cli.StringSliceFlag {
 	return &cli.StringSliceFlag{
 		Name:    AuthAllowedRedirects,
 		Usage:   "Extra exact-match HTTPS redirect URIs allowed for OAuth clients (loopback URIs and the claude.ai/claude.com callbacks are always allowed)",
-		Sources: cli.EnvVars("AUTH_ALLOWED_REDIRECTS"),
+		Sources: cli.EnvVars("MCP_AUTH_ALLOWED_REDIRECTS"),
 	}
 }
 
 func AuthSessionBucketFlag() *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:    AuthSessionBucket,
-		Usage:   "GCS bucket for per-user Telegram sessions (exactly one of --auth-session-bucket / --auth-session-dir with --auth telegram)",
-		Sources: cli.EnvVars("AUTH_SESSION_BUCKET"),
+		Usage:   "GCS bucket for per-user Telegram sessions (exactly one HTTP session backend is required)",
+		Sources: cli.EnvVars("MCP_AUTH_SESSION_BUCKET"),
 	}
 }
 
 func AuthSessionDirFlag() *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:    AuthSessionDir,
-		Usage:   "Local directory for per-user Telegram sessions (exactly one of --auth-session-bucket / --auth-session-dir with --auth telegram)",
-		Sources: cli.EnvVars("AUTH_SESSION_DIR"),
+		Usage:   "Local directory for per-user Telegram sessions (exactly one HTTP session backend is required)",
+		Sources: cli.EnvVars("MCP_AUTH_SESSION_DIR"),
+	}
+}
+
+func AuthTrustedProxyHopsFlag() *cli.IntFlag {
+	return &cli.IntFlag{
+		Name:    AuthTrustedProxyHops,
+		Usage:   "Number of trusted reverse-proxy hops. Zero ignores forwarding headers.",
+		Sources: cli.EnvVars("MCP_AUTH_TRUSTED_PROXY_HOPS"),
+		Action: func(_ context.Context, _ *cli.Command, value int) error {
+			if value < 0 || value > 16 {
+				return fmt.Errorf("--%s must be between 0 and 16", AuthTrustedProxyHops)
+			}
+			return nil
+		},
 	}
 }
 
@@ -329,6 +319,6 @@ func VariantFlag() *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:    Variant,
 		Usage:   "Expose only one server variant: 'full' (all tools), 'compact' (all tools, short descriptions), or 'research' (read-only subset). Empty exposes all three and lets the client choose.",
-		Sources: cli.EnvVars("TELEGRAM_VARIANT"),
+		Sources: cli.EnvVars("MCP_VARIANT"),
 	}
 }

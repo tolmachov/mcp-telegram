@@ -72,6 +72,7 @@ type FetchResult struct {
 	Count    int              `json:"count"`
 	HasMore  bool             `json:"has_more"`
 	NextID   int              `json:"next_id,omitempty"`
+	RawCount int              `json:"-"` // Telegram objects consumed, including service/empty messages.
 }
 
 // FetchOptions configures message fetching.
@@ -84,7 +85,7 @@ type FetchOptions struct {
 	// When non-zero it is passed to Telegram as the native offset_date
 	// (strictly-less-than) and overrides MaxDate for that batch.
 	OffsetDate time.Time
-	MinDate    time.Time // Filter: only messages after this date
+	MinDate    time.Time // Inclusive lower bound.
 	// MaxDate is the exclusive upper bound for Telegram's offset_date
 	// (strictly-less-than). Every tool (GetMessages / SearchMessages /
 	// BackupMessages) treats the upper bound as exclusive, so a caller that

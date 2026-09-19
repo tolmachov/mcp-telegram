@@ -56,12 +56,12 @@ func TestSanitizeFilename(t *testing.T) {
 		{
 			name:     "long cyrillic name preserved as runes",
 			input:    strings.Repeat("ш", 120),
-			expected: strings.Repeat("ш", maxFilenameLength),
+			expected: strings.Repeat("ш", maxFilenameBytes/len("ш")),
 		},
 		{
 			name:     "long ascii name truncated",
-			input:    strings.Repeat("a", 120),
-			expected: strings.Repeat("a", maxFilenameLength),
+			input:    strings.Repeat("a", maxFilenameBytes+40),
+			expected: strings.Repeat("a", maxFilenameBytes),
 		},
 		{
 			name:     "emoji name",
@@ -305,29 +305,9 @@ func TestParseDateTimezones(t *testing.T) {
 }
 
 func TestDefaultBackupDir(t *testing.T) {
-	// Happy path: returns a non-empty absolute path rooted in the home directory.
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
 	dir, err := DefaultBackupDir()
-	if err != nil {
-		// os.UserHomeDir can fail in restricted environments (containers with no
-		// HOME and no passwd entry). Skip rather than fail so CI stays green.
-		t.Skipf("DefaultBackupDir error (no HOME?): %v", err)
-	}
-	assert.NotEmpty(t, dir)
-	assert.True(t, filepath.IsAbs(dir), "expected absolute path")
-	assert.Contains(t, dir, "mcp-telegram")
-
-	// Platform-specific suffix check.
-	switch runtime.GOOS {
-	case "darwin":
-		assert.Contains(t, dir, filepath.Join("Library", "Application Support"))
-	case "windows":
-		// Either APPDATA or HomeDir\AppData\Roaming should appear.
-	default:
-		// Linux: either XDG_DATA_HOME or ~/.local/share
-		if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-			assert.True(t, strings.HasPrefix(dir, xdg), "expected path under %q, got %q", xdg, dir)
-		} else {
-			assert.Contains(t, dir, filepath.Join(".local", "share"))
-		}
-	}
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(stateHome, "mcp-telegram", "backups"), dir)
 }

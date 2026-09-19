@@ -4,8 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-
-	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
 )
 
 // sessionIDLen is the byte length of a raw session id before hex encoding. 16
@@ -43,13 +41,4 @@ func newSessionCreds() (sid string, key []byte, err error) {
 		return "", nil, fmt.Errorf("generating session key: %w", err)
 	}
 	return sid, key, nil
-}
-
-// validSessionID reports whether s is a well-formed session id. It is the trust
-// boundary for sids that arrive inside a token blob (revocation, refresh):
-// server-minted sids always pass, and a malformed value is rejected before it
-// can reach the storage layer as an object-name / path suffix. Delegates to
-// sessionstore.ValidSID so mint and check share one definition.
-func validSessionID(s string) bool {
-	return sessionstore.ValidSID(s)
 }

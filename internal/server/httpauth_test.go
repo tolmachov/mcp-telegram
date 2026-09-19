@@ -94,29 +94,20 @@ func TestRunHTTPWithAuthWiring(t *testing.T) {
 		t.Errorf("WWW-Authenticate = %q, want it to point at resource metadata", h)
 	}
 
-	// CORS-bypass wiring: OAuth endpoints must accept cross-origin POSTs (or
-	// browser/Electron token exchange breaks with 403), while /login/password
-	// must NOT be bypassed (or 2FA submission becomes CSRF-able). We assert on
-	// the status code being anything other than 403 for the bypassed path and
-	// exactly 403 for the protected one.
-	crossSitePOST := func(path string) int {
-		r, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, strings.NewReader("{}"))
-		if err != nil {
-			t.Fatalf("building request: %v", err)
-		}
-		r.Header.Set("Sec-Fetch-Site", "cross-site")
-		resp, err := http.DefaultClient.Do(r)
-		if err != nil {
-			t.Fatalf("cross-site POST %s: %v", path, err)
-		}
-		_ = resp.Body.Close()
-		return resp.StatusCode
+	// Cross-origin protection is scoped to the MCP endpoint. OAuth endpoints
+	// remain public protocol endpoints and do not carry a custom CORS shim.
+	crossSite, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("building cross-site request: %v", err)
 	}
-	if code := crossSitePOST("/token"); code == http.StatusForbidden {
-		t.Error("/token is cross-origin blocked; token exchange from browser clients would break")
+	crossSite.Header.Set("Sec-Fetch-Site", "cross-site")
+	resp, err = http.DefaultClient.Do(crossSite)
+	if err != nil {
+		t.Fatalf("cross-site MCP request: %v", err)
 	}
-	if code := crossSitePOST("/login/password"); code != http.StatusForbidden {
-		t.Errorf("/login/password cross-site status = %d, want 403 (must not be CORS-bypassed)", code)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("cross-site MCP status = %d, want 403", resp.StatusCode)
 	}
 
 	cancel()

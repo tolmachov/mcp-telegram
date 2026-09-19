@@ -22,7 +22,6 @@ const (
 	statusActionRequired = "action_required"
 	statusLeft           = "left"
 	statusNotMember      = "not_member"
-	statusCancelled      = "cancelled"
 )
 
 // chat-reference kinds returned by classifyChatRef.
@@ -74,12 +73,12 @@ type JoinChatResult struct {
 // LeaveChatInput is the input for the LeaveChat tool.
 type LeaveChatInput struct {
 	Chat    string `json:"chat" jsonschema:"Public @username or numeric chat ID of a chat you are currently a member of"`
-	Confirm bool   `json:"confirm,omitempty" jsonschema:"Set to true to proceed with leaving. Leaving is destructive (rejoining a private chat needs a fresh invite link), so only set this after the user has confirmed. When false/omitted, the host may present its own confirmation prompt, and in non-interactive clients the call is cancelled without leaving."`
+	Confirm bool   `json:"confirm" jsonschema:"Must be true after the user explicitly confirms leaving the chat"`
 }
 
 // LeaveChatResult is the typed output of LeaveChat.
 type LeaveChatResult struct {
-	Status string `json:"status"` // "left" | "not_member" | "cancelled"
+	Status string `json:"status"` // "left" | "not_member"
 	Chat   string `json:"chat"`
 	ChatID int64  `json:"chat_id,omitempty"`
 	Kind   string `json:"kind,omitempty"` // "channel" | "chat" (supergroups report as "channel")
@@ -98,7 +97,7 @@ func (h *JoinChatHandler) Register(s *mcp.Server) {
 func (h *LeaveChatHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "LeaveChat",
-		Description: "Leave a Telegram channel, group, or supergroup you are a member of. Accepts a public @username or a numeric chat ID. This removes the chat from your dialog list; rejoining a private chat afterwards requires a fresh invite link, so the host may ask you to confirm. You cannot leave a channel you own.",
+		Description: "Leave a Telegram channel, group, or supergroup you are a member of. Accepts a public @username or a numeric chat ID. This removes the chat from your dialog list; rejoining a private chat afterwards requires a fresh invite link. The call is rejected unless confirm=true. You cannot leave a channel you own.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptrTrue(), OpenWorldHint: ptrTrue()},
 	}, h.handle)
 }
@@ -205,29 +204,20 @@ func (h *LeaveChatHandler) handle(ctx context.Context, req *mcp.CallToolRequest,
 	if chat == "" {
 		return errResult("chat is required: pass a public @username or a numeric chat ID of a chat you're a member of."), nil, nil
 	}
+	if errRes := requireExplicitConfirmation(in.Confirm, "leave the chat"); errRes != nil {
+		return errRes, nil, nil
+	}
 
 	peer, errRes := h.resolvePeer(ctx, chat)
 	if errRes != nil {
 		return errRes, nil, nil
 	}
 
-	// Reject peers that can't be left before prompting, so the confirmation
-	// dialog only appears for actionable requests (mirrors message_delete.go,
-	// which resolves first and confirms last).
+	// Reject peers that cannot be left before issuing the mutation.
 	channelPeer, isChannel := peer.(*tg.InputPeerChannel)
 	chatPeer, isChat := peer.(*tg.InputPeerChat)
 	if !isChannel && !isChat {
 		return errResult(fmt.Sprintf("%q is a private (one-to-one) chat, not a group or channel — there's nothing to leave. Use DeleteMessages or your client to clear the conversation instead.", chat)), nil, nil
-	}
-
-	confirmed, err := confirmDestructive(ctx, req, in.Confirm, fmt.Sprintf(
-		"Leave chat %q? You'll lose access; rejoining a private chat requires a fresh invite link.", chat,
-	))
-	if err != nil {
-		return errResult(fmt.Sprintf("confirmation failed: %v", err)), nil, nil
-	}
-	if !confirmed {
-		return nil, &LeaveChatResult{Status: statusCancelled, Chat: chat}, nil
 	}
 
 	if isChannel {

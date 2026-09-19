@@ -30,9 +30,9 @@ func runBuildAuthOptions(t *testing.T, args ...string) (*authsrv.Config, session
 	cmd := &cli.Command{
 		Name: "test",
 		Flags: []cli.Flag{
-			flags.AuthFlag(), flags.AuthIssuerURLFlag(), flags.AuthAllowedUsersFlag(),
+			flags.AuthIssuerURLFlag(), flags.AuthAllowedUsersFlag(),
 			flags.AuthTokenKeyFlag(), flags.AuthAllowedRedirectsFlag(),
-			flags.AuthSessionBucketFlag(), flags.AuthSessionDirFlag(),
+			flags.AuthSessionBucketFlag(), flags.AuthSessionDirFlag(), flags.AuthTrustedProxyHopsFlag(),
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			gotCfg, gotStore, gotErr = buildAuthOptions(ctx, cmd)
@@ -57,13 +57,6 @@ func testKey(t *testing.T) string {
 	return base64.StdEncoding.EncodeToString(raw)
 }
 
-func TestBuildAuthOptionsNoneReturnsNil(t *testing.T) {
-	cfg, store, err := runBuildAuthOptions(t, "--auth", "none")
-	if err != nil || cfg != nil || store != nil {
-		t.Errorf("--auth none = (%v, %v, %v), want (nil, nil, nil)", cfg, store, err)
-	}
-}
-
 // TestBuildAuthOptionsEncryptsSessions is the load-bearing wiring check: it
 // proves production actually wraps the backend in the AEAD layer. If a
 // refactor returned the raw backend, sessions would hit disk in plaintext and
@@ -72,7 +65,6 @@ func TestBuildAuthOptionsEncryptsSessions(t *testing.T) {
 	dir := t.TempDir()
 	key := testKey(t)
 	cfg, store, err := runBuildAuthOptions(t,
-		"--auth", "telegram",
 		"--auth-issuer-url", "https://mcp.example.com",
 		"--auth-allowed-users", "123456789",
 		"--auth-token-key", key,
@@ -82,7 +74,7 @@ func TestBuildAuthOptionsEncryptsSessions(t *testing.T) {
 		t.Fatalf("buildAuthOptions: %v", err)
 	}
 	if cfg == nil || store == nil {
-		t.Fatal("expected non-nil config and store for --auth telegram")
+		t.Fatal("expected non-nil HTTP auth config and store")
 	}
 	if want := (tgid.UserID(123456789)); cfg.Allow.IsWildcard() || len(cfg.Allow.UserIDs()) != 1 || cfg.Allow.UserIDs()[0] != want {
 		t.Errorf("Allow = %+v, want single user [%v]", cfg.Allow, want)
@@ -96,7 +88,7 @@ func TestBuildAuthOptionsEncryptsSessions(t *testing.T) {
 	if err := store.Session(user, sid, sessionKey).StoreSession(t.Context(), plaintext); err != nil {
 		t.Fatalf("StoreSession: %v", err)
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, user.String()+"."+sid+".bin")) //nolint:gosec // path built from a test-controlled temp dir and numeric id
+	raw, err := os.ReadFile(filepath.Join(dir, "sessions-v3", user.String()+"."+sid+".bin")) //nolint:gosec // path built from a test-controlled temp dir and numeric id
 	if err != nil {
 		t.Fatalf("reading session file: %v", err)
 	}
@@ -112,7 +104,6 @@ func TestBuildAuthOptionsEncryptsSessions(t *testing.T) {
 
 func TestBuildAuthOptionsWildcard(t *testing.T) {
 	cfg, store, err := runBuildAuthOptions(t,
-		"--auth", "telegram",
 		"--auth-issuer-url", "https://mcp.example.com",
 		"--auth-allowed-users", "*",
 		"--auth-token-key", testKey(t),
@@ -134,7 +125,6 @@ func TestBuildAuthOptionsWildcard(t *testing.T) {
 
 func TestBuildAuthOptionsValidation(t *testing.T) {
 	baseArgs := []string{
-		"--auth", "telegram",
 		"--auth-issuer-url", "https://mcp.example.com",
 		"--auth-allowed-users", "123",
 		"--auth-token-key", testKey(t),
@@ -145,7 +135,7 @@ func TestBuildAuthOptionsValidation(t *testing.T) {
 
 	t.Run("bad user id", func(t *testing.T) {
 		args := []string{
-			"--auth", "telegram", "--auth-issuer-url", "https://mcp.example.com",
+			"--auth-issuer-url", "https://mcp.example.com",
 			"--auth-allowed-users", "notanumber", "--auth-token-key", testKey(t),
 			"--auth-session-dir", t.TempDir(),
 		}
@@ -156,7 +146,7 @@ func TestBuildAuthOptionsValidation(t *testing.T) {
 
 	t.Run("non-positive user id", func(t *testing.T) {
 		args := []string{
-			"--auth", "telegram", "--auth-issuer-url", "https://mcp.example.com",
+			"--auth-issuer-url", "https://mcp.example.com",
 			"--auth-allowed-users", "0", "--auth-token-key", testKey(t),
 			"--auth-session-dir", t.TempDir(),
 		}
@@ -167,7 +157,7 @@ func TestBuildAuthOptionsValidation(t *testing.T) {
 
 	t.Run("wildcard mixed with specific id rejected", func(t *testing.T) {
 		args := []string{
-			"--auth", "telegram", "--auth-issuer-url", "https://mcp.example.com",
+			"--auth-issuer-url", "https://mcp.example.com",
 			"--auth-allowed-users", "*,123", "--auth-token-key", testKey(t),
 			"--auth-session-dir", t.TempDir(),
 		}
@@ -182,7 +172,7 @@ func TestBuildAuthOptionsValidation(t *testing.T) {
 
 	t.Run("whitespace user id trimmed", func(t *testing.T) {
 		args := []string{
-			"--auth", "telegram", "--auth-issuer-url", "https://mcp.example.com",
+			"--auth-issuer-url", "https://mcp.example.com",
 			"--auth-allowed-users", "  123  ", "--auth-token-key", testKey(t),
 			"--auth-session-dir", t.TempDir(),
 		}
@@ -201,13 +191,13 @@ func TestBuildAuthOptionsValidation(t *testing.T) {
 
 	t.Run("neither bucket nor dir", func(t *testing.T) {
 		if _, _, err := runBuildAuthOptions(t, baseArgs...); err == nil {
-			t.Error("accepted --auth telegram with no session storage")
+			t.Error("accepted HTTP auth with no session storage")
 		}
 	})
 
 	t.Run("invalid issuer surfaced", func(t *testing.T) {
 		args := []string{
-			"--auth", "telegram", "--auth-issuer-url", "http://not-loopback.example.com",
+			"--auth-issuer-url", "http://not-loopback.example.com",
 			"--auth-allowed-users", "123", "--auth-token-key", testKey(t),
 			"--auth-session-dir", t.TempDir(),
 		}

@@ -2,56 +2,100 @@ package tgclient
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
+	"golang.org/x/sync/singleflight"
 )
 
-// PeerCache memoises ResolvePeer results. A resolved InputPeer embeds the
-// access_hash MTProto requires, which is stable for the lifetime of a session —
-// and there is exactly one session per process — so a peer resolved once stays
-// valid until the process exits. Without this, every history fetch or search
-// re-runs up to three live API calls (users.getUsers → channels.getChannels →
-// messages.getChats) to re-resolve a chat the caller touched seconds ago; on a
-// read-heavy workflow that is the main avoidable source of request volume and
-// FLOOD_WAIT risk.
-//
-// A nil *PeerCache is usable and simply resolves without caching, so the zero
-// value and cache-less call sites need no special handling. Safe for concurrent
-// use.
+const (
+	peerCacheMaxEntries = 4096
+	peerCacheTTL        = time.Hour
+)
+
+type peerCacheEntry struct {
+	peer      tg.InputPeerClass
+	expiresAt time.Time
+}
+
+// PeerCache is a bounded, expiring cache. Concurrent cold resolves for the
+// same peer collapse into one Telegram probe.
 type PeerCache struct {
 	mu   sync.RWMutex
-	byID map[int64]tg.InputPeerClass
+	byID map[int64]peerCacheEntry
+	load singleflight.Group
+	now  func() time.Time
 }
 
-// NewPeerCache returns an empty peer cache.
 func NewPeerCache() *PeerCache {
-	return &PeerCache{byID: make(map[int64]tg.InputPeerClass)}
+	return &PeerCache{byID: make(map[int64]peerCacheEntry), now: time.Now}
 }
 
-// Resolve returns the cached peer for id, or resolves it via ResolvePeer and
-// caches the result. Errors are never cached: a transient failure (FLOOD_WAIT)
-// or a not-yet-accessible channel must be retried on the next call, not
-// remembered as a permanent negative.
 func (c *PeerCache) Resolve(ctx context.Context, client *tg.Client, id int64) (tg.InputPeerClass, error) {
-	if c != nil {
+	if c == nil {
+		return ResolvePeer(ctx, client, id)
+	}
+	now := c.now()
+	c.mu.RLock()
+	entry, ok := c.byID[id]
+	c.mu.RUnlock()
+	if ok && now.Before(entry.expiresAt) {
+		return entry.peer, nil
+	}
+
+	value, err, _ := c.load.Do(strconv.FormatInt(id, 10), func() (any, error) {
+		now := c.now()
 		c.mu.RLock()
-		peer, ok := c.byID[id]
+		entry, ok := c.byID[id]
 		c.mu.RUnlock()
-		if ok {
-			return peer, nil
+		if ok && now.Before(entry.expiresAt) {
+			return entry.peer, nil
+		}
+		peer, err := ResolvePeer(ctx, client, id)
+		if err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		c.removeExpiredLocked(now)
+		if len(c.byID) >= peerCacheMaxEntries {
+			for victim := range c.byID {
+				delete(c.byID, victim)
+				break
+			}
+		}
+		c.byID[id] = peerCacheEntry{peer: peer, expiresAt: now.Add(peerCacheTTL)}
+		c.mu.Unlock()
+		return peer, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("resolving cached peer %d: %w", id, err)
+	}
+	return value.(tg.InputPeerClass), nil
+}
+
+func (c *PeerCache) removeExpiredLocked(now time.Time) {
+	for id, entry := range c.byID {
+		if !now.Before(entry.expiresAt) {
+			delete(c.byID, id)
 		}
 	}
+}
 
-	peer, err := ResolvePeer(ctx, client, id)
-	if err != nil {
-		return nil, err
+func (c *PeerCache) Invalidate(id int64) {
+	if c == nil {
+		return
 	}
+	c.mu.Lock()
+	delete(c.byID, id)
+	c.mu.Unlock()
+}
 
-	if c != nil {
-		c.mu.Lock()
-		c.byID[id] = peer
-		c.mu.Unlock()
-	}
-	return peer, nil
+// ShouldRefreshPeer identifies stale-access-hash errors for which a caller may
+// invalidate and perform exactly one fresh resolve/RPC attempt.
+func ShouldRefreshPeer(err error) bool {
+	return tgerr.Is(err, "PEER_ID_INVALID", "CHANNEL_INVALID", "CHAT_ID_INVALID")
 }

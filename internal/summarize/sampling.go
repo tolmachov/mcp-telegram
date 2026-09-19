@@ -34,7 +34,7 @@ var ErrSamplingUnsupported = errors.New("client does not support MCP sampling; c
 // advertise `sampling` during initialize. We check the capability up front and
 // return ErrSamplingUnsupported with actionable guidance if it's missing,
 // rather than letting the call fail with a generic transport error.
-func (p *SamplingProvider) Summarize(ctx context.Context, prompt string) (string, error) {
+func (p *SamplingProvider) Summarize(ctx context.Context, req Request) (string, error) {
 	if p.session == nil {
 		return "", ErrSamplingUnsupported
 	}
@@ -43,11 +43,16 @@ func (p *SamplingProvider) Summarize(ctx context.Context, prompt string) (string
 		return "", ErrSamplingUnsupported
 	}
 
+	content, err := req.userContent()
+	if err != nil {
+		return "", err
+	}
 	result, err := p.session.CreateMessage(ctx, &mcp.CreateMessageParams{
+		SystemPrompt: req.System,
 		Messages: []*mcp.SamplingMessage{
 			{
 				Role:    "user",
-				Content: &mcp.TextContent{Text: prompt},
+				Content: &mcp.TextContent{Text: content},
 			},
 		},
 		MaxTokens: 2000,

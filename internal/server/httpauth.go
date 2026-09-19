@@ -18,14 +18,6 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
-// authCORSBypassPaths are the OAuth endpoints exempted from cross-origin
-// protection: they receive legitimate cross-origin POSTs (Electron and
-// browser-based MCP clients send an Origin header on token exchange). The
-// MCP endpoint stays protected — it is additionally guarded by the bearer
-// token. The /login/* endpoints are NOT exempted: they are called only by
-// our own login page, same-origin.
-var authCORSBypassPaths = []string{"/token", "/register", "/revoke"}
-
 // buildAuthMux assembles the authenticated HTTP surface: the OAuth + login
 // endpoints (unauthenticated by nature) plus the MCP handler behind
 // RequireBearerToken. Extracted from runHTTPWithAuth so tests can drive the
@@ -40,7 +32,7 @@ func buildAuthMux(as *authsrv.AuthServer, issuerURL string, mcpHandler http.Hand
 	requireBearer := auth.RequireBearerToken(as.Verifier(), &auth.RequireBearerTokenOptions{
 		ResourceMetadataURL: issuerURL + authsrv.ProtectedResourceMetadataPath,
 	})
-	mux.Handle("/", requireBearer(mcpHandler))
+	mux.Handle("/", withCrossOriginProtection(requireBearer(mcpHandler)))
 	return mux
 }
 
@@ -60,7 +52,7 @@ func (q qrLoginFlow) Abort()                        { q.flow.Abort() }
 
 func (q qrLoginFlow) State() authsrv.LoginState {
 	switch q.flow.State() {
-	case tgclient.QRPasswordNeeded:
+	case tgclient.QRPasswordNeeded, tgclient.QRPasswordVerifying:
 		return authsrv.LoginPasswordNeeded
 	case tgclient.QRDone:
 		return authsrv.LoginDone
@@ -103,7 +95,7 @@ func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 				// dead session (a token always carries its own object's key).
 				// Surface it loudly and preserve the blob: deleting it would make
 				// a recoverable operator mistake permanent.
-				s.logger.Error("stored session could not be decrypted; check AUTH_TOKEN_KEY / AUTH_ISSUER_URL", "user", user.ID, "session", user.SessionID, "err", err)
+				s.logger.Error("stored session could not be decrypted; check MCP_AUTH_TOKEN_KEYS / MCP_AUTH_ISSUER_URL", "user", user.ID, "session", user.SessionID, "err", err)
 			case errors.Is(err, tgclient.ErrSessionUnauthorized):
 				// The stored session is dead — Telegram refused a session we
 				// decrypted successfully. Drop just this session so its refresh
@@ -138,12 +130,12 @@ func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 		var handler http.Handler
 		var closers multiCloser
 		if asm.variants != nil {
-			handler = variants.NewStreamableHTTPHandler(asm.variants, nil)
+			handler = variants.NewStreamableHTTPHandler(asm.variants, streamableHTTPOptions())
 			vs := asm.variants
 			closers = append(closers, closerFunc(func() error { return vs.Close() }))
 		} else {
 			srv := asm.single
-			handler = mcp.NewStreamableHTTPHandler(func(_ *http.Request) *mcp.Server { return srv }, nil)
+			handler = mcp.NewStreamableHTTPHandler(func(_ *http.Request) *mcp.Server { return srv }, streamableHTTPOptions())
 		}
 
 		// Per-user pinned-chat watcher, torn down with the assembly. The 5s
@@ -194,12 +186,6 @@ func (s *Server) runHTTPWithAuth(ctx context.Context) (retErr error) {
 		}
 	}()
 
-	as, err := authsrv.New(s.authCfg, s.logger, s.sessionStore, s.startLogin)
-	if err != nil {
-		return fmt.Errorf("building auth server: %w", err)
-	}
-	defer as.Close()
-
 	wwwAuthenticate := fmt.Sprintf("Bearer resource_metadata=%q", s.authCfg.IssuerURL+authsrv.ProtectedResourceMetadataPath)
 	pool := newUserPool(ctx, s.userAssemblyBuilder(), wwwAuthenticate, s.logger)
 	defer func() {
@@ -207,12 +193,17 @@ func (s *Server) runHTTPWithAuth(ctx context.Context) (retErr error) {
 			s.logger.Warn("failed to close user pool", "err", closeErr)
 		}
 	}()
-	// Let revocation and legacy upgrade stop a session's live client before its
-	// blob is deleted, so a warm client cannot resurrect the deleted object.
-	as.SetSessionInvalidator(pool.EvictSession)
+	as, err := authsrv.New(s.authCfg, s.logger, s.sessionStore, s.startLogin, pool.EvictSession)
+	if err != nil {
+		return fmt.Errorf("building auth server: %w", err)
+	}
+	defer as.Close()
+	if err := as.Start(ctx); err != nil {
+		return fmt.Errorf("starting auth server: %w", err)
+	}
 	go pool.janitor(ctx)
 
 	s.logger.Info("starting with per-user Telegram authentication", "issuer", s.authCfg.IssuerURL)
 	mux := buildAuthMux(as, s.authCfg.IssuerURL, pool)
-	return s.serveHTTP(ctx, mux, s.httpAddr, authCORSBypassPaths...)
+	return s.serveHTTP(ctx, mux, s.httpAddr)
 }

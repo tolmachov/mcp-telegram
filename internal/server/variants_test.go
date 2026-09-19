@@ -86,7 +86,8 @@ func TestVariantHandlerSplit(t *testing.T) {
 	researchNames := listToolNames(t, newInner(impl, nil, research, nil, false, testLogger()))
 
 	assert.Len(t, fullNames, 29, "full variant exposes every tool")
-	assert.Len(t, researchNames, 16, "research variant exposes the read-only subset")
+	assert.Len(t, researchNames, 15, "research variant excludes local filesystem writes")
+	assert.NotContains(t, researchNames, "BackupMessages")
 
 	// research must be a strict subset of full.
 	for name := range researchNames {
@@ -152,7 +153,7 @@ func TestBuildVariantsServerMetadata(t *testing.T) {
 	fullNames := listToolNames(t, inners[0])
 	researchNames := listToolNames(t, inners[2])
 	assert.Len(t, fullNames, 29)
-	assert.Len(t, researchNames, 16)
+	assert.Len(t, researchNames, 15)
 	for _, name := range []string{"SendMessage", "DeleteMessages", "ForwardMessage", "MarkAsRead", "CreateFolder"} {
 		_, leaked := researchNames[name]
 		assert.Falsef(t, leaked, "mutating tool %q leaked into research via buildVariantsServer", name)
@@ -250,7 +251,7 @@ func TestVariantDefsTableInvariants(t *testing.T) {
 	wantMode := map[string]serveMode{
 		variantFull:     modeFull,
 		variantCompact:  modeCompact,
-		variantResearch: modeResearch,
+		VariantResearch: modeResearch,
 	}
 	for _, d := range variantDefs {
 		assert.Equalf(t, wantMode[d.meta.ID], d.mode, "variant %q has unexpected serveMode", d.meta.ID)
@@ -394,7 +395,7 @@ func TestOverrideVariantSelection(t *testing.T) {
 	}{
 		{variantFull, 29, false},
 		{variantCompact, 29, true},
-		{variantResearch, 16, true},
+		{VariantResearch, 15, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.id, func(t *testing.T) {
@@ -492,12 +493,12 @@ func TestVariantsProxyDispatchCompacts(t *testing.T) {
 
 	fullNames := listToolsThroughProxy(t, vs, variantFull)
 	compactNames := listToolsThroughProxy(t, vs, variantCompact)
-	researchNames := listToolsThroughProxy(t, vs, variantResearch)
+	researchNames := listToolsThroughProxy(t, vs, VariantResearch)
 	defaultNames := listToolsThroughProxy(t, vs, "") // no selection → default variant
 
 	assert.Len(t, fullNames, 29, "full via proxy exposes every tool")
 	assert.Len(t, compactNames, 29, "compact via proxy keeps every tool")
-	assert.Len(t, researchNames, 16, "research via proxy exposes the read-only subset")
+	assert.Len(t, researchNames, 15, "research via proxy excludes local filesystem writes")
 	assert.Len(t, defaultNames, 29, "no selection must fall back to full (priority 0)")
 
 	require.Contains(t, fullNames, "GetChats")

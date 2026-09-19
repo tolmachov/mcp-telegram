@@ -15,16 +15,16 @@ import (
 func TestResolveConfigPathUsesXDGStateHome(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
-	got, err := resolveConfigPath()
+	got, err := configPath()
 	require.NoError(t, err)
-	want := filepath.Join(os.Getenv("XDG_STATE_HOME"), "mcp-telegram", "config.json")
+	want := filepath.Join(os.Getenv("XDG_STATE_HOME"), "mcp-telegram", "config-v2")
 	assert.Equal(t, want, got)
 }
 
 func TestResolveConfigPathRejectsRelativeStateHome(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", "relative/path")
 
-	_, err := resolveConfigPath()
+	_, err := configPath()
 	require.Error(t, err)
 }
 
@@ -35,7 +35,7 @@ func TestResolveConfigPathErrorsWhenMkdirAllFails(t *testing.T) {
 	require.NoError(t, f.Close())
 	t.Setenv("XDG_STATE_HOME", f.Name()) // file, not a dir → MkdirAll fails
 
-	_, err = resolveConfigPath()
+	_, err = configPath()
 	require.Error(t, err)
 	// The state dir is created by the shared xdg.StateDir helper, whose error
 	// names it the "state directory" (it backs both config.json and session.json).
@@ -99,11 +99,11 @@ func TestFileStoreLoadAll(t *testing.T) {
 	assert.Equal(t, map[string]string{"a": "1", "b": "2"}, all)
 }
 
-func TestFileStoreCorruptJSONReturnsError(t *testing.T) {
+func TestFileStoreIgnoresLegacyJSON(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", dir)
 
-	// Write a corrupt JSON file directly to the expected path.
+	// The removed aggregate format is never parsed or migrated.
 	configFile := filepath.Join(dir, "mcp-telegram", "config.json")
 	require.NoError(t, os.MkdirAll(filepath.Dir(configFile), 0o700))
 	require.NoError(t, os.WriteFile(configFile, []byte("not-valid-json{{{"), 0o600))
@@ -111,6 +111,22 @@ func TestFileStoreCorruptJSONReturnsError(t *testing.T) {
 	s, storeErr := NewStore()
 	require.NoError(t, storeErr)
 	_, err := s.Get("any")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "parsing config file")
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestFileStoreIndependentWritesDoNotLoseData(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	first, err := NewStore()
+	require.NoError(t, err)
+	second, err := NewStore()
+	require.NoError(t, err)
+
+	done := make(chan error, 2)
+	go func() { done <- first.Set("first", "one") }()
+	go func() { done <- second.Set("second", "two") }()
+	require.NoError(t, <-done)
+	require.NoError(t, <-done)
+	all, err := first.LoadAll()
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"first": "one", "second": "two"}, all)
 }

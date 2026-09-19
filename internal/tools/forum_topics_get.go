@@ -49,6 +49,7 @@ type getForumTopicsOutput struct {
 	ChatID         int64           `json:"chat_id"`
 	Topics         []forumTopicDTO `json:"topics"`
 	Count          int             `json:"count"`
+	Total          int             `json:"total"`
 	HasMore        bool            `json:"has_more"`
 	NextCursor     string          `json:"next_cursor,omitempty"`
 	PaginationHint string          `json:"pagination_hint,omitempty"`
@@ -68,22 +69,23 @@ func (h *ForumTopicsGetHandler) Register(s *mcp.Server) {
 }
 
 func (h *ForumTopicsGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in GetForumTopicsInput) (*mcp.CallToolResult, *getForumTopicsOutput, error) {
-	if in.ChatID == 0 {
-		return errChatIDRequired(), nil, nil
-	}
-
 	limit := clampLimit(in.Limit, 100, 100)
-
-	var offsetTopic, offsetID, offsetDate int
+	var offsetTopic, offsetID, offsetDate, seen int
 	if in.Cursor != "" {
-		ot, oi, od, err := ParseForumTopicsCursor(in.Cursor)
+		if in.ChatID != 0 || in.Query != "" || in.Limit != 0 {
+			return errResult("cursor is incompatible with chat_id, query, or limit; pass the cursor alone"), nil, nil
+		}
+		cursor, err := ParseForumTopicsCursor(in.Cursor)
 		if err != nil {
 			return errResult(fmt.Sprintf("invalid cursor: %v. Omit cursor to start from the first page.", err)), nil, nil
 		}
-		offsetTopic, offsetID, offsetDate = ot, oi, od
+		in.ChatID, in.Query, limit = cursor.ChatID, cursor.Query, cursor.Limit
+		offsetTopic, offsetID, offsetDate, seen = cursor.OffsetTopic, cursor.OffsetID, cursor.OffsetDate, cursor.Seen
+	} else if in.ChatID == 0 {
+		return errChatIDRequired(), nil, nil
 	}
 
-	result, err := h.provider.FetchForumTopics(ctx, in.ChatID, in.Query, limit, offsetTopic, offsetID, offsetDate)
+	result, err := h.provider.FetchForumTopics(ctx, in.ChatID, in.Query, limit, offsetTopic, offsetID, offsetDate, seen)
 	if err != nil {
 		mcpLog(ctx, req.Session, logLevelWarning, "GetForumTopics", map[string]any{
 			"action":  "provider_fetch_forum_topics_failed",
@@ -97,6 +99,7 @@ func (h *ForumTopicsGetHandler) handle(ctx context.Context, req *mcp.CallToolReq
 		ChatID:  in.ChatID,
 		Topics:  make([]forumTopicDTO, 0, len(result.Topics)),
 		Count:   result.Count,
+		Total:   result.Total,
 		HasMore: result.NextOffset != nil,
 	}
 	for _, t := range result.Topics {
@@ -120,8 +123,8 @@ func (h *ForumTopicsGetHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	}
 
 	if result.NextOffset != nil {
-		out.NextCursor = FormatForumTopicsCursor(result.NextOffset.Topic, result.NextOffset.ID, result.NextOffset.Date)
-		out.PaginationHint = fmt.Sprintf("More topics available. Call GetForumTopics again with cursor=%q to fetch the next page.", out.NextCursor)
+		out.NextCursor = FormatForumTopicsCursor(in.ChatID, in.Query, limit, result.NextOffset.Topic, result.NextOffset.ID, result.NextOffset.Date, result.NextOffset.Seen)
+		out.PaginationHint = "More topics available. Call GetForumTopics again with next_cursor copied verbatim into cursor and omit every other field."
 	}
 
 	return nil, out, nil

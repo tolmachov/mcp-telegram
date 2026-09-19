@@ -110,7 +110,7 @@ func (h *MessageReactionHandler) handle(ctx context.Context, req *mcp.CallToolRe
 	return nil, &SetReactionResult{
 		Status:    status,
 		ChatID:    in.ChatID,
-		MessageID: in.MessageID,
+		MessageID: ref.Format(),
 		Emojis:    emojis,
 	}, nil
 }

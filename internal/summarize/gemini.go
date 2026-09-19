@@ -41,10 +41,12 @@ func NewGeminiProvider(apiKey, model string) *GeminiProvider {
 }
 
 type geminiRequest struct {
-	Contents []geminiContent `json:"contents"`
+	SystemInstruction *geminiContent  `json:"system_instruction"`
+	Contents          []geminiContent `json:"contents"`
 }
 
 type geminiContent struct {
+	Role  string       `json:"role,omitempty"`
 	Parts []geminiPart `json:"parts"`
 }
 
@@ -71,12 +73,18 @@ func (e *geminiError) Error() string {
 }
 
 // Summarize sends a prompt to Gemini and returns the response.
-func (p *GeminiProvider) Summarize(ctx context.Context, prompt string) (string, error) {
+func (p *GeminiProvider) Summarize(ctx context.Context, req Request) (string, error) {
+	content, err := req.userContent()
+	if err != nil {
+		return "", err
+	}
 	reqBody := geminiRequest{
+		SystemInstruction: &geminiContent{Parts: []geminiPart{{Text: req.System}}},
 		Contents: []geminiContent{
 			{
+				Role: "user",
 				Parts: []geminiPart{
-					{Text: prompt},
+					{Text: content},
 				},
 			},
 		},

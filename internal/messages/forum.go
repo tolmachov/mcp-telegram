@@ -36,13 +36,16 @@ type ForumTopicsOffset struct {
 	Topic int
 	ID    int
 	Date  int
+	Seen  int
 }
 
 // ForumTopicsResult is one page of forum topics. NextOffset is non-nil exactly
 // when another page exists; the tool layer packs it into an opaque cursor.
 type ForumTopicsResult struct {
 	Topics     []ForumTopic
-	Count      int                // total topics reported by Telegram
+	Count      int                // rendered topics in this page
+	Total      int                // total raw topics reported by Telegram
+	RawCount   int                // raw topics consumed, including deleted entries
 	NextOffset *ForumTopicsOffset // nil = no more pages
 }
 
@@ -53,14 +56,15 @@ type ForumTopicsResult struct {
 //
 // Telegram only accepts this call for forum-enabled supergroups; for any other
 // peer it returns an error, which is propagated to the caller.
-func (p *Provider) FetchForumTopics(ctx context.Context, chatID int64, query string, limit, offsetTopic, offsetID, offsetDate int) (*ForumTopicsResult, error) {
+func (p *Provider) FetchForumTopics(ctx context.Context, chatID int64, query string, limit, offsetTopic, offsetID, offsetDate, seen int) (*ForumTopicsResult, error) {
+	return withPeerRetry(ctx, p, chatID, nil, func(peer tg.InputPeerClass) (*ForumTopicsResult, error) {
+		return p.fetchForumTopicsWithPeer(ctx, peer, query, limit, offsetTopic, offsetID, offsetDate, seen)
+	})
+}
+
+func (p *Provider) fetchForumTopicsWithPeer(ctx context.Context, peer tg.InputPeerClass, query string, limit, offsetTopic, offsetID, offsetDate, seen int) (*ForumTopicsResult, error) {
 	if limit <= 0 {
 		limit = 100
-	}
-
-	peer, err := p.peers.Resolve(ctx, p.client, chatID)
-	if err != nil {
-		return nil, fmt.Errorf("resolving peer: %w", err)
 	}
 
 	req := &tg.MessagesGetForumTopicsRequest{
@@ -74,21 +78,23 @@ func (p *Provider) FetchForumTopics(ctx context.Context, chatID int64, query str
 		req.SetQ(query)
 	}
 
-	p.limiter.Take()
+	if err := p.limiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("waiting for Telegram rate limit: %w", err)
+	}
 
 	resp, err := p.client.MessagesGetForumTopics(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("getting forum topics: %w", err)
 	}
 
-	return buildForumTopicsResult(resp, limit), nil
+	return buildForumTopicsResult(resp, seen), nil
 }
 
 // buildForumTopicsResult converts a messages.getForumTopics response into a
 // paginated ForumTopicsResult. Split out from FetchForumTopics so the parsing,
 // HasMore computation, and next-offset derivation are testable without a live
 // client (mirroring processHistory).
-func buildForumTopicsResult(resp *tg.MessagesForumTopics, limit int) *ForumTopicsResult {
+func buildForumTopicsResult(resp *tg.MessagesForumTopics, seen int) *ForumTopicsResult {
 	// Index related messages by ID so we can recover each topic's
 	// top-message date for the pagination cursor.
 	msgDates := make(map[int]int, len(resp.Messages))
@@ -99,12 +105,20 @@ func buildForumTopicsResult(resp *tg.MessagesForumTopics, limit int) *ForumTopic
 	}
 
 	result := &ForumTopicsResult{
-		Topics: make([]ForumTopic, 0, len(resp.Topics)),
-		Count:  resp.Count,
+		Topics:   make([]ForumTopic, 0, len(resp.Topics)),
+		Total:    resp.Count,
+		RawCount: len(resp.Topics),
 	}
 
 	var lastTopic *tg.ForumTopic
+	var lastRawTopicID int
 	for _, tc := range resp.Topics {
+		switch raw := tc.(type) {
+		case *tg.ForumTopic:
+			lastRawTopicID = raw.ID
+		case *tg.ForumTopicDeleted:
+			lastRawTopicID = raw.ID
+		}
 		topic, ok := tc.(*tg.ForumTopic)
 		if !ok {
 			// *tg.ForumTopicDeleted carries only an ID — nothing to render.
@@ -127,29 +141,34 @@ func buildForumTopicsResult(resp *tg.MessagesForumTopics, limit int) *ForumTopic
 		result.Topics = append(result.Topics, ft)
 		lastTopic = topic
 	}
+	result.Count = len(result.Topics)
 
-	// More pages remain only when the raw page came back full
-	// (len(resp.Topics) >= limit), the rendered topics still fall short of the
-	// reported total, AND there is a real topic to anchor the next offset on.
-	// The lastTopic != nil guard is load-bearing: a full page consisting only of
-	// ForumTopicDeleted entries has nothing to advance the cursor past, and a
-	// zero offset would restart pagination from the first page forever. In that
-	// (rare) pathological case we stop early rather than loop.
-	if len(resp.Topics) >= limit && len(result.Topics) < result.Count && lastTopic != nil {
+	// More pages remain while the raw topics consumed across all pages (seen
+	// carries the running total from the cursor) fall short of the forum's
+	// reported total. Page fullness is deliberately not a signal: Telegram may
+	// return fewer topics than requested even when more exist. The anchor is
+	// the last raw topic, deleted ones included, so a page consisting only of
+	// ForumTopicDeleted entries still advances instead of restarting from the
+	// first page.
+	consumed := seen + len(resp.Topics)
+	if len(resp.Topics) > 0 && consumed < resp.Count && lastRawTopicID > 0 {
 		offset := &ForumTopicsOffset{
-			Topic: lastTopic.ID,
-			ID:    lastTopic.TopMessage,
+			Topic: lastRawTopicID,
+			Seen:  consumed,
 		}
-		if d, ok := msgDates[lastTopic.TopMessage]; ok {
-			offset.Date = d
-		} else {
-			// The last topic's top message wasn't in resp.Messages (e.g. it was
-			// deleted); fall back to the topic creation date. It can differ from
-			// the message date, so log it — a wrong offset_date can skip or
-			// duplicate topics and would otherwise be invisible.
-			offset.Date = lastTopic.Date
-			slog.Warn("buildForumTopicsResult: top message missing for last topic; using topic date as pagination offset_date (cursor may be approximate)",
-				"topic_id", lastTopic.ID, "top_message", lastTopic.TopMessage)
+		if lastTopic != nil {
+			offset.ID = lastTopic.TopMessage
+			if d, ok := msgDates[lastTopic.TopMessage]; ok {
+				offset.Date = d
+			} else {
+				// The last topic's top message wasn't in resp.Messages (e.g. it was
+				// deleted); fall back to the topic creation date. It can differ from
+				// the message date, so log it — a wrong offset_date can skip or
+				// duplicate topics and would otherwise be invisible.
+				offset.Date = lastTopic.Date
+				slog.Warn("buildForumTopicsResult: top message missing for last topic; using topic date as pagination offset_date (cursor may be approximate)",
+					"topic_id", lastTopic.ID, "top_message", lastTopic.TopMessage)
+			}
 		}
 		result.NextOffset = offset
 	}

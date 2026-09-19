@@ -33,8 +33,7 @@ type ResolveMessageLinkInput struct {
 //
 // ChatID and MessageID are always populated. For forum links, TopicMessageID
 // is the opaque regular-message handle of the topic/thread root, ready to feed
-// into SearchMessages.top_msg_id. TopicID is kept as the raw numeric message
-// ID for backward compatibility and is zero for non-forum links.
+// into SearchMessages.top_msg_id.
 //
 // Public-link only (populated together when resolved via username; omitted for
 // private channel links):
@@ -47,7 +46,6 @@ type ResolveMessageLinkInput struct {
 type ResolveMessageLinkResult struct {
 	ChatID         int64  `json:"chat_id"`
 	MessageID      string `json:"message_id"`
-	TopicID        int    `json:"topic_id,omitempty"`
 	TopicMessageID string `json:"topic_message_id,omitempty"`
 
 	// Public-link only.
@@ -79,7 +77,6 @@ func (h *MessageLinkResolveHandler) handle(ctx context.Context, _ *mcp.CallToolR
 
 	out := &ResolveMessageLinkResult{
 		MessageID: FormatRegularRef(parsed.MessageID),
-		TopicID:   parsed.TopicID,
 	}
 	if parsed.TopicID > 0 {
 		out.TopicMessageID = FormatRegularRef(parsed.TopicID)

@@ -34,6 +34,7 @@ func NewAnthropicProvider(apiKey, model string) *AnthropicProvider {
 type anthropicRequest struct {
 	Model     string             `json:"model"`
 	MaxTokens int                `json:"max_tokens"`
+	System    string             `json:"system"`
 	Messages  []anthropicMessage `json:"messages"`
 }
 
@@ -62,12 +63,17 @@ func (e *anthropicError) Error() string {
 }
 
 // Summarize sends a prompt to Anthropic and returns the response.
-func (p *AnthropicProvider) Summarize(ctx context.Context, prompt string) (string, error) {
+func (p *AnthropicProvider) Summarize(ctx context.Context, req Request) (string, error) {
+	content, err := req.userContent()
+	if err != nil {
+		return "", err
+	}
 	reqBody := anthropicRequest{
 		Model:     p.model,
 		MaxTokens: 4096,
+		System:    req.System,
 		Messages: []anthropicMessage{
-			{Role: "user", Content: prompt},
+			{Role: "user", Content: content},
 		},
 	}
 

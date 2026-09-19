@@ -3,11 +3,11 @@ package tools
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
+	"github.com/tolmachov/mcp-telegram/internal/presentation"
 )
 
 // MessagesGetHandler handles the GetMessages tool.
@@ -22,102 +22,86 @@ func NewMessagesGetHandler(provider *messages.Provider) *MessagesGetHandler {
 
 // GetMessagesInput is the input for the GetMessages tool.
 //
-// OffsetID is an opaque message handle (string) returned by a prior call's
-// NextOffsetID or pagination hint. It must be a regular-message handle
-// ("42"); scheduled handles ("s:...") are rejected because scheduled
-// messages don't paginate.
+// Cursor is the opaque continuation returned by a prior call. For an explicit
+// first-page anchor, BeforeMessageID must be a regular-message handle ("42");
+// scheduled handles ("s:...") are rejected because they do not paginate.
 type GetMessagesInput struct {
 	ChatID           int64  `json:"chat_id" jsonschema:"The chat ID to get messages from"`
 	Limit            int    `json:"limit,omitempty" jsonschema:"Maximum number of regular messages to return (default 50\\, max 100). Does not affect scheduled_messages which are always returned in full."`
-	OffsetID         string `json:"offset_id,omitempty" jsonschema:"Opaque message handle to paginate from (copy next_offset_id from a previous response). Only regular-message handles are accepted."`
+	Cursor           string `json:"cursor,omitempty" jsonschema:"Opaque continuation cursor. On continuation pass only this field; all original filters are embedded in it."`
+	BeforeMessageID  string `json:"before_message_id,omitempty" jsonschema:"For the first page only: start strictly before this regular-message handle. Use cursor for subsequent pages."`
 	FromDate         string `json:"from_date,omitempty" jsonschema:"RFC3339 lower bound (inclusive). Only messages on or after this date are returned. Applied as a post-filter\\, so with from_date the page may contain fewer than limit messages and has_more is forced to false once the window is exhausted."`
 	ToDate           string `json:"to_date,omitempty" jsonschema:"RFC3339 exclusive upper bound (strictly-less-than). Only messages strictly before this timestamp are returned. Wired to Telegram's native offset_date parameter. To include a full day\\, pass midnight of the following day\\, e.g. 2026-04-11T00:00:00Z to include all of 2026-04-10."`
 	UnreadOnly       bool   `json:"unread_only,omitempty" jsonschema:"Only return unread messages"`
 	IncludeScheduled bool   `json:"include_scheduled,omitempty" jsonschema:"Also fetch pending scheduled messages into the separate scheduled_messages field. Default false. Scheduled messages are returned as a full dump (no pagination)."`
 }
 
-// messageDTO is the tool-boundary representation of a message. Differs
-// from internal/messages.Message in that IDs are opaque string handles
-// ("42" for regular, "s:42" for scheduled), so the LLM always works with
-// one consistent ID format across tools.
-type messageDTO struct {
-	ID         string                  `json:"id"`
-	ReplyToID  string                  `json:"reply_to_id,omitempty"`
-	Date       time.Time               `json:"date"`
-	SenderID   int64                   `json:"sender_id,omitempty"`
-	SenderName string                  `json:"sender_name,omitempty"`
-	Text       string                  `json:"text"`
-	Media      *messages.MediaInfo     `json:"media,omitempty"`
-	Entities   []string                `json:"entities,omitempty"`
-	Reactions  []messages.ReactionInfo `json:"reactions,omitempty"`
-	Replies    *messages.RepliesInfo   `json:"replies,omitempty"`
-}
-
 // getMessagesOutput is the response shape for GetMessages. The separate
 // ScheduledMessages field keeps regular-message pagination semantics intact
 // while still letting a single tool call surface the full chat picture.
 type getMessagesOutput struct {
-	ChatID              int64        `json:"chat_id"`
-	Messages            []messageDTO `json:"messages"`
-	ScheduledMessages   []messageDTO `json:"scheduled_messages,omitempty"`
-	Count               int          `json:"count"`
-	HasMore             bool         `json:"has_more"`
-	NextOffsetID        string       `json:"next_offset_id,omitempty"`
-	PaginationHint      string       `json:"pagination_hint,omitempty"`
-	ScheduledFetchError string       `json:"scheduled_fetch_error,omitempty"` // non-empty when include_scheduled fetch failed
+	ChatID              int64                  `json:"chat_id"`
+	Messages            []presentation.Message `json:"messages"`
+	ScheduledMessages   []presentation.Message `json:"scheduled_messages,omitempty"`
+	Count               int                    `json:"count"`
+	HasMore             bool                   `json:"has_more"`
+	NextCursor          string                 `json:"next_cursor,omitempty"`
+	PaginationHint      string                 `json:"pagination_hint,omitempty"`
+	ScheduledFetchError string                 `json:"scheduled_fetch_error,omitempty"` // non-empty when include_scheduled fetch failed
 }
 
 // Register adds the tool to the MCP server.
 func (h *MessagesGetHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "GetMessages",
-		Description: "Get messages from a specific chat. Returns up to `limit` regular messages (default 50, max 100). Supports pagination via `offset_id` (copy `next_offset_id` from a previous response) and date filtering via `from_date` / `to_date` (RFC3339; `to_date` is exclusive — pass midnight of the next day to include a full day, e.g. 2026-04-11T00:00:00Z to include all of 2026-04-10). Note: `limit` is applied before the `from_date` filter, so with `from_date` set you may receive fewer than `limit` results on the final page. Set `include_scheduled=true` to additionally fetch pending scheduled messages in a separate `scheduled_messages` field — these have opaque handles of the form \"s:<id>\" and are not paginated or affected by date filters. For bulk export, use BackupMessages instead.",
+		Description: "Get messages from a specific chat. Returns up to `limit` regular messages (default 50, max 100). Continue with `cursor` alone; it embeds the original chat and filters. Use `before_message_id` only to choose the first-page anchor. Date filtering uses inclusive `from_date` and exclusive `to_date`. Set `include_scheduled=true` to additionally fetch pending scheduled messages in a separate field.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
 	}, h.handle)
 }
 
 func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in GetMessagesInput) (*mcp.CallToolResult, *getMessagesOutput, error) {
-	if in.ChatID == 0 {
-		return errChatIDRequired(), nil, nil
-	}
-
 	opts := messages.DefaultFetchOptions()
-	if in.Limit > 0 {
-		opts.Limit = clampLimit(in.Limit, opts.Limit, 100)
-	}
-	// Parse opaque offset_id handle. Only regular-message handles are
-	// meaningful for pagination — scheduled doesn't page.
-	if in.OffsetID != "" {
-		ref, err := ParseMessageRef(in.OffsetID)
+	state := messagePageCursor{Kind: cursorKindHistory}
+	if in.Cursor != "" {
+		if in.ChatID != 0 || in.Limit != 0 || in.BeforeMessageID != "" || in.FromDate != "" || in.ToDate != "" || in.UnreadOnly || in.IncludeScheduled {
+			return errResult("cursor is incompatible with every other field; pass the cursor alone"), nil, nil
+		}
+		var err error
+		state, err = parseMessagePageCursor(in.Cursor, cursorKindHistory)
 		if err != nil {
-			return errInvalidMessageID(in.OffsetID, err), nil, nil
+			return errResult(fmt.Sprintf("invalid cursor: %v", err)), nil, nil
 		}
-		if ref.Scheduled {
-			return errResult("offset_id cannot reference a scheduled message; scheduled history is returned as a single unpaginated dump via include_scheduled=true"), nil, nil
+		in.ChatID, in.Limit = state.ChatID, state.Limit
+		in.FromDate, in.ToDate = state.FromDate, state.ToDate
+		in.UnreadOnly, in.IncludeScheduled = state.UnreadOnly, state.IncludeScheduled
+		opts.OffsetID = state.OffsetID
+		opts.Limit = state.Limit
+	} else {
+		if in.ChatID == 0 {
+			return errChatIDRequired(), nil, nil
 		}
-		opts.OffsetID = ref.ID
+		opts.Limit = clampLimit(in.Limit, opts.Limit, 100)
+		if in.BeforeMessageID != "" {
+			ref, err := ParseMessageRef(in.BeforeMessageID)
+			if err != nil {
+				return errInvalidMessageID(in.BeforeMessageID, err), nil, nil
+			}
+			if ref.Scheduled {
+				return errResult("before_message_id cannot reference a scheduled message"), nil, nil
+			}
+			opts.OffsetID = ref.ID
+		}
+		state = messagePageCursor{Kind: cursorKindHistory, ChatID: in.ChatID, Limit: opts.Limit, FromDate: in.FromDate, ToDate: in.ToDate, UnreadOnly: in.UnreadOnly, IncludeScheduled: in.IncludeScheduled}
 	}
 	opts.UnreadOnly = in.UnreadOnly
 
 	// Date filters. to_date maps to Telegram's native offset_date; from_date
 	// has no native equivalent and is applied as a post-filter inside the
 	// provider (drops messages older than MinDate and clamps HasMore).
-	if in.FromDate != "" {
-		t, errRes, ok := parseDateFilter("from_date", in.FromDate)
-		if !ok {
-			return errRes, nil, nil
-		}
-		opts.MinDate = t
-	}
-	if in.ToDate != "" {
-		t, errRes, ok := parseDateFilter("to_date", in.ToDate)
-		if !ok {
-			return errRes, nil, nil
-		}
-		opts.MaxDate = t
-	}
-	if !opts.MinDate.IsZero() && !opts.MaxDate.IsZero() && opts.MinDate.After(opts.MaxDate) {
-		return errResult(fmt.Sprintf("from_date (%s) is after to_date (%s); the window is empty.", opts.MinDate.Format(time.RFC3339), opts.MaxDate.Format(time.RFC3339))), nil, nil
+	var dateErr *mcp.CallToolResult
+	opts.MinDate, opts.MaxDate, dateErr = parseDateWindow(in.FromDate, in.ToDate)
+	if dateErr != nil {
+		return dateErr, nil, nil
 	}
 
 	result, err := h.provider.Fetch(ctx, in.ChatID, opts)
@@ -132,18 +116,19 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 
 	out := &getMessagesOutput{
 		ChatID:   in.ChatID,
-		Messages: make([]messageDTO, 0, len(result.Messages)),
+		Messages: make([]presentation.Message, 0, len(result.Messages)),
 		Count:    result.Count,
 		HasMore:  result.HasMore,
 	}
 
 	for _, m := range result.Messages {
-		out.Messages = append(out.Messages, toMessageDTO(m, false))
+		out.Messages = append(out.Messages, presentation.FromMessage(m, false))
 	}
 
 	if result.HasMore && result.NextID > 0 {
-		out.NextOffsetID = FormatRegularRef(result.NextID)
-		out.PaginationHint = fmt.Sprintf("More messages available. Call GetMessages again with offset_id=%q to fetch the next page.", out.NextOffsetID)
+		state.OffsetID = result.NextID
+		out.NextCursor = formatMessagePageCursor(state)
+		out.PaginationHint = "More messages available. Call GetMessages again with next_cursor copied verbatim into cursor and omit every other field."
 	}
 
 	// Optionally fetch scheduled messages. A failure in the scheduled sub-fetch
@@ -153,7 +138,7 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		// Always initialize as a non-nil empty slice so JSON emits "[]" rather
 		// than omitting the field — clients/LLMs then see an unambiguous
 		// "no pending scheduled messages" signal.
-		out.ScheduledMessages = make([]messageDTO, 0)
+		out.ScheduledMessages = make([]presentation.Message, 0)
 		scheduled, err := h.provider.FetchScheduled(ctx, in.ChatID)
 		if err != nil {
 			// Log and surface the error so the LLM knows the scheduled list may
@@ -167,39 +152,10 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 			out.ScheduledFetchError = fmt.Sprintf("scheduled messages unavailable: %v", err)
 		} else {
 			for _, m := range scheduled.Messages {
-				out.ScheduledMessages = append(out.ScheduledMessages, toMessageDTO(m, true))
+				out.ScheduledMessages = append(out.ScheduledMessages, presentation.FromMessage(m, true))
 			}
 		}
 	}
 
 	return nil, out, nil
-}
-
-// toMessageDTO converts an internal messages.Message to its tool-boundary
-// form, formatting the ID as an opaque handle. When scheduled is true, the
-// message is formatted with the "s:" prefix. ReplyToID is always formatted
-// as a regular handle (invariant: scheduled messages cannot be reply
-// targets of anything the user would hold a handle to).
-func toMessageDTO(m messages.Message, scheduled bool) messageDTO {
-	var id string
-	if scheduled {
-		id = FormatScheduledRef(m.ID)
-	} else {
-		id = FormatRegularRef(m.ID)
-	}
-	dto := messageDTO{
-		ID:         id,
-		Date:       m.Date,
-		SenderID:   m.SenderID,
-		SenderName: m.SenderName,
-		Text:       m.Text,
-		Media:      m.Media,
-		Entities:   m.Entities,
-		Reactions:  m.Reactions,
-		Replies:    m.Replies,
-	}
-	if m.ReplyToID > 0 {
-		dto.ReplyToID = FormatRegularRef(m.ReplyToID)
-	}
-	return dto
 }

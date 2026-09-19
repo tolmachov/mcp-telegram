@@ -58,7 +58,7 @@ func TestParseGlobalSearchCursorErrors(t *testing.T) {
 }
 
 // encodeRawCursor builds a wire cursor from an arbitrary JSON map so tests
-// can construct legacy (V=0, no v field) and future-version cursors that
+// can construct obsolete (V=0, no v field) and future-version cursors that
 // FormatGlobalSearchCursor would never emit on its own.
 func encodeRawCursor(t *testing.T, payload map[string]any) string {
 	t.Helper()
@@ -69,14 +69,9 @@ func encodeRawCursor(t *testing.T, payload map[string]any) string {
 	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
-// TestParseGlobalSearchCursorVersionCompat locks in the version-tolerance
-// contract documented on cursorEnvelope: a cursor without a v field
-// (legacy, V=0) must decode successfully, a cursor with v > cursorVersion
-// must be rejected with a clear "newer than supported" error, and a
-// future cursor that adds an unknown field MUST still be decodable when
-// v ≤ cursorVersion so forward-compat works.
-func TestParseGlobalSearchCursorVersionCompat(t *testing.T) {
-	t.Run("legacy cursor without v field", func(t *testing.T) {
+// Cursor versions are exact: legacy and future schemas are both rejected.
+func TestParseGlobalSearchCursorVersionPolicy(t *testing.T) {
+	t.Run("obsolete cursor without v field", func(t *testing.T) {
 		input := encodeRawCursor(t, map[string]any{
 			"r": 42,
 			"k": "user",
@@ -84,11 +79,8 @@ func TestParseGlobalSearchCursorVersionCompat(t *testing.T) {
 			"h": 999,
 			"m": 7,
 		})
-		got, err := ParseGlobalSearchCursor(input)
-		require.NoError(t, err)
-		assert.Equal(t, messages.PeerKindUser, got.PeerKind)
-		assert.Equal(t, int64(100), got.PeerID)
-		assert.Equal(t, 7, got.MsgID)
+		_, err := ParseGlobalSearchCursor(input)
+		require.Error(t, err)
 	})
 
 	t.Run("future cursor with higher version", func(t *testing.T) {
@@ -101,15 +93,12 @@ func TestParseGlobalSearchCursorVersionCompat(t *testing.T) {
 		})
 		_, err := ParseGlobalSearchCursor(input)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "newer than supported")
+		assert.Contains(t, err.Error(), "unsupported")
 	})
 
 	t.Run("cursor with unknown field at current version", func(t *testing.T) {
-		// Forward-compat: a cursor with v=1 but an extra field (as if a
-		// future minor-compat bump added an optional key) must still
-		// decode, not fail with "unknown field".
 		input := encodeRawCursor(t, map[string]any{
-			"v":               1,
+			"v":               cursorSchemaVersion,
 			"k":               "user",
 			"i":               1,
 			"h":               2,
@@ -117,6 +106,7 @@ func TestParseGlobalSearchCursorVersionCompat(t *testing.T) {
 			"future_optional": "ignored",
 		})
 		_, err := ParseGlobalSearchCursor(input)
-		assert.NoError(t, err)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown field")
 	})
 }

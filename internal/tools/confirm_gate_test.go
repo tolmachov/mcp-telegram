@@ -13,10 +13,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// callTool registers tools on a fresh server, connects an in-memory client
-// whose elicitation handler declines every prompt (what a non-interactive host
-// does), and calls one tool. Going through the real SDK is the point: the bug
-// being guarded against lives in how the SDK serializes handler results.
+// callTool registers tools on a fresh server, connects an in-memory client,
+// and calls one tool. Going through the real SDK is the point: the bug being
+// guarded against lives in how the SDK serializes handler results.
 func callTool(t *testing.T, register func(*mcp.Server), name string, args map[string]any) *mcp.CallToolResult {
 	t.Helper()
 	ctx := context.Background()
@@ -93,29 +92,21 @@ func TestAddToolNeverSerializesZeroOutput(t *testing.T) {
 	})
 }
 
-// gateInvoker serves the reads the confirm-gated tools make before asking
-// for confirmation and fails loudly on anything that would change state.
+// gateInvoker fails loudly on every Telegram call. Missing explicit
+// confirmation must be rejected before even a resolving/read RPC is issued.
 type gateInvoker struct {
 	writes int
 }
 
 func (f *gateInvoker) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
-	switch req := input.(type) {
-	case *tg.MessagesGetChatsRequest:
-		output.(*tg.MessagesChatsBox).Chats = &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Chat{ID: req.ID[0]}}}
-	case *tg.MessagesGetDialogFiltersRequest:
-		*output.(*tg.MessagesDialogFilters) = tg.MessagesDialogFilters{Filters: []tg.DialogFilterClass{&tg.DialogFilter{ID: 2}}}
-	default:
-		f.writes++
-		return fmt.Errorf("gateInvoker: unexpected request %T", input)
-	}
-	return nil
+	f.writes++
+	return fmt.Errorf("gateInvoker: unexpected request %T", input)
 }
 
-// TestConfirmGatedToolsCancelLegibly reproduces the reported bug end to end:
-// a host that declines the confirmation prompt must get status "cancelled",
-// and nothing may reach Telegram.
-func TestConfirmGatedToolsCancelLegibly(t *testing.T) {
+// TestConfirmGatedToolsFailClosed reproduces the reported bug end to end:
+// missing confirm=true must remain an error even when the client advertises
+// elicitation, and nothing may reach Telegram.
+func TestConfirmGatedToolsFailClosed(t *testing.T) {
 	cases := []struct {
 		name     string
 		register func(*mcp.Server, *tg.Client)
@@ -136,15 +127,21 @@ func TestConfirmGatedToolsCancelLegibly(t *testing.T) {
 			register: func(s *mcp.Server, c *tg.Client) { NewDeleteFolderHandler(c).Register(s) },
 			args:     map[string]any{"folder_id": 2},
 		},
+		{
+			name:     "LeaveChat",
+			register: func(s *mcp.Server, c *tg.Client) { NewLeaveChatHandler(c).Register(s) },
+			args:     map[string]any{"chat": "@channel"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := &gateInvoker{}
 			client := tg.NewClient(inv)
 			res := callTool(t, func(s *mcp.Server) { tc.register(s, client) }, tc.name, tc.args)
-			assert.False(t, res.IsError, toolResultText(res))
-			assert.Equal(t, statusCancelled, structured(t, res)["status"])
-			assert.Zero(t, inv.writes, "a cancelled call must not reach Telegram")
+			assert.True(t, res.IsError)
+			assert.Nil(t, res.StructuredContent)
+			assert.Contains(t, toolResultText(res), "confirm")
+			assert.Zero(t, inv.writes, "an unconfirmed call must not reach Telegram")
 		})
 	}
 }

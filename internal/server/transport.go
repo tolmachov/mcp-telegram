@@ -5,21 +5,45 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"runtime/debug"
 	"time"
 
-	"github.com/modelcontextprotocol/experimental-ext-variants/go/sdk/variants"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Transport names accepted by Options.Transport.
 const (
-	TransportStdio = "stdio"
-	TransportHTTP  = "http"
+	TransportStdio            = "stdio"
+	TransportHTTP             = "http"
+	mcpMaxBodyBytes           = 1 << 20
+	httpMaxConcurrentRequests = 128
+	mcpSessionTimeout         = 10 * time.Minute
 )
 
-// withCrossOriginProtection wraps handler in the stdlib cross-origin
-// protection, exempting the given path patterns.
+func streamableHTTPOptions() *mcp.StreamableHTTPOptions {
+	return &mcp.StreamableHTTPOptions{SessionTimeout: mcpSessionTimeout}
+}
+
+// withRequestLimits bounds both memory consumed by a single request and the
+// number of long-lived HTTP/SSE requests retained by the process.
+func withRequestLimits(next http.Handler) http.Handler {
+	sem := make(chan struct{}, httpMaxConcurrentRequests)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case sem <- struct{}{}:
+			defer func() { <-sem }()
+		default:
+			http.Error(w, "server is at request capacity", http.StatusServiceUnavailable)
+			return
+		}
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, mcpMaxBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// withCrossOriginProtection wraps an MCP handler in the stdlib cross-origin
+// protection.
 //
 // go-sdk v1.6.0 disabled built-in cross-origin protection by default
 // (previously on, now gated behind the enableoriginverification MCPGODEBUG
@@ -27,42 +51,26 @@ const (
 // HTTP transport is not exposed to DNS-rebinding / cross-origin attacks.
 // Re-evaluate this when upgrading go-sdk past v1.8.0, where the built-in
 // protection returns and this middleware may become redundant.
-func withCrossOriginProtection(handler http.Handler, bypass ...string) http.Handler {
+func withCrossOriginProtection(handler http.Handler) http.Handler {
 	protection := http.NewCrossOriginProtection()
-	for _, pattern := range bypass {
-		protection.AddInsecureBypassPattern(pattern)
-	}
 	return protection.Handler(handler)
 }
 
-// withHealthz mounts a GET /healthz endpoint next to the MCP handler so
-// container platforms (Cloud Run et al.) can probe liveness without speaking
-// MCP. Everything else routes to the wrapped handler.
-func withHealthz(handler http.Handler) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-	mux.Handle("/", handler)
-	return mux
-}
-
 // serveHTTP runs an http.Server with graceful shutdown on ctx cancellation.
-// corsBypass patterns are exempted from cross-origin protection (used for
-// OAuth endpoints that legitimately receive cross-origin form POSTs).
-//
 // The graceful drain is bounded at 5 seconds. MCP streamable clients hold
 // hanging SSE GETs that never finish on their own, so hitting the bound is
 // the NORMAL shutdown path with any connected client — it is logged and the
 // remaining connections are force-closed, not reported as an error.
-func (s *Server) serveHTTP(ctx context.Context, handler http.Handler, addr string, corsBypass ...string) error {
+func (s *Server) serveHTTP(ctx context.Context, handler http.Handler, addr string) error {
 	s.logger.Info("starting streamable HTTP server", "addr", addr)
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: withCrossOriginProtection(handler, corsBypass...),
+		Handler: withRequestLimits(handler),
 		// Bound the header-read phase to blunt Slowloris-style slow-header attacks.
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    32 << 10,
 	}
 	shutdownDone := make(chan error, 1)
 	serverExited := make(chan struct{})
@@ -99,42 +107,4 @@ func (s *Server) serveHTTP(ctx context.Context, handler http.Handler, addr strin
 		return fmt.Errorf("http server shutdown: %w", shutdownErr)
 	}
 	return nil
-}
-
-// runVariantsHTTP serves the variants.Server over streamable HTTP. Closes vs
-// on return; the deferred recover wraps the whole method, so panics from
-// variants.NewStreamableHTTPHandler or HTTP setup are converted to errors
-// with a logged stack trace.
-func (s *Server) runVariantsHTTP(ctx context.Context, vs *variants.Server, addr string) (retErr error) {
-	defer func() {
-		if err := vs.Close(); err != nil {
-			s.logger.Warn("failed to close variants server", "err", err)
-		}
-	}()
-	defer func() {
-		if r := recover(); r != nil {
-			stack := debug.Stack()
-			s.logger.Error("variants HTTP init panic", "panic", r, "stack", string(stack))
-			retErr = fmt.Errorf("variants HTTP init panic: %v", r)
-		}
-	}()
-	return s.serveHTTP(ctx, withHealthz(variants.NewStreamableHTTPHandler(vs, nil)), addr)
-}
-
-// runMCPHTTP serves a single *mcp.Server over streamable HTTP (used when the
-// variants protocol is bypassed via --variant). The deferred recover mirrors
-// runVariantsHTTP for symmetry — same panic risk surface.
-func (s *Server) runMCPHTTP(ctx context.Context, srv *mcp.Server, addr string) (retErr error) {
-	defer func() {
-		if r := recover(); r != nil {
-			stack := debug.Stack()
-			s.logger.Error("MCP HTTP init panic", "panic", r, "stack", string(stack))
-			retErr = fmt.Errorf("MCP HTTP init panic: %v", r)
-		}
-	}()
-	handler := mcp.NewStreamableHTTPHandler(
-		func(_ *http.Request) *mcp.Server { return srv },
-		nil,
-	)
-	return s.serveHTTP(ctx, withHealthz(handler), addr)
 }

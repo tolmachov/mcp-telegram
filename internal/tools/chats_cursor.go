@@ -14,7 +14,7 @@ type chatsCursorEnvelope struct {
 
 func (e chatsCursorEnvelope) cursorVersion() int { return e.V }
 
-const chatsCursorVersion = 1
+const chatsCursorVersion = 2
 
 // FormatChatsCursor encodes a pagination cursor as an opaque base64url string.
 // Panics on negative offset — callers must ensure offset >= 0.

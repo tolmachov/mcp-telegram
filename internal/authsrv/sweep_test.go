@@ -12,8 +12,8 @@ import (
 )
 
 // TestSweepOrphanSessions pins the reclamation rule: only sessions whose blob
-// age exceeds refreshTokenTTL + sweepMargin are deleted — stale suffixed AND
-// stale legacy objects go, anything younger stays.
+// age exceeds refreshTokenTTL + sweepMargin are deleted; anything younger
+// stays.
 func TestSweepOrphanSessions(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -25,7 +25,6 @@ func TestSweepOrphanSessions(t *testing.T) {
 	// Written at base: unreachable once the clock passes TTL+margin.
 	store.Now = func() time.Time { return base }
 	require.NoError(t, store.Session(allowedUser, staleSID, nil).StoreSession(ctx, []byte("stale")))
-	require.NoError(t, store.Session(allowedUser, "", nil).StoreSession(ctx, []byte("stale-legacy")))
 
 	// Written "now": a live session (gotd re-stores keep active blobs fresh).
 	sweepTime := base.Add(defaultRefreshTokenTTL + sweepMargin + time.Hour)
@@ -42,7 +41,6 @@ func TestSweepOrphanSessions(t *testing.T) {
 		desc string
 	}{
 		{staleSID, false, "stale suffixed session must be reclaimed"},
-		{"", false, "stale legacy session must be reclaimed"},
 		{freshSID, true, "fresh session must survive"},
 	} {
 		exists, err := store.Exists(ctx, allowedUser, tc.sid)

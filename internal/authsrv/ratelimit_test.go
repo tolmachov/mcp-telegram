@@ -39,28 +39,35 @@ func TestIPRateLimiterBurstThen429(t *testing.T) {
 	assert.Equal(t, http.StatusOK, do("10.0.0.2:1234", "").Code)
 }
 
-func TestIPRateLimiterTrustsAppendedXFFEntry(t *testing.T) {
+func TestIPRateLimiterUsesConfiguredProxyHop(t *testing.T) {
 	l := newIPRateLimiter(1, 1)
 
 	// The rightmost entry is what the trusted proxy appended; everything the
 	// client sent itself must not create fresh buckets.
-	assert.True(t, l.allow(clientIPFromXFF("spoof-1, 198.51.100.7")))
-	assert.False(t, l.allow(clientIPFromXFF("spoof-2, 198.51.100.7")),
+	assert.True(t, l.allow(clientIPFromXFF("203.0.113.1, 198.51.100.7")))
+	assert.False(t, l.allow(clientIPFromXFF("203.0.113.2, 198.51.100.7")),
 		"rotating the client-supplied XFF prefix must not evade the limit")
-	assert.True(t, l.allow(clientIPFromXFF("spoof-3, 198.51.100.8")))
+	assert.True(t, l.allow(clientIPFromXFF("203.0.113.3, 198.51.100.8")))
 }
 
 func clientIPFromXFF(xff string) string {
 	req := httptest.NewRequest(http.MethodPost, "/token", nil)
 	req.RemoteAddr = "127.0.0.1:9"
 	req.Header.Set("X-Forwarded-For", xff)
-	return clientIP(req)
+	return clientIP(req, 1)
+}
+
+func TestClientIPIgnoresForwardedHeaderByDefault(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/token", nil)
+	req.RemoteAddr = "192.0.2.9:4433"
+	req.Header.Set("X-Forwarded-For", "198.51.100.1")
+	assert.Equal(t, "192.0.2.9", clientIP(req, 0))
 }
 
 func TestClientIPFallsBackToRemoteAddr(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/token", nil)
 	req.RemoteAddr = "192.0.2.9:4433"
-	assert.Equal(t, "192.0.2.9", clientIP(req))
+	assert.Equal(t, "192.0.2.9", clientIP(req, 0))
 }
 
 func TestIPRateLimiterEvictsIdleBuckets(t *testing.T) {
