@@ -1,6 +1,7 @@
 package authsrv
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"strings"
@@ -71,7 +72,7 @@ func TestSealOpenRoundtrip(t *testing.T) {
 }
 
 func TestOpenRejects(t *testing.T) {
-	s := testSealer(t)
+	s := testSealer(t, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0}, masterKeyLen)))
 	now := time.Now()
 	blob, err := sealBlob(s, accessBlob, accessClaims{Subject: "1", IssuedAt: now.Unix()})
 	require.NoError(t, err)
@@ -91,7 +92,7 @@ func TestOpenRejects(t *testing.T) {
 		assert.ErrorIs(t, err, errInvalidBlob)
 	})
 	t.Run("wrong key reports unknown key id", func(t *testing.T) {
-		other := testSealer(t)
+		other := testSealer(t, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, masterKeyLen)))
 		_, err := openBlob(other, accessBlob, blob, now)
 		assert.ErrorIs(t, err, errUnknownKeyID)
 		assert.ErrorIs(t, err, errInvalidBlob)
@@ -126,7 +127,9 @@ func TestOpenRejects(t *testing.T) {
 }
 
 func TestKeyRotation(t *testing.T) {
-	oldKey, newKey := testKey(t), testKey(t)
+	// Fixed keys have different one-byte IDs; random pairs collide 1/256 of the time.
+	oldKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0}, masterKeyLen))
+	newKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, masterKeyLen))
 	now := time.Now()
 
 	oldSealer := testSealer(t, oldKey)

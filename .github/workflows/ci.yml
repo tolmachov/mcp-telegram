@@ -42,6 +42,7 @@ jobs:
         with:
           go-version: '1.26'
           cache: true
+      - run: ./scripts/check-coverage_test.sh
       - run: ./scripts/check-coverage.sh
 
   static-analysis:
@@ -83,7 +84,7 @@ jobs:
           load: true
           tags: mcp-telegram:ci
       - name: Scan image
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
         with:
           image-ref: mcp-telegram:ci
           severity: HIGH,CRITICAL
