@@ -4,6 +4,7 @@ package presentation
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -40,19 +41,21 @@ func ParseMessageRef(s string) (MessageRef, error) {
 	if len(numPart) > 1 && numPart[0] == '0' {
 		return MessageRef{}, fmt.Errorf("invalid message_id %q: leading zeros not allowed", s)
 	}
-	id, err := strconv.Atoi(numPart)
+	// Telegram message IDs are TL int (signed 32-bit), even when Go's int
+	// is 64-bit. Reject overflow before gotd can truncate the target ID.
+	id, err := strconv.ParseInt(numPart, 10, 32)
 	if err != nil {
 		return MessageRef{}, fmt.Errorf("invalid message_id %q: %w", s, err)
 	}
 	if id <= 0 {
 		return MessageRef{}, fmt.Errorf("invalid message_id %q: must be a positive integer", s)
 	}
-	return MessageRef{ID: id, Scheduled: scheduled}, nil
+	return MessageRef{ID: int(id), Scheduled: scheduled}, nil
 }
 
 func (r MessageRef) Format() string {
-	if r.ID <= 0 {
-		panic(fmt.Sprintf("MessageRef.Format: ID must be positive, got %d", r.ID))
+	if r.ID <= 0 || r.ID > math.MaxInt32 {
+		panic(fmt.Sprintf("MessageRef.Format: ID must be a positive int32, got %d", r.ID))
 	}
 	if r.Scheduled {
 		return scheduledPrefix + strconv.Itoa(r.ID)

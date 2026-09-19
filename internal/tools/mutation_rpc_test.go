@@ -3,8 +3,10 @@ package tools
 import (
 	"context"
 	"fmt"
+	"math"
 	"testing"
 
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
@@ -27,6 +29,39 @@ func resolveChannelStep(t *testing.T, id, accessHash int64) telegramfake.InvokeF
 
 func botAPIChannelID(id int64) int64 {
 	return -1_000_000_000_000 - id
+}
+
+func TestEditMessageIDRangeThroughMCP(t *testing.T) {
+	inv := telegramfake.New(
+		resolveChannelStep(t, 41, 91),
+		telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesEditMessageRequest, out *tg.UpdatesBox) error {
+			// Check the target after TL serialization, where a Go int could
+			// otherwise silently wrap to another message's signed int32 ID.
+			var buf bin.Buffer
+			require.NoError(t, rpc.Encode(&buf))
+			var decoded tg.MessagesEditMessageRequest
+			require.NoError(t, decoded.Decode(&buf))
+			require.Equal(t, math.MaxInt32, decoded.ID)
+			out.Updates = &tg.Updates{Updates: []tg.UpdateClass{&tg.UpdateEditChannelMessage{Message: &tg.Message{ID: decoded.ID, Date: 11}}}}
+			return nil
+		}),
+	)
+	cs := connectToolClient(t, func(s *mcp.Server) { NewMessageEditHandler(tg.NewClient(inv)).Register(s) })
+	for _, id := range []string{"2147483648", "4294967338", "s:2147483648", "s:4294967338"} {
+		res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "EditMessage", Arguments: map[string]any{
+			"chat_id": botAPIChannelID(41), "message_id": id, "new_text": "updated",
+		}})
+		require.NoError(t, err)
+		require.True(t, res.IsError)
+		assert.Contains(t, toolResultText(res), "message_id")
+		require.Empty(t, inv.RequestTypes(), "invalid target reached Telegram")
+	}
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "EditMessage", Arguments: map[string]any{
+		"chat_id": botAPIChannelID(41), "message_id": "2147483647", "new_text": "updated",
+	}})
+	require.NoError(t, err)
+	require.False(t, res.IsError, "%+v", res.Content)
+	assert.Zero(t, inv.Remaining())
 }
 
 func TestDestructiveHandlersFailClosedBeforeTelegramRPC(t *testing.T) {

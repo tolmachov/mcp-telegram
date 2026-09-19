@@ -12,15 +12,17 @@ import (
 
 func TestMessageRefParseAndFormat(t *testing.T) {
 	for input, want := range map[string]MessageRef{
-		"42":   {ID: 42},
-		"s:42": {ID: 42, Scheduled: true},
+		"42":           {ID: 42},
+		"s:42":         {ID: 42, Scheduled: true},
+		"2147483647":   {ID: 2147483647},
+		"s:2147483647": {ID: 2147483647, Scheduled: true},
 	} {
 		got, err := ParseMessageRef(input)
 		require.NoError(t, err)
 		assert.Equal(t, want, got)
 		assert.Equal(t, input, got.Format())
 	}
-	for _, input := range []string{"", " 42", "42 ", "s:", "01", "s:01", "0", "-1", "nope"} {
+	for _, input := range []string{"", " 42", "42 ", "s:", "01", "s:01", "0", "-1", "nope", "2147483648", "s:2147483648", "4294967338", "s:4294967338"} {
 		_, err := ParseMessageRef(input)
 		assert.Error(t, err, input)
 	}
