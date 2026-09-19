@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1275,4 +1276,60 @@ func TestRefreshCarriesSessionIdentity(t *testing.T) {
 		assert.Equalf(t, cc.SessionKey, rc.SessionKey, "refresh key after refresh %d", i)
 		rt = refreshed.RefreshToken
 	}
+}
+
+type unavailableGrantStore struct {
+	*sessionstore.Memory
+	failRedeem atomic.Bool
+	failRevoke atomic.Bool
+}
+
+func (s *unavailableGrantStore) RedeemCode(ctx context.Context, jti, sid string, expires time.Time) (bool, error) {
+	if s.failRedeem.Load() {
+		return false, errors.New("grant storage unavailable")
+	}
+	return s.Memory.RedeemCode(ctx, jti, sid, expires)
+}
+
+func (s *unavailableGrantStore) RevokeGrant(ctx context.Context, family string) error {
+	if s.failRevoke.Load() {
+		return errors.New("grant storage unavailable")
+	}
+	return s.Memory.RevokeGrant(ctx, family)
+}
+
+func TestGrantStorageFailureAllowsRetryWithoutLosingSession(t *testing.T) {
+	store := &unavailableGrantStore{Memory: sessionstore.NewMemory()}
+	store.failRedeem.Store(true)
+	store.failRevoke.Store(true)
+	flow := newFakeFlow()
+	a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
+	clientID := registerClient(t, ts, testRedirectURI)
+	verifier, challenge := pkcePair()
+	loginID := startAuthorize(t, ts, clientID, challenge, "state")
+	code, _ := finishLogin(t, ts, loginID, flow, LoginUser{ID: allowedUser}, []byte("session"))
+	_, oauthErr, status := redeemCode(t, ts, clientID, testRedirectURI, code, verifier)
+	require.Equal(t, http.StatusServiceUnavailable, status)
+	assert.Equal(t, "temporarily_unavailable", oauthErr.Error)
+	store.failRedeem.Store(false)
+	tokens, _, status := redeemCode(t, ts, clientID, testRedirectURI, code, verifier)
+	require.Equal(t, http.StatusOK, status, "failed storage write must not consume the code")
+	cc, err := openBlob(a.sealer, codeBlob, code, a.now())
+	require.NoError(t, err)
+	response, err := http.PostForm(ts.URL+"/revoke", url.Values{"token": {tokens.RefreshToken}})
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	assert.Equal(t, http.StatusServiceUnavailable, response.StatusCode)
+	assert.Equal(t, "60", response.Header.Get("Retry-After"))
+	exists, err := store.Exists(t.Context(), allowedUser, cc.SessionID)
+	require.NoError(t, err)
+	assert.True(t, exists, "failed revocation must retain the session for retry")
+	store.failRevoke.Store(false)
+	require.Equal(t, http.StatusOK, revokeToken(t, ts, url.Values{"token": {tokens.RefreshToken}}))
+	exists, err = store.Exists(t.Context(), allowedUser, cc.SessionID)
+	require.NoError(t, err)
+	assert.False(t, exists)
+	_, oauthErr, status = refreshGrant(t, ts, clientID, tokens.RefreshToken)
+	require.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "invalid_grant", oauthErr.Error)
 }
