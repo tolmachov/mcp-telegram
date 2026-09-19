@@ -76,7 +76,7 @@ func (s *Summarizer) SummarizeDetailed(ctx context.Context, chatID int64, goal s
 	if fetched == nil || (fetchErr != nil && len(fetched.Messages) == 0) {
 		return Result{}, fmt.Errorf("fetching messages: %w", fetchErr)
 	}
-	out := Result{MessagesProcessed: len(fetched.Messages), Truncated: fetched.HasMore}
+	out := Result{Truncated: fetched.HasMore}
 	if out.Truncated {
 		out.Warning = fmt.Sprintf("summary input was truncated at max_messages=%d", maxMessages)
 	}
@@ -129,6 +129,7 @@ func (s *Summarizer) SummarizeDetailed(ctx context.Context, chatID int64, goal s
 		}
 
 		runningSummary = strings.TrimSpace(summary)
+		out.MessagesProcessed += len(batch)
 	}
 
 	out.Summary = runningSummary
