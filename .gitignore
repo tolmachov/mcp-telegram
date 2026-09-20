@@ -25,3 +25,9 @@ research/
 
 # Build cache
 .gocache/
+
+# Cloud Run environment file (see deploy/README.md; only the .example is tracked)
+deploy/cloudrun.env
+
+# Personal automation, not part of the project
+/Taskfile.yml
