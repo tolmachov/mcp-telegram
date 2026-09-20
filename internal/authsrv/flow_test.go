@@ -248,7 +248,7 @@ func registerNamedClient(t *testing.T, ts *httptest.Server, name string, redirec
 	return reg.ClientID
 }
 
-var loginIDRe = regexp.MustCompile(`/login/qr\?login=([0-9a-f]{32})`)
+var loginIDRe = regexp.MustCompile(`var loginID = "([0-9a-f]{32})";`)
 
 // startAuthorize drives GET /authorize and returns the loginID parsed out of
 // the rendered QR page.
@@ -269,6 +269,15 @@ func startAuthorize(t *testing.T, ts *httptest.Server, clientID, challenge, stat
 	require.Equal(t, http.StatusOK, resp.StatusCode, "authorize should render the QR page: %s", page)
 	assert.Contains(t, resp.Header.Get("Content-Security-Policy"), "frame-ancestors 'none'")
 	assert.Equal(t, "DENY", resp.Header.Get("X-Frame-Options"))
+	assert.Contains(t, string(page), `id="qrloader"`)
+	assert.Contains(t, string(page), `aria-live="polite"`)
+	assert.Contains(t, string(page), "Preparing secure QR code&hellip;")
+	assert.NotRegexp(t, regexp.MustCompile(`<img id="qr"[^>]+src=`), string(page),
+		"the QR image must not request its endpoint before a token is ready")
+	assert.Regexp(t, regexp.MustCompile(`(?s)if \(j\.qr_rev && j\.qr_rev > latestRev\) \{.*showQRLoader\(\);.*\}.*loadQR\(j\.qr_rev\);`), string(page),
+		"a new revision must hide the expired QR before its replacement starts loading")
+	assert.Regexp(t, regexp.MustCompile(`(?s)function showQRLoader\(\) \{.*clearQRImage\(\);.*loader\.hidden = false;`), string(page),
+		"the loading state must remove the old QR and restore the placeholder")
 	m := loginIDRe.FindSubmatch(page)
 	require.NotNil(t, m, "QR page should reference the login id")
 	return string(m[1])
@@ -492,6 +501,43 @@ func TestFullAuthorizationFlow(t *testing.T) {
 	_, oe, status := refreshGrant(t, ts, clientID, refreshed.RefreshToken)
 	require.Equal(t, http.StatusBadRequest, status)
 	assert.Equal(t, "invalid_grant", oe.Error)
+}
+
+func TestQRPlaceholderUntilTokenReady(t *testing.T) {
+	flow := newFakeFlow()
+	flow.setURL("")
+	_, ts := newTestServer(t, testConfig(t), sessionstore.NewMemory(), startOne(flow))
+	clientID := registerClient(t, ts, testRedirectURI)
+	_, challenge := pkcePair()
+	loginID := startAuthorize(t, ts, clientID, challenge, "state")
+
+	// The page remains in its loading state while Telegram has not exported a
+	// login token. There is no QR revision to fetch, and a direct request does
+	// not return a broken placeholder image.
+	pr := pollLogin(t, ts, loginID)
+	assert.Equal(t, "waiting", pr.Status)
+	assert.Zero(t, pr.QRRev)
+
+	qrResp, err := http.Get(ts.URL + "/login/qr?login=" + loginID)
+	require.NoError(t, err)
+	_ = qrResp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, qrResp.StatusCode)
+
+	// As soon as Telegram exports the token, polling announces the revision
+	// and the same endpoint serves the real QR PNG.
+	flow.setURL("tg://login?token=now-ready")
+	pr = pollLogin(t, ts, loginID)
+	assert.Equal(t, "waiting", pr.Status)
+	assert.Equal(t, 1, pr.QRRev)
+
+	qrResp, err = http.Get(ts.URL + "/login/qr?login=" + loginID)
+	require.NoError(t, err)
+	qrBody, err := io.ReadAll(qrResp.Body)
+	require.NoError(t, err)
+	_ = qrResp.Body.Close()
+	require.Equal(t, http.StatusOK, qrResp.StatusCode)
+	assert.Equal(t, "image/png", qrResp.Header.Get("Content-Type"))
+	assert.True(t, len(qrBody) > 8 && string(qrBody[1:4]) == "PNG", "QR endpoint must serve a PNG")
 }
 
 func TestAuthorizeRejections(t *testing.T) {
