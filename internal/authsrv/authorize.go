@@ -130,23 +130,39 @@ main{background:#fff;border:1px solid #e2e4e8;border-radius:12px;padding:32px;ma
 h1{font-size:20px;margin:0 0 12px}
 p{line-height:1.5;margin:8px 0}
 code{background:#f0f1f4;border-radius:4px;padding:2px 6px;font-size:13px;word-break:break-all}
-img{width:240px;height:240px;image-rendering:pixelated;border:1px solid #e2e4e8;border-radius:8px;margin:12px auto;display:block}
+#qrwrap{position:relative;width:240px;height:240px;border:1px solid #e2e4e8;border-radius:8px;margin:12px auto;overflow:hidden;background:#fff}
+#qr{width:240px;height:240px;image-rendering:pixelated;display:block;opacity:0;transition:opacity .2s ease}
+#qr.ready{opacity:1}
+#qrloader{position:absolute;inset:0;display:grid;place-items:center;background:linear-gradient(145deg,#f7fcff,#edf8fd)}
+.qr-placeholder{position:relative;width:184px;height:184px;animation:qr-pulse 1.6s ease-in-out infinite}
+.qr-modules{position:absolute;inset:10px;background-color:#d8f1fc;background-image:linear-gradient(90deg,rgba(42,171,238,.38) 50%,transparent 50%),linear-gradient(rgba(42,171,238,.38) 50%,transparent 50%);background-size:24px 24px;border-radius:4px}
+.qr-finder{position:absolute;width:48px;height:48px;border:7px solid #2aabee;border-radius:4px;box-sizing:border-box;background:#f7fcff;z-index:1}
+.qr-finder::after{content:"";position:absolute;inset:8px;background:#2aabee;border-radius:2px}
+.qr-finder-tl{left:10px;top:10px}.qr-finder-tr{right:10px;top:10px}.qr-finder-bl{left:10px;bottom:10px}
+@keyframes qr-pulse{0%,100%{opacity:.55;transform:scale(.97)}50%{opacity:1;transform:scale(1)}}
+@media (prefers-reduced-motion:reduce){.qr-placeholder{animation:none}#qr{transition:none}}
 button{background:#2aabee;color:#fff;border:0;border-radius:8px;padding:12px 24px;font-size:15px;cursor:pointer;margin-top:12px;width:100%}
 button:hover{background:#1e96d6}
 .muted{color:#5f6368;font-size:13px}
 #status{min-height:1.5em;font-weight:600}
 label{display:block;margin-top:8px;font-size:14px;font-weight:600;text-align:left}
 input[type=password]{width:100%;box-sizing:border-box;margin-top:6px;padding:10px 12px;font-size:15px;border:1px solid #c4c7cc;border-radius:8px}
+[hidden]{display:none!important}
 </style></head><body><main>
 <h1>Link Telegram to authorize {{.ClientName}}</h1>
 <p>Open Telegram on your phone, go to <strong>Settings&nbsp;&rarr;&nbsp;Devices&nbsp;&rarr;&nbsp;Link&nbsp;Desktop&nbsp;Device</strong> and scan this code.</p>
-<div id="qrwrap"><img id="qr" src="/login/qr?login={{.LoginID}}" alt="Telegram login QR code"></div>
+<div id="qrwrap" aria-busy="true">
+<div id="qrloader" role="img" aria-label="Preparing Telegram login QR code">
+<div class="qr-placeholder" aria-hidden="true"><span class="qr-modules"></span><span class="qr-finder qr-finder-tl"></span><span class="qr-finder qr-finder-tr"></span><span class="qr-finder qr-finder-bl"></span></div>
+</div>
+<img id="qr" alt="Telegram login QR code" hidden>
+</div>
 <form id="pwform" hidden>
 <label for="password">Two-step verification password</label>
 <input type="password" id="password" name="password" autocomplete="current-password" required>
 <button type="submit">Submit password</button>
 </form>
-<p id="status">Waiting for scan&hellip;</p>
+<p id="status" role="status" aria-live="polite" aria-atomic="true">Preparing secure QR code&hellip;</p>
 <p class="muted">After approval you will be redirected to:<br><code>{{.RedirectURI}}</code></p>
 </main>
 <script>
@@ -154,11 +170,15 @@ input[type=password]{width:100%;box-sizing:border-box;margin-top:6px;padding:10p
 	"use strict";
 	var loginID = {{.LoginID}};
 	var img = document.getElementById("qr");
+	var loader = document.getElementById("qrloader");
 	var statusEl = document.getElementById("status");
 	var form = document.getElementById("pwform");
 	var qrwrap = document.getElementById("qrwrap");
-	var rev = 0;
+	var displayedRev = 0;
+	var loadingRev = 0;
+	var latestRev = 0;
 	var stopped = false;
+	var qrActive = true;
 
 	form.addEventListener("submit", function (e) {
 		e.preventDefault();
@@ -169,31 +189,87 @@ input[type=password]{width:100%;box-sizing:border-box;margin-top:6px;padding:10p
 		statusEl.textContent = "Checking password…";
 	});
 
+	function clearQRImage() {
+		img.classList.remove("ready");
+		img.hidden = true;
+		img.removeAttribute("src");
+	}
+
+	function showQRLoader() {
+		clearQRImage();
+		qrwrap.hidden = false;
+		qrwrap.setAttribute("aria-busy", "true");
+		loader.hidden = false;
+		statusEl.textContent = "Preparing secure QR code…";
+	}
+
+	function hideQR() {
+		clearQRImage();
+		qrwrap.hidden = true;
+		loader.hidden = true;
+	}
+
+	function loadQR(rev) {
+		if (!rev || rev !== latestRev || rev <= displayedRev || rev === loadingRev) { return; }
+		loadingRev = rev;
+		var next = new Image();
+		var src = "/login/qr?login=" + encodeURIComponent(loginID) + "&rev=" + rev;
+		next.onload = function () {
+			if (stopped || !qrActive || loadingRev !== rev) { return; }
+			img.src = src;
+			img.hidden = false;
+			loader.hidden = true;
+			qrwrap.setAttribute("aria-busy", "false");
+			displayedRev = rev;
+			loadingRev = 0;
+			requestAnimationFrame(function () { img.classList.add("ready"); });
+			if (form.hidden) { statusEl.textContent = "Waiting for scan…"; }
+		};
+		next.onerror = function () {
+			if (loadingRev !== rev) { return; }
+			loadingRev = 0;
+			if (!stopped && qrActive && rev === latestRev) {
+				setTimeout(function () { loadQR(rev); }, 1000);
+			}
+		};
+		next.src = src;
+	}
+
 	function apply(j) {
-		if (j.qr_rev && j.qr_rev !== rev) {
-			rev = j.qr_rev;
-			img.src = "/login/qr?login=" + encodeURIComponent(loginID) + "&rev=" + rev;
-		}
 		switch (j.status) {
+		case "waiting":
+			qrActive = true;
+			qrwrap.hidden = false;
+			if (j.qr_rev && j.qr_rev > latestRev) {
+				latestRev = j.qr_rev;
+				// A new revision means Telegram has expired the displayed token.
+				// Remove it before fetching its replacement so it cannot be scanned.
+				showQRLoader();
+			}
+			if (j.qr_rev) { loadQR(j.qr_rev); }
+			if (!displayedRev) { statusEl.textContent = "Preparing secure QR code…"; }
+			return;
 		case "done":
 			stopped = true;
+			qrActive = false;
+			hideQR();
 			statusEl.textContent = "Logged in. Redirecting…";
 			window.location.href = j.redirect;
 			return;
 		case "password":
-			qrwrap.hidden = true;
+			qrActive = false;
+			hideQR();
 			form.hidden = false;
 			statusEl.textContent = j.message || "Enter your two-step verification password.";
-			break;
+			return;
 		case "failed":
 		case "expired":
 			stopped = true;
-			qrwrap.hidden = true;
+			qrActive = false;
+			hideQR();
 			form.hidden = true;
 			statusEl.textContent = j.message || "Login failed.";
 			return;
-		default:
-			if (form.hidden) { statusEl.textContent = "Waiting for scan…"; }
 		}
 	}
 
@@ -205,7 +281,7 @@ input[type=password]{width:100%;box-sizing:border-box;margin-top:6px;padding:10p
 			.catch(function () {})
 			.then(function () { if (!stopped) { setTimeout(poll, 2000); } });
 	}
-	setTimeout(poll, 1500);
+	poll();
 })();
 </script>
 </body></html>`))
