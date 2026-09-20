@@ -21,8 +21,8 @@ gcloud storage buckets add-iam-policy-binding gs://${BUCKET} \
 printf '%s' "$MCP_TELEGRAM_API_HASH" | \
   gcloud secrets create mcp-telegram-api-hash --data-file=-
 head -c 32 /dev/urandom | base64 | tr -d '\n' | \
-  gcloud secrets create mcp-auth-token-keys --data-file=-
-for s in mcp-telegram-api-hash mcp-auth-token-keys; do
+  gcloud secrets create mcp-telegram-token-key --data-file=-
+for s in mcp-telegram-api-hash mcp-telegram-token-key; do
   gcloud secrets add-iam-policy-binding "$s" \
     --member=serviceAccount:${SA} --role=roles/secretmanager.secretAccessor
 done
@@ -45,7 +45,7 @@ gcloud run deploy mcp-telegram \
   --service-account=${SA} \
   --max-instances=1 \
   --env-vars-file=deploy/cloudrun.env \
-  --set-secrets=MCP_TELEGRAM_API_HASH=mcp-telegram-api-hash:latest,MCP_AUTH_TOKEN_KEYS=mcp-auth-token-keys:latest \
+  --set-secrets=MCP_TELEGRAM_API_HASH=mcp-telegram-api-hash:latest,MCP_AUTH_TOKEN_KEYS=mcp-telegram-token-key:latest \
   --allow-unauthenticated
 ```
 
@@ -53,6 +53,13 @@ gcloud run deploy mcp-telegram \
 endpoint itself rejects requests without a valid bearer token. Keep
 `--max-instances=1`: two instances must never connect the same MTProto session
 at once because Telegram can revoke the duplicated auth key.
+
+Do not point an uptime check at `/healthz`. Cloud Run's frontend reserves that
+exact path and answers it with its own 404 before the request reaches the
+container, and the server exposes no other unauthenticated health route:
+`/health` and `/healthz/` fall through to the bearer-gated `/` and return 401.
+Probe `/.well-known/oauth-protected-resource` instead, which the application
+serves and which reflects its configuration.
 
 The service enforces a 1 MiB MCP request body, 32 KiB headers, 128 concurrent
 HTTP requests, a ten-minute MCP session timeout, and a per-user limit of ten

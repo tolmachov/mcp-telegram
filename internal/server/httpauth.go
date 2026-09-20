@@ -25,6 +25,9 @@ import (
 func buildAuthMux(as *authsrv.AuthServer, issuerURL string, mcpHandler http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 	as.Routes(mux)
+	// Local and non-Cloud-Run deployments only: Cloud Run's frontend reserves
+	// this exact path and answers it itself, so the handler is unreachable
+	// there. See deploy/README.md before wiring any probe to it.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
