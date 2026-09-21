@@ -28,8 +28,11 @@ for s in mcp-telegram-api-hash mcp-telegram-token-key; do
 done
 ```
 
-Copy `deploy/cloudrun.env.example` to the untracked
-`deploy/cloudrun.env`, fill in the bucket, allowlist, API ID, and issuer URL.
+Copy `deploy/cloudrun.yaml.example` to the untracked
+`deploy/cloudrun.yaml`, fill in the bucket, allowlist, API ID, and issuer URL.
+Keep the `.yaml` extension: `--env-vars-file` picks its parser from the file
+name, and a path ending in `.env` is read as dotenv (`KEY=value`) rather than
+as the YAML mapping this file uses.
 Do not add `PORT`: Cloud Run injects it into the ingress container and the
 application binds to `:$PORT`. Cloud Run does not expand `$PORT` inside another
 environment variable, so `MCP_HTTP_ADDR=$PORT` is not a valid substitute.
@@ -44,7 +47,7 @@ gcloud run deploy mcp-telegram \
   --region=${REGION} \
   --service-account=${SA} \
   --max-instances=1 \
-  --env-vars-file=deploy/cloudrun.env \
+  --env-vars-file=deploy/cloudrun.yaml \
   --set-secrets=MCP_TELEGRAM_API_HASH=mcp-telegram-api-hash:latest,MCP_AUTH_TOKEN_KEYS=mcp-telegram-token-key:latest \
   --allow-unauthenticated
 ```

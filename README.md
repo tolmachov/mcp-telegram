@@ -459,7 +459,7 @@ Secret Manager, sessions in a GCS bucket. In outline:
    it can mint tokens and decrypt current sessions when combined with their
    per-authorization token key.
 3. **Deploy** with `gcloud run deploy --source .`, wiring the non-secret env
-   from [`deploy/cloudrun.env.example`](deploy/cloudrun.env.example), the two
+   from [`deploy/cloudrun.yaml.example`](deploy/cloudrun.yaml.example), the two
    secrets via `--set-secrets`, and **`--max-instances=1`** (mandatory: two
    instances loading the same MTProto session trip Telegram's
    `AUTH_KEY_DUPLICATED` and forcibly log every user out).
