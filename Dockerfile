@@ -2,15 +2,21 @@ FROM golang:1.26-alpine3.22@sha256:727cfc3c40be55cd1bc9a4a059406b28a059857e3be75
 
 # The Docker Official Image can lag Go security patch releases. Install the
 # checksummed upstream toolchain explicitly so the final binary's stdlib is not
-# inherited from a stale builder image. TARGETARCH is provided by BuildKit.
+# inherited from a stale builder image.
+#
+# TARGETARCH is set only by BuildKit. Cloud Build's classic docker builder --
+# what `gcloud run deploy --source` uses -- leaves it empty, so fall back to
+# the architecture the builder image itself reports. Do not make this RUN
+# depend on TARGETARCH alone: an empty value fails the build outright.
 ARG TARGETARCH
 ARG GO_PATCH_VERSION=1.26.8
-RUN case "$TARGETARCH" in \
+RUN GOARCH_="${TARGETARCH:-$(go env GOARCH)}" \
+	&& case "$GOARCH_" in \
 		amd64) GO_SHA256=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b ;; \
 		arm64) GO_SHA256=211ffced9dcb9633a55eac6364816ec0ddd951389a740e88fa8b3337971bdda0 ;; \
-		*) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+		*) echo "unsupported architecture: $GOARCH_" >&2; exit 1 ;; \
 	esac \
-	&& wget -q "https://go.dev/dl/go${GO_PATCH_VERSION}.linux-${TARGETARCH}.tar.gz" -O /tmp/go.tar.gz \
+	&& wget -q "https://go.dev/dl/go${GO_PATCH_VERSION}.linux-${GOARCH_}.tar.gz" -O /tmp/go.tar.gz \
 	&& echo "${GO_SHA256}  /tmp/go.tar.gz" | sha256sum -c - \
 	&& rm -rf /usr/local/go \
 	&& tar -C /usr/local -xzf /tmp/go.tar.gz \
