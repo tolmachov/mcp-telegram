@@ -2,6 +2,8 @@ package sessionstore_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -10,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tolmachov/mcp-telegram/internal/keyring"
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore/sessionstoretest"
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
@@ -169,8 +172,24 @@ func TestGrantStoreSweepContract(t *testing.T) {
 	}
 }
 
+// encryptedStores wraps every backend in Encrypted, the boundary that
+// validates session ids and grant families before they reach a backend.
+func encryptedStores(t *testing.T) map[string]sessionstore.Store {
+	t.Helper()
+	key := make([]byte, keyring.MasterKeyLen)
+	_, err := rand.Read(key)
+	require.NoError(t, err)
+	ring, err := keyring.Parse([]string{base64.StdEncoding.EncodeToString(key)})
+	require.NoError(t, err)
+	stores := grantStores(t)
+	for name, backend := range stores {
+		stores[name] = sessionstore.Encrypted(backend, sessionstore.NewCipher(ring, "https://mcp.example.com"))
+	}
+	return stores
+}
+
 func TestGrantStoreRejectsMalformedIdentity(t *testing.T) {
-	for name, store := range grantStores(t) {
+	for name, store := range encryptedStores(t) {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
 			_, err := sessionstore.RedeemCode(ctx, store, "../not-a-family", testSID, time.Now().Add(time.Hour))
@@ -185,7 +204,7 @@ func TestGrantStoreRejectsMalformedIdentity(t *testing.T) {
 }
 
 func TestSessionStoreRejectsMalformedIdentity(t *testing.T) {
-	for name, store := range grantStores(t) {
+	for name, store := range encryptedStores(t) {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
 			bad := "../../outside"

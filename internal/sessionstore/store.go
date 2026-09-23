@@ -32,10 +32,9 @@ const sidHexLen = 32
 
 // ValidSID reports whether s is a well-formed session id — exactly sidHexLen
 // lowercase hex characters. Session ids reach this layer as an object-name /
-// file-path suffix, so callers that take a sid from an untrusted source (a
-// token blob) must validate it with ValidSID before it can influence a path;
-// parseSessionBase applies the same rule so the sweeper never attributes (and
-// thus never deletes) a foreign, operator-named object.
+// file-path suffix, so the Encrypted store rejects any other value before it
+// can influence a path; parseSessionBase applies the same rule so the sweeper
+// never attributes (and thus never deletes) a foreign, operator-named object.
 func ValidSID(s string) bool {
 	if len(s) != sidHexLen {
 		return false

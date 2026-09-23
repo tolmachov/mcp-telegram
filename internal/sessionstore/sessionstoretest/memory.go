@@ -51,16 +51,12 @@ func NewMemory() *Memory {
 	return &Memory{Now: time.Now, blobs: map[memKey]memBlob{}, revoked: map[memKey]time.Time{}, grants: map[string]memGrant{}}
 }
 
-// Session returns the blob storage for one session. A malformed sid fails
-// every operation with sessionstore.ErrInvalidSID.
+// Session returns the blob storage for one session.
 func (m *Memory) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {
 	return memorySession{store: m, key: memKey{userID, sid}}
 }
 
 func (m *Memory) Exists(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
-	if !sessionstore.ValidSID(sid) {
-		return false, sessionstore.ErrInvalidSID
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	b, ok := m.blobs[memKey{userID, sid}]
@@ -68,9 +64,6 @@ func (m *Memory) Exists(_ context.Context, userID tgid.UserID, sid string) (bool
 }
 
 func (m *Memory) Delete(_ context.Context, userID tgid.UserID, sid string) error {
-	if !sessionstore.ValidSID(sid) {
-		return sessionstore.ErrInvalidSID
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.blobs, memKey{userID, sid})
@@ -88,9 +81,6 @@ func (m *Memory) List(_ context.Context) ([]sessionstore.SessionRef, error) {
 }
 
 func (m *Memory) Revoke(_ context.Context, userID tgid.UserID, sid string) error {
-	if !sessionstore.ValidSID(sid) {
-		return sessionstore.ErrInvalidSID
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	k := memKey{userID, sid}
@@ -100,9 +90,6 @@ func (m *Memory) Revoke(_ context.Context, userID tgid.UserID, sid string) error
 }
 
 func (m *Memory) Revoked(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
-	if !sessionstore.ValidSID(sid) {
-		return false, sessionstore.ErrInvalidSID
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, ok := m.revoked[memKey{userID, sid}]
@@ -120,9 +107,6 @@ func (m *Memory) ListRevoked(_ context.Context) ([]sessionstore.SessionRef, erro
 }
 
 func (m *Memory) DeleteRevoked(_ context.Context, userID tgid.UserID, sid string) error {
-	if !sessionstore.ValidSID(sid) {
-		return sessionstore.ErrInvalidSID
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.revoked, memKey{userID, sid})
@@ -130,9 +114,6 @@ func (m *Memory) DeleteRevoked(_ context.Context, userID tgid.UserID, sid string
 }
 
 func (m *Memory) LoadGrant(_ context.Context, family string) (sessionstore.GrantRecord, int64, error) {
-	if !sessionstore.ValidSID(family) {
-		return sessionstore.GrantRecord{}, 0, sessionstore.ErrInvalidSID
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	g := m.grants[family]
@@ -140,9 +121,6 @@ func (m *Memory) LoadGrant(_ context.Context, family string) (sessionstore.Grant
 }
 
 func (m *Memory) StoreGrant(_ context.Context, family string, grant sessionstore.GrantRecord, version int64) error {
-	if !sessionstore.ValidSID(family) || !sessionstore.ValidSID(grant.SID) {
-		return sessionstore.ErrInvalidSID
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	current := m.grants[family]
@@ -170,9 +148,6 @@ type memorySession struct {
 }
 
 func (s memorySession) LoadSession(_ context.Context) ([]byte, error) {
-	if !sessionstore.ValidSID(s.key.sid) {
-		return nil, sessionstore.ErrInvalidSID
-	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	b, ok := s.store.blobs[s.key]
@@ -185,9 +160,6 @@ func (s memorySession) LoadSession(_ context.Context) ([]byte, error) {
 }
 
 func (s memorySession) StoreSession(_ context.Context, data []byte) error {
-	if !sessionstore.ValidSID(s.key.sid) {
-		return sessionstore.ErrInvalidSID
-	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	cp := make([]byte, len(data))

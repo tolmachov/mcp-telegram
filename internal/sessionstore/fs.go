@@ -57,14 +57,7 @@ func (f *FS) grantPath(family string) string { return filepath.Join(f.grantsDir(
 // contents: every update changes the generation or sets Revoked, so a record
 // never returns to earlier contents and equal hashes mean an unchanged record.
 func (f *FS) LoadGrant(_ context.Context, family string) (GrantRecord, int64, error) {
-	if !ValidSID(family) {
-		return GrantRecord{}, 0, ErrInvalidSID
-	}
-	return f.readGrant(family)
-}
-
-func (f *FS) readGrant(family string) (GrantRecord, int64, error) {
-	data, err := os.ReadFile(f.grantPath(family)) //nolint:gosec // path is derived from a validated fixed-length hex family
+	data, err := os.ReadFile(f.grantPath(family)) //nolint:gosec // Encrypted validated family as fixed-length hex
 	if errors.Is(err, os.ErrNotExist) {
 		return GrantRecord{}, 0, nil
 	}
@@ -82,14 +75,11 @@ func (f *FS) readGrant(family string) (GrantRecord, int64, error) {
 
 // StoreGrant atomically replaces family's grant record if its version still
 // matches. The family lock makes the compare and the write one step.
-func (f *FS) StoreGrant(_ context.Context, family string, grant GrantRecord, version int64) error {
-	if !ValidSID(family) || !ValidSID(grant.SID) {
-		return ErrInvalidSID
-	}
+func (f *FS) StoreGrant(ctx context.Context, family string, grant GrantRecord, version int64) error {
 	lock := f.grantLock(family)
 	lock.Lock()
 	defer lock.Unlock()
-	_, current, err := f.readGrant(family)
+	_, current, err := f.LoadGrant(ctx, family)
 	if err != nil {
 		return err
 	}
@@ -116,16 +106,10 @@ func (f *FS) revokedPath(userID tgid.UserID, sid string) string {
 }
 
 func (f *FS) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {
-	if !ValidSID(sid) {
-		return brokenSession{err: ErrInvalidSID}
-	}
 	return xdg.FileSession{Path: f.path(userID, sid)}
 }
 
 func (f *FS) Exists(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
-	if !ValidSID(sid) {
-		return false, ErrInvalidSID
-	}
 	p := f.path(userID, sid)
 	info, err := os.Stat(p)
 	switch {
@@ -143,9 +127,6 @@ func (f *FS) Exists(_ context.Context, userID tgid.UserID, sid string) (bool, er
 }
 
 func (f *FS) Delete(_ context.Context, userID tgid.UserID, sid string) error {
-	if !ValidSID(sid) {
-		return ErrInvalidSID
-	}
 	p := f.path(userID, sid)
 	err := os.Remove(p)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -197,9 +178,6 @@ func (f *FS) listDir(dir string) ([]SessionRef, error) {
 }
 
 func (f *FS) Revoke(ctx context.Context, userID tgid.UserID, sid string) error {
-	if !ValidSID(sid) {
-		return ErrInvalidSID
-	}
 	// Tombstone first (source of truth), then remove the blob. A zero-byte file
 	// is enough; its presence is the signal (checked via os.Stat, not read).
 	p := f.revokedPath(userID, sid)
@@ -210,9 +188,6 @@ func (f *FS) Revoke(ctx context.Context, userID tgid.UserID, sid string) error {
 }
 
 func (f *FS) Revoked(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
-	if !ValidSID(sid) {
-		return false, ErrInvalidSID
-	}
 	p := f.revokedPath(userID, sid)
 	_, err := os.Stat(p)
 	switch {
@@ -226,9 +201,6 @@ func (f *FS) Revoked(_ context.Context, userID tgid.UserID, sid string) (bool, e
 }
 
 func (f *FS) DeleteRevoked(_ context.Context, userID tgid.UserID, sid string) error {
-	if !ValidSID(sid) {
-		return ErrInvalidSID
-	}
 	p := f.revokedPath(userID, sid)
 	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("sessionstore: removing tombstone %s: %w", p, err)
@@ -236,7 +208,7 @@ func (f *FS) DeleteRevoked(_ context.Context, userID tgid.UserID, sid string) er
 	return nil
 }
 
-func (f *FS) SweepAuthState(_ context.Context, now time.Time) error {
+func (f *FS) SweepAuthState(ctx context.Context, now time.Time) error {
 	entries, err := os.ReadDir(f.grantsDir())
 	if err != nil {
 		return fmt.Errorf("sessionstore: listing grants: %w", err)
@@ -248,7 +220,7 @@ func (f *FS) SweepAuthState(_ context.Context, now time.Time) error {
 		}
 		lock := f.grantLock(family)
 		lock.Lock()
-		grant, version, err := f.readGrant(family)
+		grant, version, err := f.LoadGrant(ctx, family)
 		if err == nil && version != 0 && grant.Expired(now) {
 			err = os.Remove(f.grantPath(family))
 		}

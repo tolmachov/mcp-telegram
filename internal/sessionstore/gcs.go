@@ -64,16 +64,10 @@ func objectName(userID tgid.UserID, sid string) string {
 }
 
 func (g *GCS) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {
-	if !ValidSID(sid) {
-		return brokenSession{err: ErrInvalidSID}
-	}
 	return gcsSession{object: g.bucket.Object(objectName(userID, sid))}
 }
 
 func (g *GCS) Exists(ctx context.Context, userID tgid.UserID, sid string) (bool, error) {
-	if !ValidSID(sid) {
-		return false, ErrInvalidSID
-	}
 	name := objectName(userID, sid)
 	attrs, err := g.bucket.Object(name).Attrs(ctx)
 	switch {
@@ -92,9 +86,6 @@ func (g *GCS) Exists(ctx context.Context, userID tgid.UserID, sid string) (bool,
 }
 
 func (g *GCS) Delete(ctx context.Context, userID tgid.UserID, sid string) error {
-	if !ValidSID(sid) {
-		return ErrInvalidSID
-	}
 	name := objectName(userID, sid)
 	err := g.bucket.Object(name).Delete(ctx)
 	if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
@@ -142,9 +133,6 @@ func (g *GCS) revokedName(userID tgid.UserID, sid string) string {
 }
 
 func (g *GCS) Revoke(ctx context.Context, userID tgid.UserID, sid string) error {
-	if !ValidSID(sid) {
-		return ErrInvalidSID
-	}
 	// Write the tombstone first (source of truth), then delete the blob. A
 	// zero-byte object is enough; its presence is the signal.
 	name := g.revokedName(userID, sid)
@@ -159,9 +147,6 @@ func (g *GCS) Revoke(ctx context.Context, userID tgid.UserID, sid string) error 
 }
 
 func (g *GCS) Revoked(ctx context.Context, userID tgid.UserID, sid string) (bool, error) {
-	if !ValidSID(sid) {
-		return false, ErrInvalidSID
-	}
 	name := g.revokedName(userID, sid)
 	_, err := g.bucket.Object(name).Attrs(ctx)
 	switch {
@@ -175,9 +160,6 @@ func (g *GCS) Revoked(ctx context.Context, userID tgid.UserID, sid string) (bool
 }
 
 func (g *GCS) DeleteRevoked(ctx context.Context, userID tgid.UserID, sid string) error {
-	if !ValidSID(sid) {
-		return ErrInvalidSID
-	}
 	name := g.revokedName(userID, sid)
 	err := g.bucket.Object(name).Delete(ctx)
 	if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
@@ -208,9 +190,6 @@ func isPreconditionFailed(err error) bool {
 // LoadGrant reads family's grant record; the version is the object's GCS
 // generation, which is never zero for an existing object.
 func (g *GCS) LoadGrant(ctx context.Context, family string) (GrantRecord, int64, error) {
-	if !ValidSID(family) {
-		return GrantRecord{}, 0, ErrInvalidSID
-	}
 	r, err := g.bucket.Object(grantObjectName(family)).NewReader(ctx)
 	if errors.Is(err, storage.ErrObjectNotExist) {
 		return GrantRecord{}, 0, nil
@@ -233,9 +212,6 @@ func (g *GCS) LoadGrant(ctx context.Context, family string) (GrantRecord, int64,
 // StoreGrant writes family's grant record conditioned on the object
 // generation (or on its absence for version 0).
 func (g *GCS) StoreGrant(ctx context.Context, family string, grant GrantRecord, version int64) error {
-	if !ValidSID(family) || !ValidSID(grant.SID) {
-		return ErrInvalidSID
-	}
 	data, err := json.Marshal(grant)
 	if err != nil {
 		return fmt.Errorf("sessionstore: encoding grant: %w", err)

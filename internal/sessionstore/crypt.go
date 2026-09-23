@@ -120,7 +120,10 @@ func (c *Cipher) open(userID tgid.UserID, userKey, blob []byte) ([]byte, error) 
 	return plaintext, nil
 }
 
-// Encrypted wraps a backend so that it only ever sees AEAD ciphertext.
+// Encrypted wraps a backend so that it only ever sees AEAD ciphertext. It is
+// also the one place session ids and grant families are validated: a
+// token-derived value must not become an object-name or file-path suffix
+// unchecked, and the backends trust what reaches them.
 func Encrypted(inner Store, cipher *Cipher) Store {
 	return &encryptedStore{inner: inner, cipher: cipher}
 }
@@ -130,12 +133,8 @@ type encryptedStore struct {
 	cipher *Cipher
 }
 
-// validStoreSID guards the store boundary before a token-derived value can
-// become an object-name or file-path suffix.
-func validStoreSID(sid string) bool { return ValidSID(sid) }
-
-// ErrInvalidSID is returned by every Store method when a caller presents a
-// malformed non-empty sid (see validStoreSID).
+// ErrInvalidSID is returned by the Encrypted store when a caller presents a
+// malformed session id or grant family (see ValidSID).
 var ErrInvalidSID = errors.New("sessionstore: invalid session id")
 
 // brokenSession is returned by Session for an invalid sid; every operation
@@ -147,20 +146,19 @@ func (b brokenSession) LoadSession(context.Context) ([]byte, error) { return nil
 func (b brokenSession) StoreSession(context.Context, []byte) error  { return b.err }
 
 func (s *encryptedStore) Session(userID tgid.UserID, sid string, userKey []byte) session.Storage {
-	if !validStoreSID(sid) {
+	if !ValidSID(sid) {
 		return brokenSession{err: ErrInvalidSID}
 	}
 	return &encryptedSession{
 		inner:   s.inner.Session(userID, sid, nil),
 		cipher:  s.cipher,
 		userID:  userID,
-		sid:     sid,
 		userKey: userKey,
 	}
 }
 
 func (s *encryptedStore) Exists(ctx context.Context, userID tgid.UserID, sid string) (bool, error) {
-	if !validStoreSID(sid) {
+	if !ValidSID(sid) {
 		return false, ErrInvalidSID
 	}
 	ok, err := s.inner.Exists(ctx, userID, sid)
@@ -171,7 +169,7 @@ func (s *encryptedStore) Exists(ctx context.Context, userID tgid.UserID, sid str
 }
 
 func (s *encryptedStore) Delete(ctx context.Context, userID tgid.UserID, sid string) error {
-	if !validStoreSID(sid) {
+	if !ValidSID(sid) {
 		return ErrInvalidSID
 	}
 	if err := s.inner.Delete(ctx, userID, sid); err != nil {
@@ -192,7 +190,7 @@ func (s *encryptedStore) List(ctx context.Context) ([]SessionRef, error) {
 // Encrypted wrapper delegates the tombstone methods straight through.
 
 func (s *encryptedStore) Revoke(ctx context.Context, userID tgid.UserID, sid string) error {
-	if !validStoreSID(sid) {
+	if !ValidSID(sid) {
 		return ErrInvalidSID
 	}
 	if err := s.inner.Revoke(ctx, userID, sid); err != nil {
@@ -202,7 +200,7 @@ func (s *encryptedStore) Revoke(ctx context.Context, userID tgid.UserID, sid str
 }
 
 func (s *encryptedStore) Revoked(ctx context.Context, userID tgid.UserID, sid string) (bool, error) {
-	if !validStoreSID(sid) {
+	if !ValidSID(sid) {
 		return false, ErrInvalidSID
 	}
 	ok, err := s.inner.Revoked(ctx, userID, sid)
@@ -221,7 +219,7 @@ func (s *encryptedStore) ListRevoked(ctx context.Context) ([]SessionRef, error) 
 }
 
 func (s *encryptedStore) DeleteRevoked(ctx context.Context, userID tgid.UserID, sid string) error {
-	if !validStoreSID(sid) {
+	if !ValidSID(sid) {
 		return ErrInvalidSID
 	}
 	if err := s.inner.DeleteRevoked(ctx, userID, sid); err != nil {
@@ -234,6 +232,9 @@ func (s *encryptedStore) DeleteRevoked(ctx context.Context, userID tgid.UserID, 
 // pass straight through too.
 
 func (s *encryptedStore) LoadGrant(ctx context.Context, family string) (GrantRecord, int64, error) {
+	if !ValidSID(family) {
+		return GrantRecord{}, 0, ErrInvalidSID
+	}
 	grant, version, err := s.inner.LoadGrant(ctx, family)
 	if err != nil {
 		return GrantRecord{}, 0, fmt.Errorf("encrypted store: %w", err)
@@ -242,6 +243,9 @@ func (s *encryptedStore) LoadGrant(ctx context.Context, family string) (GrantRec
 }
 
 func (s *encryptedStore) StoreGrant(ctx context.Context, family string, grant GrantRecord, version int64) error {
+	if !ValidSID(family) || !ValidSID(grant.SID) {
+		return ErrInvalidSID
+	}
 	if err := s.inner.StoreGrant(ctx, family, grant, version); err != nil {
 		return fmt.Errorf("encrypted store: %w", err)
 	}
@@ -259,7 +263,6 @@ type encryptedSession struct {
 	inner   session.Storage
 	cipher  *Cipher
 	userID  tgid.UserID
-	sid     string
 	userKey []byte
 }
 
@@ -282,10 +285,9 @@ func (s *encryptedSession) LoadSession(ctx context.Context) ([]byte, error) {
 	return plaintext, nil
 }
 
+// StoreSession seals data first; aeadFor refuses a missing or short userKey,
+// so nothing is written without a proper per-session key.
 func (s *encryptedSession) StoreSession(ctx context.Context, data []byte) error {
-	if !ValidSID(s.sid) || len(s.userKey) != userKeyLen {
-		return fmt.Errorf("sessionstore: refusing to store session with invalid id/key pairing")
-	}
 	blob, err := s.cipher.seal(s.userID, s.userKey, data)
 	if err != nil {
 		return err
