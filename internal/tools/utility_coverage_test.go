@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -221,5 +222,80 @@ func TestBackupMessagesWritesAtomicallyInsideConfiguredPath(t *testing.T) {
 	info, err := os.Stat(target)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	assert.Zero(t, inv.Remaining())
+}
+
+// partialBackupScript resolves channelID, returns a first history page of two
+// messages out of ten, and answers the next page with secondPage.
+func partialBackupScript(t *testing.T, channelID int64, secondPage func() error) *telegramfake.Invoker {
+	t.Helper()
+	return telegramfake.New(
+		notUserStep(t, channelID),
+		resolveChannelStep(t, channelID, 161),
+		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
+			out.Messages = &tg.MessagesMessagesSlice{Count: 10, Messages: []tg.MessageClass{
+				&tg.Message{ID: 10, Date: 200, Message: "second"},
+				&tg.Message{ID: 9, Date: 100, Message: "first"},
+			}}
+			return nil
+		}),
+		telegramfake.Typed(func(context.Context, *tg.MessagesGetHistoryRequest, *tg.MessagesMessagesBox) error {
+			return secondPage()
+		}),
+	)
+}
+
+// TestBackupMessagesSavesPartialOnFloodWait verifies a flood wait after the
+// first page still saves what was fetched, and the failure names both the
+// wait and the saved file.
+func TestBackupMessagesSavesPartialOnFloodWait(t *testing.T) {
+	const channelID = int64(62)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "backup.txt")
+	inv := partialBackupScript(t, channelID, func() error {
+		return &tgerr.Error{Code: 420, Message: "FLOOD_WAIT_30", Type: "FLOOD_WAIT", Argument: 30}
+	})
+	peers := tgclient.NewResolver(tg.NewClient(inv))
+	handler := NewMessageBackupHandler(peers, messages.NewProvider(peers, 100_000), []string{dir})
+
+	errRes, out, err := handler.handle(t.Context(), &mcp.CallToolRequest{}, BackupMessagesInput{ChatID: channelID, Filepath: target})
+	require.Error(t, err)
+	assert.Nil(t, errRes)
+	assert.Nil(t, out)
+	text := failureText("BackupMessages", err)
+	assert.Contains(t, text, "30 seconds")
+	assert.Contains(t, text, "a partial file with 2 messages was saved to "+target)
+	content, readErr := os.ReadFile(target) //nolint:gosec // target is inside the test's private temporary directory.
+	require.NoError(t, readErr)
+	assert.Contains(t, string(content), "first")
+	assert.Contains(t, string(content), "second")
+	assert.Zero(t, inv.Remaining())
+}
+
+// TestBackupMessagesSavesPartialOnCancel verifies a cancelled backup saves
+// what was fetched and reports it as a partial success, not an error.
+func TestBackupMessagesSavesPartialOnCancel(t *testing.T) {
+	const channelID = int64(63)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "backup.txt")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	inv := partialBackupScript(t, channelID, func() error {
+		cancel()
+		return context.Canceled
+	})
+	peers := tgclient.NewResolver(tg.NewClient(inv))
+	handler := NewMessageBackupHandler(peers, messages.NewProvider(peers, 100_000), []string{dir})
+
+	res, out, err := handler.handle(ctx, &mcp.CallToolRequest{}, BackupMessagesInput{ChatID: channelID, Filepath: target})
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.False(t, res.IsError)
+	require.NotNil(t, out)
+	assert.True(t, out.Partial)
+	assert.Equal(t, 2, out.MessageCount)
+	assert.Equal(t, target, out.Filepath)
+	_, statErr := os.Stat(target)
+	require.NoError(t, statErr)
 	assert.Zero(t, inv.Remaining())
 }
