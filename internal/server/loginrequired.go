@@ -26,16 +26,6 @@ const loginRequiredTool = "TelegramLoginRequired"
 // host's tool-call timeout.
 const authProbeTimeout = 20 * time.Second
 
-// blockedError marks a condition our own startup callback detected — a failed
-// auth check, or a session that connected fine but is not authorized. It
-// carries the user-facing explanation, and it exists so the callback can
-// unwind client.Run (tearing the Telegram connection down) and be recovered
-// outside; see finishRun, which handles both this and the failures gotd
-// reports before the callback ever runs.
-type blockedError struct{ message string }
-
-func (e *blockedError) Error() string { return e.message }
-
 // LoginState is the outcome of the live re-check. Values are part of the
 // tool's output contract, so they are constants rather than inline literals.
 type LoginState string
@@ -211,7 +201,7 @@ func (s *Server) fillProbedStatus(ctx context.Context, status *LoginRequiredStat
 		// already up. Loading the Telegram tools means building the assembly
 		// inside a live client.Run scope and swapping it into the running
 		// session; the variants proxy could not forward the resulting change
-		// notifications anyway (see runHappy), so ask for the reconnect that
+		// notifications anyway (see serveAssembly), so ask for the reconnect that
 		// rebuilds cleanly.
 		status.State = StateAuthorizedPendingReconnect
 		status.Account = account
@@ -233,7 +223,12 @@ func accountSuffix(account string) string {
 }
 
 // authProbe connects to Telegram on the stored session and reports whether it
-// is authorized, plus the display name when it is.
+// is authorized, plus the display name when it is. It goes through
+// startLocalClient, so it answers exactly as startup would: a session
+// Telegram refused — whether through the auth check or already in the connect
+// phase, where there is no Status to read — is the verdict "not authorized",
+// not a failed check, while a cancelled or incomplete probe stays an error
+// and is never reported as a dead session.
 //
 // It is serialized by probeMu. The login-required server holds no Telegram
 // connection of its own, but the *session* is shared: the SDK dispatches tool
@@ -247,63 +242,19 @@ func (s *Server) authProbe(ctx context.Context) (account string, authorized bool
 	s.probeMu.Lock()
 	defer s.probeMu.Unlock()
 
-	client, waiter, err := tgclient.CreateClient(s.opts.Config, s.floodWaitLogger())
-	if err != nil {
-		return "", false, fmt.Errorf("constructing Telegram client: %w", err)
-	}
-
-	// checked distinguishes "the status call ran" from "client.Run returned
-	// without running it", which is not visible from runErr alone: gotd
-	// swallows a cancelled run into a nil error (telegram/connect.go:234), and
-	// reporting that as an authoritative "not authorized" would tell the user
-	// their session is dead on the strength of a probe that never happened.
-	var checked bool
-	runErr := waiter.Run(ctx, func(ctx context.Context) error {
-		return client.Run(ctx, func(ctx context.Context) error {
-			status, err := client.Auth().Status(ctx)
-			if err != nil {
-				return fmt.Errorf("checking auth status: %w", err)
-			}
-			checked = true
-			authorized = status.Authorized
-			// Status already carries the user object from the same
-			// users.getUsers round-trip, so there is no second call to make
-			// and no display-name lookup that can fail on its own.
-			if status.User != nil {
-				account = tgclient.UserName(status.User)
-			}
-			return nil
-		})
-	})
-	switch {
-	// checked outranks runErr: the auth call is the last thing the callback
-	// does, so once it has answered, a late error can only come from
-	// client.Run's deferred close (multierr-aggregated sub-connection
-	// teardown). Discarding a completed verdict over that would report
-	// check_failed for a probe that succeeded.
-	case checked:
-		return account, authorized, nil
-	case runErr != nil && tgclient.IsSessionUnauthorized(runErr):
-		// Telegram was reached and rejected the stored key outright. gotd
-		// raises these during connection setup, so the callback never ran and
-		// there is no Status to read — but the answer is not "undetermined",
-		// it is "this session is dead". Reporting it as a failed check would
-		// send the user chasing network problems for a session they revoked;
-		// worse, it is the *only* way this route can end, so login_required
-		// would otherwise be unreachable for exactly the case that motivated
-		// serving this mode at all.
-		return "", false, nil
-	case runErr != nil:
-		return "", false, fmt.Errorf("connecting to Telegram: %w", runErr)
-	}
-	return "", false, fmt.Errorf("the check did not complete: %w", cause(ctx))
+	return probeVerdict(s.startLocalClient(ctx))
 }
 
-// cause reports why a probe ended without running, preferring the context's
-// own error so a cancelled call is never mistaken for a Telegram verdict.
-func cause(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
+// probeVerdict turns a startLocalClient outcome into the re-check's answer.
+func probeVerdict(running *tgclient.Running, err error) (account string, authorized bool, _ error) {
+	switch {
+	case errors.Is(err, tgclient.ErrSessionUnauthorized):
+		return "", false, nil
+	case err != nil:
+		return "", false, err
 	}
-	return errors.New("the Telegram client returned before the auth check ran")
+	account = tgclient.UserName(running.Self())
+	// The verdict is in; an error out of the teardown cannot change it.
+	_ = running.Close()
+	return account, true, nil
 }

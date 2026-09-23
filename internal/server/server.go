@@ -9,10 +9,8 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/experimental-ext-variants/go/sdk/variants"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -149,12 +147,13 @@ func New(opts Options) (*Server, error) {
 }
 
 // Run starts the MCP server on the configured transport (stdio, or streamable
-// HTTP behind the embedded OAuth server). When Telegram cannot be reached at all — missing credentials, client
-// construction failure, a connect-phase failure, a failed auth check, or a
-// session that is simply not authorized — the stdio path comes up in
-// login-required mode instead of failing: a server exposing one loudly-named
-// tool that reports the problem, plus instructions that say the same thing to
-// the model. See runLoginRequired for why that beats failing the connection.
+// HTTP behind the embedded OAuth server). When Telegram cannot be reached at
+// all — missing credentials, an unusable session store, a connect-phase
+// failure, a failed auth check, or a session that is simply not authorized —
+// the stdio path comes up in login-required mode instead of failing: a server
+// exposing one loudly-named tool that reports the problem, plus instructions
+// that say the same thing to the model. See runLoginRequired for why that
+// beats failing the connection.
 //
 // Over HTTP only the missing-credentials condition can arise, because the
 // per-user clients are connected lazily by the pool; with no MCP peer to tell,
@@ -171,80 +170,100 @@ func (s *Server) Run(ctx context.Context) error {
 		return s.runHTTPWithAuth(ctx)
 	}
 
-	client, waiter, err := tgclient.CreateClient(s.opts.Config, s.floodWaitLogger())
+	running, err := s.startLocalClient(ctx)
 	if err != nil {
-		msg := fmt.Sprintf("mcp-telegram: failed to construct Telegram client: %v. Verify MCP_TELEGRAM_API_ID/MCP_TELEGRAM_API_HASH and the session file; `mcp-telegram logout` followed by `mcp-telegram login` often recovers a corrupt session.", err)
-		s.logger.Error("no Telegram access", "reason", "telegram client construction failed", "err", err)
-		return s.startBlocked(ctx, msg)
+		if errors.Is(err, tgclient.ErrSessionUnauthorized) {
+			s.logger.Warn("no Telegram access", "reason", "not authorized; login required", "err", err)
+		} else {
+			s.logger.Error("no Telegram access", "reason", "could not start the Telegram client", "err", err)
+		}
+		return s.startBlocked(ctx, blockedReason(err))
 	}
-
-	// A blocked condition detected by our own callback is reported by
-	// returning a *blockedError rather than serving from inside client.Run:
-	// that unwinds the Telegram connection first, so the login-required server
-	// does not hold a pointless connection open for the life of the MCP
-	// session.
-	//
-	// served flips immediately before runHappy takes over, which is what makes
-	// finishRun's phase test meaningful — see its doc comment. Both joins
-	// (floodwait's waiter and gotd's errgroup) already establish the
-	// happens-before, so a plain bool would be correct; atomic.Bool is
-	// deliberate belt-and-braces on the one flag that decides whether a hard
-	// failure gets downgraded to a degraded-but-running server.
-	var served atomic.Bool
-	err = waiter.Run(ctx, func(ctx context.Context) error {
-		return client.Run(ctx, func(ctx context.Context) error {
-			status, err := client.Auth().Status(ctx)
-			if err != nil {
-				msg := fmt.Sprintf("mcp-telegram: Telegram auth check failed: %v. Verify network connectivity and retry; if the error persists, `mcp-telegram logout` followed by `mcp-telegram login` may recover.", err)
-				s.logger.Error("no Telegram access", "reason", "auth check failed", "err", err)
-				return &blockedError{message: msg}
-			}
-
-			if !status.Authorized {
-				s.logger.Warn("no Telegram access", "reason", "not authorized; login required")
-				return &blockedError{message: notLoggedInMessage}
-			}
-
-			served.Store(true)
-			return s.runHappy(ctx, client)
-		})
-	})
-	return s.finishRun(ctx, err, served.Load())
+	return s.serveStdio(ctx, running)
 }
 
-// finishRun decides whether an error out of the Telegram client run is a
-// blocked *startup* — which stdio answers with login-required mode — or a
-// genuine serve-loop failure, which is always fatal.
-//
-// The test is the phase, not the error type. Classifying by *blockedError
-// alone would cover only the two conditions our own callback can detect, and
-// gotd never runs that callback for a whole class of failures: the callback
-// fires on <-c.ready.Ready(), while restoreConnection ("corrupted key") returns
-// before the errgroup starts, and reconnectUntilClosed turns
-// AUTH_KEY_UNREGISTERED / SESSION_EXPIRED / AUTH_KEY_DUPLICATED / any 401 into
-// backoff.Permanent (telegram/connect.go:94-106) in a sibling goroutine. Those
-// are exactly the revoked-session cases notLoggedInMessage promises to handle,
-// so routing them to a hard exit would leave the host showing the bare
-// connection failure this whole mode exists to eliminate.
-//
-// (A session revoked from Telegram's Devices list often surfaces the friendlier
-// way instead — auth.Status maps a 401 on users.getUsers to Status{} with no
-// error, so the callback does run and produces a *blockedError. Both routes
-// have to land in the same place.)
-func (s *Server) finishRun(ctx context.Context, err error, served bool) error {
-	if err == nil {
-		return nil
+// startLocalClient connects the single local account on its stored session
+// (the Keychain on darwin, the state-directory file elsewhere) through the
+// same StartClient the HTTP pool uses per user, so stdio startup and the
+// login-required re-check share one "authorized / unauthorized / failed"
+// answer.
+func (s *Server) startLocalClient(ctx context.Context) (*tgclient.Running, error) {
+	storage, err := tgclient.NewSessionStorage()
+	if err != nil {
+		return nil, fmt.Errorf("opening session storage: %w", err)
 	}
-	if served {
-		return fmt.Errorf("running server: %w", err)
+	running, err := tgclient.StartClient(ctx, s.opts.Config, storage, s.floodWaitLogger())
+	if err != nil {
+		return nil, fmt.Errorf("starting Telegram client: %w", err)
 	}
-	var blocked *blockedError
-	if errors.As(err, &blocked) {
-		return s.startBlocked(ctx, blocked.message)
+	return running, nil
+}
+
+// blockedReason is the login-required explanation for a failed
+// startLocalClient. Only a session Telegram refused gets the login advice
+// outright; anything else may be a network problem as much as a dead or
+// corrupt session, so the raw error leads.
+func blockedReason(err error) string {
+	if errors.Is(err, tgclient.ErrSessionUnauthorized) {
+		return notLoggedInMessage
 	}
-	msg := fmt.Sprintf("mcp-telegram: could not connect to Telegram: %v. If this is a network problem, verify connectivity and retry; if the stored session was revoked or is corrupt, `mcp-telegram logout` followed by `mcp-telegram login` recovers it.", err)
-	s.logger.Error("no Telegram access", "reason", "connect phase failed before the auth check ran", "err", err)
-	return s.startBlocked(ctx, msg)
+	return fmt.Sprintf("mcp-telegram: could not connect to Telegram: %v. If this is a network problem, verify connectivity and retry; if the stored session was revoked or is corrupt, `mcp-telegram logout` followed by `mcp-telegram login` recovers it.", err)
+}
+
+// serveStdio serves the Telegram tools over stdio on a connected client and
+// disconnects it afterwards. A client that stops on its own (a session revoked
+// mid-run, a permanent transport failure) is fatal: once serving has begun
+// there is nothing left for login-required mode to add.
+func (s *Server) serveStdio(ctx context.Context, running *tgclient.Running) error {
+	serveErr := s.serveAssembly(ctx, running.API(), running.Done())
+	// Close reports only a failure of the client's own; the teardown it
+	// starts here is not one.
+	if clientErr := running.Close(); clientErr != nil {
+		return fmt.Errorf("telegram client stopped: %w", clientErr)
+	}
+	return serveErr
+}
+
+// serveAssembly serves one assembly over stdio until the host disconnects
+// (closes stdin), ctx is cancelled, or clientDone closes because the client
+// it runs on has stopped.
+func (s *Server) serveAssembly(ctx context.Context, api *tg.Client, clientDone <-chan struct{}) error {
+	serveCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	go func() {
+		select {
+		case <-clientDone:
+			stop()
+		case <-serveCtx.Done():
+		}
+	}()
+
+	asm, err := s.buildAssembly(serveCtx, api, s.logger)
+	if err != nil {
+		return err
+	}
+	var serveErr error
+	if asm.variants != nil {
+		// The variants proxy cannot forward async resources/list_changed
+		// notifications (they fire from the watcher goroutine on a background
+		// context with no front session to redirect to — a documented library
+		// limitation). Pinned resources are still exposed on every variant and
+		// refreshed by the poller, so clients see the updated set on their next
+		// resources/list; only proactive change-notifications are unavailable.
+		// Pin a single --variant to restore live notifications.
+		s.logger.Info("multi-variant mode: pinned-chat resources are exposed on every variant and refreshed by one poller, but live resources/list_changed notifications are not delivered through the variants proxy; pin a single --variant for live updates")
+		serveErr = asm.variants.Run(serveCtx, s.stdioTransport())
+	} else {
+		serveErr = asm.single.Run(serveCtx, s.stdioTransport())
+	}
+	if ctx.Err() != nil {
+		// The host cancelled ctx: shutdown, not a failure.
+		serveErr = nil
+	}
+	if err := errors.Join(serveErr, asm.Close()); err != nil {
+		return fmt.Errorf("running MCP server: %w", err)
+	}
+	return nil
 }
 
 // floodWaitLogger surfaces flood waits to the logs in a way that makes the
@@ -272,26 +291,28 @@ func (s *Server) floodWaitLogger() tgclient.FloodWaitCallback {
 }
 
 // assembly is one complete set of MCP servers built around one Telegram
-// client: either the SEP-2053 variants proxy (variants == nil ⇔ pinned) or a
-// single pinned-variant server. The stdio path builds exactly one; the HTTP
-// auth mode builds one per authenticated user.
+// client, plus the pinned-chat watcher mirroring its resource set: either the
+// SEP-2053 variants proxy (variants == nil ⇔ pinned) or a single
+// pinned-variant server. The stdio path builds exactly one; the HTTP auth mode
+// builds one per authenticated user.
 type assembly struct {
 	variants *variants.Server // non-nil when exposing all variants
 	single   *mcp.Server      // non-nil when --variant pins one
 
-	// pinnedServers are the inner servers the pinned-chat watcher mirrors
-	// its resource set onto.
-	pinnedServers []*mcp.Server
-	msgProvider   *messages.Provider
+	// stopWatch cancels the pinned-chat watcher; watchDone closes once it
+	// has exited.
+	stopWatch context.CancelFunc
+	watchDone <-chan struct{}
+	logger    *slog.Logger
 }
 
 // buildAssembly constructs handlers, resources, prompts, and the MCP
-// server(s) for one Telegram client.
-func (s *Server) buildAssembly(client *telegram.Client) (*assembly, error) {
+// server(s) for one Telegram client, and starts the pinned-chat watcher on a
+// child of ctx. The caller must Close the assembly.
+func (s *Server) buildAssembly(ctx context.Context, api *tg.Client, logger *slog.Logger) (*assembly, error) {
 	// One chat-list snapshot shared by GetChats, SearchChats, the chats
 	// resource and completion, so none of them re-paginates every dialog on
 	// its own.
-	api := client.API()
 	chatsCache := tgdata.NewChatsCache(func(ctx context.Context, onProgress tgdata.ProgressFunc) (*tgdata.ChatsList, error) {
 		return tgdata.GetChats(ctx, api, onProgress)
 	})
@@ -299,7 +320,7 @@ func (s *Server) buildAssembly(client *telegram.Client) (*assembly, error) {
 	impl := &mcp.Implementation{Name: "mcp-telegram", Version: s.opts.Version}
 	serverOpts := &mcp.ServerOptions{
 		Instructions: happyInstructions,
-		Logger:       s.logger,
+		Logger:       logger,
 		// Suggest chat titles/usernames/ids for prompt arguments and the
 		// chat resource template as the user types.
 		CompletionHandler: completion.Handler(chatsCache),
@@ -327,78 +348,61 @@ func (s *Server) buildAssembly(client *telegram.Client) (*assembly, error) {
 		prompts.Register(srv)
 	}
 
+	asm := &assembly{logger: logger}
+	// pinnedServers are the inner servers the pinned-chat watcher mirrors its
+	// resource set onto.
+	var pinnedServers []*mcp.Server
 	if s.opts.Variant == "" {
-		vs, inners := buildVariantsServer(impl, serverOpts, fullHandlers, researchHandlers, wire, s.logger)
-		return &assembly{variants: vs, pinnedServers: inners, msgProvider: msgProvider}, nil
-	}
-	d, ok := defForVariant(s.opts.Variant)
-	if !ok {
-		// Unreachable: New rejects unknown non-empty variants, and Server is
-		// only constructible through New. Fail loudly rather than silently
-		// falling back to the zero-value mode if that invariant is ever broken.
-		return nil, fmt.Errorf("buildAssembly: variant %q not found in table (should have been rejected by New)", s.opts.Variant)
-	}
-	srv := newInnerForMode(impl, serverOpts, fullHandlers, researchHandlers, d.mode, wire, s.logger)
-	return &assembly{single: srv, pinnedServers: []*mcp.Server{srv}, msgProvider: msgProvider}, nil
-}
-
-func (s *Server) runHappy(ctx context.Context, client *telegram.Client) error {
-	asm, err := s.buildAssembly(client)
-	if err != nil {
-		return err
-	}
-
-	// run is the stdio serve loop; HTTP never reaches here (it serves per-user
-	// assemblies through runHTTPWithAuth). With no --variant override we expose
-	// every variant via the SEP-2053 proxy and mirror pinned resources onto all
-	// of them (one poller). With an override we expose just that variant as a
-	// plain server.
-	var run func() error
-	if asm.variants != nil {
-		run = func() error { return asm.variants.Run(ctx, s.stdioTransport()) }
-		// The variants proxy cannot forward async resources/list_changed
-		// notifications (they fire from the watcher goroutine on a background
-		// context with no front session to redirect to — a documented library
-		// limitation). Pinned resources are still exposed on every variant and
-		// refreshed by the poller, so clients see the updated set on their next
-		// resources/list; only proactive change-notifications are unavailable.
-		// Pin a single --variant to restore live notifications.
-		s.logger.Info("multi-variant mode: pinned-chat resources are exposed on every variant and refreshed by one poller, but live resources/list_changed notifications are not delivered through the variants proxy; pin a single --variant for live updates")
+		asm.variants, pinnedServers = buildVariantsServer(impl, serverOpts, fullHandlers, researchHandlers, wire, logger)
 	} else {
-		run = func() error { return asm.single.Run(ctx, s.stdioTransport()) }
+		d, ok := defForVariant(s.opts.Variant)
+		if !ok {
+			// Unreachable: New rejects unknown non-empty variants, and Server is
+			// only constructible through New. Fail loudly rather than silently
+			// falling back to the zero-value mode if that invariant is ever broken.
+			return nil, fmt.Errorf("buildAssembly: variant %q not found in table (should have been rejected by New)", s.opts.Variant)
+		}
+		asm.single = newInnerForMode(impl, serverOpts, fullHandlers, researchHandlers, d.mode, wire, logger)
+		pinnedServers = []*mcp.Server{asm.single}
 	}
-	pinnedServers := asm.pinnedServers
-	msgProvider := asm.msgProvider
 
 	// The SDK has no BeforeListResources hook, so the pinned-chat set is
 	// refreshed by a periodic poller (default 30s, --pinned-refresh-seconds).
 	// list_changed only fires when the set actually changes, so the ticker is
-	// safe to run on a short interval. The watcher runs on watchCtx, a child of
-	// ctx we cancel as soon as run() returns: the MCP host normally shuts us down
-	// by closing stdin, which unblocks run() *without* canceling ctx, so without
-	// this the watcher would never see Done() and every clean disconnect would
-	// hit the 5s abandon timeout below.
-	watchCtx, cancelWatch := context.WithCancel(ctx)
-	pinnedProvider := resources.NewPinnedChatsProvider(client.API(), msgProvider, s.logger, pinnedServers...)
-	pinnedDone := pinnedProvider.WatchInBackground(watchCtx, s.opts.PinnedRefresh)
+	// safe to run on a short interval. The watcher gets its own child context
+	// because the stdio host normally shuts us down by closing stdin, which
+	// ends the serve loop while ctx stays live; Close stops the watcher either
+	// way.
+	watchCtx, stopWatch := context.WithCancel(ctx)
+	pinnedProvider := resources.NewPinnedChatsProvider(api, msgProvider, logger, pinnedServers...)
+	asm.stopWatch = stopWatch
+	asm.watchDone = pinnedProvider.WatchInBackground(watchCtx, s.opts.PinnedRefresh)
+	return asm, nil
+}
 
-	runErr := run()
-	cancelWatch()
+// pinnedWatchExitTimeout bounds how long Close waits for the pinned-chat
+// watcher to exit.
+const pinnedWatchExitTimeout = 5 * time.Second
 
-	// Wait for the pinned-chat watcher to exit before returning, so its
-	// goroutine cannot race with server teardown while mid-way through
-	// AddResource/RemoveResources. cancelWatch above stops it deterministically;
-	// the timeout only guards against a genuinely wedged provider (e.g. blocked
-	// in a Telegram call) holding up shutdown indefinitely. If it ever fires we
-	// are abandoning a live goroutine that will then touch a torn-down server —
-	// a real correctness hazard, so it logs at Error, not Warn.
+// Close stops the pinned-chat watcher and closes the variants proxy. It
+// waits for the watcher to exit so its goroutine cannot race with server
+// teardown while mid-way through AddResource/RemoveResources. The cancel
+// stops it deterministically; the timeout only guards against a genuinely
+// wedged provider (e.g. blocked in a Telegram call) holding up shutdown
+// indefinitely. If it ever fires we are abandoning a live goroutine that will
+// then touch a torn-down server — a real correctness hazard, so it logs at
+// Error, not Warn.
+func (a *assembly) Close() error {
+	a.stopWatch()
 	select {
-	case <-pinnedDone:
-	case <-time.After(5 * time.Second):
-		s.logger.Error("pinned-chat watcher did not exit in 5s; abandoning", "pinned_refresh", s.opts.PinnedRefresh)
+	case <-a.watchDone:
+	case <-time.After(pinnedWatchExitTimeout):
+		a.logger.Error("pinned-chat watcher did not exit in time; abandoning", "timeout", pinnedWatchExitTimeout)
 	}
-	if runErr != nil {
-		return fmt.Errorf("running MCP server: %w", runErr)
+	if a.variants != nil {
+		if err := a.variants.Close(); err != nil {
+			return fmt.Errorf("closing variants proxy: %w", err)
+		}
 	}
 	return nil
 }

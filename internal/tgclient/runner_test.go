@@ -50,3 +50,45 @@ func TestRunningPreservesCauseAndClassifiesSessionErrors(t *testing.T) {
 		assert.Equal(t, IsSessionUnauthorized(original), errors.Is(r.RunErr(), ErrSessionUnauthorized))
 	}
 }
+
+// loadFailingStorage fails LoadSession, which gotd reads in Run before it
+// connects — the "callback never runs" route out of StartClient.
+type loadFailingStorage struct{ err error }
+
+func (s loadFailingStorage) LoadSession(context.Context) ([]byte, error) { return nil, s.err }
+func (s loadFailingStorage) StoreSession(context.Context, []byte) error  { return nil }
+
+// blockingStorage parks LoadSession until the client's own context ends.
+type blockingStorage struct{}
+
+func (blockingStorage) LoadSession(ctx context.Context) ([]byte, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (blockingStorage) StoreSession(context.Context, []byte) error { return nil }
+
+// TestStartClientClassifiesFailuresBeforeTheCallback pins that a session
+// Telegram rejects before the ready callback runs still comes back as
+// ErrSessionUnauthorized, while any other early failure keeps its cause and
+// is not a verdict.
+func TestStartClientClassifiesFailuresBeforeTheCallback(t *testing.T) {
+	cfg := &Config{APIID: 1, APIHash: "hash"}
+
+	_, err := StartClient(t.Context(), cfg, loadFailingStorage{err: tgerr.New(401, "AUTH_KEY_UNREGISTERED")}, nil)
+	require.ErrorIs(t, err, ErrSessionUnauthorized)
+
+	storageErr := errors.New("keychain access denied")
+	_, err = StartClient(t.Context(), cfg, loadFailingStorage{err: storageErr}, nil)
+	require.ErrorIs(t, err, storageErr)
+	assert.NotErrorIs(t, err, ErrSessionUnauthorized)
+}
+
+// TestStartClientCancelledIsNotAVerdict pins that a startup cut short by its
+// caller reports the cancellation, never a dead session.
+func TestStartClientCancelledIsNotAVerdict(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := StartClient(ctx, &Config{APIID: 1, APIHash: "hash"}, blockingStorage{}, nil)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NotErrorIs(t, err, ErrSessionUnauthorized)
+}

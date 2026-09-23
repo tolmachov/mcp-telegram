@@ -7,9 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gotd/contrib/middleware/floodwait"
 	"github.com/gotd/td/session"
-	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 )
 
@@ -24,10 +22,11 @@ func sessionError(err error) error {
 const startClientTimeout = 30 * time.Second
 
 // Running is a live Telegram client whose Run loop is owned by a background
-// goroutine — the inversion of the stdio mode, where client.Run wraps the
-// serve loop. Used by the per-user pool in HTTP mode.
+// goroutine, so the caller can serve on it and stop it with Close. Both the
+// stdio server and the per-user pool in HTTP mode run their clients this way.
 type Running struct {
-	client *telegram.Client
+	api  *tg.Client
+	self *tg.User
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -40,62 +39,72 @@ type Running struct {
 // and blocks until it is ready to serve API calls (or fails). ctx gates only
 // the startup handshake; the running client detaches and lives until Close.
 //
-// The not-logged-in condition is reported as ErrSessionUnauthorized so
-// callers can distinguish "user must re-login" from transport failures.
+// It is the one answer to "can this session serve": nil with a ready client,
+// ErrSessionUnauthorized when Telegram does not accept the session, or the
+// failure that kept it from finding out. That covers the failures gotd
+// reports without ever running the ready callback — restoreConnection's
+// "corrupted key" returns before the callback starts, and a connect-phase 401
+// (AUTH_KEY_UNREGISTERED, SESSION_EXPIRED, …) ends Run from a sibling
+// goroutine — and a Run that ends with a nil error without having reported
+// (gotd swallows cancellation), which is never mistaken for a verdict. A
+// session revoked from Telegram's Devices list often surfaces the friendlier
+// way instead — auth.Status maps a 401 on users.getUsers to Status{} with no
+// error — and both routes land on ErrSessionUnauthorized.
 func StartClient(ctx context.Context, cfg *Config, storage session.Storage, onFloodWait FloodWaitCallback) (*Running, error) {
-	waiter := floodwait.NewWaiter().WithMaxWait(cfg.FloodWaitMaxWait)
-	if onFloodWait != nil {
-		waiter = waiter.WithCallback(func(ctx context.Context, wait floodwait.FloodWait) {
-			onFloodWait(ctx, wait.Duration)
-		})
-	}
-	client := telegram.NewClient(cfg.APIID, cfg.APIHash, telegram.Options{
-		SessionStorage: storage,
-		Middlewares:    []telegram.Middleware{waiter},
-	})
+	client, run := newClient(cfg, storage, onFloodWait)
 
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	r := &Running{
-		client: client,
+		api:    client.API(),
 		cancel: cancel,
 		done:   make(chan struct{}),
 	}
 	ready := make(chan error, 1)
 	go func() {
 		defer close(r.done)
-		err := waiter.Run(runCtx, func(ctx context.Context) error {
-			return client.Run(ctx, func(ctx context.Context) error {
-				status, err := client.Auth().Status(ctx)
-				if err != nil {
-					err = fmt.Errorf("checking Telegram auth status: %w", err)
-					ready <- err
-					return err
-				}
-				if !status.Authorized {
-					ready <- ErrSessionUnauthorized
-					return ErrSessionUnauthorized
-				}
-				ready <- nil
-				// Stay connected until Close (or a fatal client error) ends
-				// the Run loop. Returning nil here would disconnect.
-				<-ctx.Done()
-				return nil
-			})
+		err := run(runCtx, func(ctx context.Context) error {
+			status, err := client.Auth().Status(ctx)
+			if err != nil {
+				err = fmt.Errorf("checking Telegram auth status: %w", err)
+				ready <- err
+				return err
+			}
+			if !status.Authorized {
+				ready <- ErrSessionUnauthorized
+				return ErrSessionUnauthorized
+			}
+			r.self = status.User
+			ready <- nil
+			// Stay connected until Close (or a fatal client error) ends
+			// the Run loop. Returning nil here would disconnect.
+			<-ctx.Done()
+			return nil
 		})
 		r.setRunErr(err)
 		cancel()
 	}()
 
-	select {
-	case err := <-ready:
+	// readiness turns the callback's report into StartClient's answer. A
+	// report outranks however Run itself ended: once the auth check has
+	// answered, a later error can only come from Run's teardown.
+	readiness := func(err error) (*Running, error) {
 		if err != nil {
 			cancel()
 			<-r.done
 			return nil, sessionError(err)
 		}
 		return r, nil
+	}
+	select {
+	case err := <-ready:
+		return readiness(err)
 	case <-r.done:
-		// Run exited before reporting readiness: connect/dial failure.
+		select {
+		case err := <-ready:
+			return readiness(err)
+		default:
+		}
+		// Run exited before the callback reported: a connect-phase failure.
 		err := r.RunErr()
 		if err == nil {
 			err = errors.New("telegram client exited during startup")
@@ -113,10 +122,15 @@ func StartClient(ctx context.Context, cfg *Config, storage session.Storage, onFl
 }
 
 // API returns the RPC client for tool handlers.
-func (r *Running) API() *tg.Client { return r.client.API() }
+func (r *Running) API() *tg.Client { return r.api }
 
-// Client returns the underlying gotd client (completion handler needs it).
-func (r *Running) Client() *telegram.Client { return r.client }
+// Self returns the account the session is authorized as, from the readiness
+// check.
+func (r *Running) Self() *tg.User { return r.self }
+
+// Done is closed once the Run loop has exited, whether through Close or a
+// fatal client error (see RunErr).
+func (r *Running) Done() <-chan struct{} { return r.done }
 
 // RunErr returns the error the Run loop exited with, once it has.
 func (r *Running) RunErr() error {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gotd/contrib/middleware/floodwait"
+	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/tg"
@@ -101,74 +102,66 @@ func (a userAuthenticator) SignUp(_ context.Context) (auth.UserInfo, error) {
 // level) so users understand why a tool is slow.
 type FloodWaitCallback func(ctx context.Context, duration time.Duration)
 
-// CreateClient creates a new Telegram client with session storage and flood wait handling.
-// Returns the client and a floodwait.Waiter that should wrap the client.Run() call.
-// If onFloodWait is non-nil, it is invoked each time the waiter sleeps for a flood wait.
-func CreateClient(cfg *Config, onFloodWait FloodWaitCallback) (*telegram.Client, *floodwait.Waiter, error) {
-	storage, err := NewSessionStorage()
-	if err != nil {
-		return nil, nil, err
-	}
+// newClient builds a gotd client over storage behind the flood-wait
+// middleware. The returned run drives the client and must wrap every use of
+// it: the middleware only waits out a FLOOD_WAIT inside it. If onFloodWait is
+// non-nil, it is invoked each time the middleware sleeps for a flood wait.
+func newClient(cfg *Config, storage session.Storage, onFloodWait FloodWaitCallback) (*telegram.Client, func(context.Context, func(context.Context) error) error) {
 	waiter := floodwait.NewWaiter().WithMaxWait(cfg.FloodWaitMaxWait)
 	if onFloodWait != nil {
 		waiter = waiter.WithCallback(func(ctx context.Context, wait floodwait.FloodWait) {
 			onFloodWait(ctx, wait.Duration)
 		})
 	}
-
 	client := telegram.NewClient(cfg.APIID, cfg.APIHash, telegram.Options{
 		SessionStorage: storage,
 		Middlewares:    []telegram.Middleware{waiter},
 	})
-
-	return client, waiter, nil
+	run := func(ctx context.Context, f func(context.Context) error) error {
+		return waiter.Run(ctx, func(ctx context.Context) error {
+			return client.Run(ctx, f)
+		})
+	}
+	return client, run
 }
 
 // Login performs interactive sign-in to Telegram
 func Login(ctx context.Context, cfg *Config, phone string, in io.Reader, out io.Writer) error {
-	client, waiter, err := CreateClient(cfg, nil)
+	storage, err := NewSessionStorage()
 	if err != nil {
-		return fmt.Errorf("creating Telegram client: %w", err)
+		return fmt.Errorf("opening session storage: %w", err)
 	}
+	client, run := newClient(cfg, storage, nil)
 
-	err = waiter.Run(ctx, func(ctx context.Context) error {
-		return client.Run(ctx, func(ctx context.Context) error {
-			// Check if already authorized
-			status, err := client.Auth().Status(ctx)
-			if err != nil {
-				return fmt.Errorf("checking auth status: %w", err)
-			}
-
-			if status.Authorized {
-				user, err := client.Self(ctx)
-				if err != nil {
-					_, _ = fmt.Fprintf(out, "Already logged in (could not fetch display name: %v)\n", err)
-				} else {
-					_, _ = fmt.Fprintf(out, "Already logged in as %s\n", UserName(user))
-				}
-				return nil
-			}
-
-			// Perform authentication
-			flow := auth.NewFlow(
-				newUserAuthenticator(phone, in, out),
-				auth.SendCodeOptions{},
-			)
-
-			if err := flow.Run(ctx, client.Auth()); err != nil {
-				return fmt.Errorf("running auth flow: %w", err)
-			}
-
-			user, err := client.Self(ctx)
-			if err != nil {
-				return fmt.Errorf("getting user info: %w", err)
-			}
-
-			_, _ = fmt.Fprintf(out, "Successfully logged in as %s\n", UserName(user))
-			_, _ = fmt.Fprintln(out, "You can now use the mcp-telegram server.")
-
+	err = run(ctx, func(ctx context.Context) error {
+		status, err := client.Auth().Status(ctx)
+		if err != nil {
+			return fmt.Errorf("checking auth status: %w", err)
+		}
+		if status.Authorized {
+			_, _ = fmt.Fprintf(out, "Already logged in as %s\n", UserName(status.User))
 			return nil
-		})
+		}
+
+		flow := auth.NewFlow(
+			newUserAuthenticator(phone, in, out),
+			auth.SendCodeOptions{},
+		)
+		if err := flow.Run(ctx, client.Auth()); err != nil {
+			return fmt.Errorf("running auth flow: %w", err)
+		}
+
+		// The flow does not hand back the signed-in user, so this is the one
+		// place that has to ask for it.
+		user, err := client.Self(ctx)
+		if err != nil {
+			return fmt.Errorf("getting user info: %w", err)
+		}
+
+		_, _ = fmt.Fprintf(out, "Successfully logged in as %s\n", UserName(user))
+		_, _ = fmt.Fprintln(out, "You can now use the mcp-telegram server.")
+
+		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("logging in: %w", err)
@@ -178,29 +171,24 @@ func Login(ctx context.Context, cfg *Config, phone string, in io.Reader, out io.
 
 // Logout logs out from Telegram
 func Logout(ctx context.Context, cfg *Config, out io.Writer) error {
-	client, waiter, err := CreateClient(cfg, nil)
+	storage, err := NewSessionStorage()
 	if err != nil {
-		return fmt.Errorf("creating Telegram client: %w", err)
+		return fmt.Errorf("opening session storage: %w", err)
 	}
+	client, run := newClient(cfg, storage, nil)
 
-	remoteErr := waiter.Run(ctx, func(ctx context.Context) error {
-		return client.Run(ctx, func(ctx context.Context) error {
-			if _, err := client.API().AuthLogOut(ctx); err != nil {
-				return fmt.Errorf("calling auth logout: %w", err)
-			}
-			return nil
-		})
+	remoteErr := run(ctx, func(ctx context.Context) error {
+		if _, err := client.API().AuthLogOut(ctx); err != nil {
+			return fmt.Errorf("calling auth logout: %w", err)
+		}
+		return nil
 	})
-	// Delete the stored session after client.Run has returned even when the
+	// Delete the stored session after the client has stopped even when the
 	// remote logout failed (offline, revoked, or expired session). gotd
 	// persists session state while Run is active, so deleting inside the
 	// callback races with a final save that could resurrect the dead session
 	// and cause a silent re-auth failure on next start.
-	ss, err := NewSessionStorage()
-	if err != nil {
-		return errors.Join(wrapIf(remoteErr, "logging out"), fmt.Errorf("initializing session storage for local cleanup: %w", err))
-	}
-	cleanupErr := ss.DeleteSession()
+	cleanupErr := storage.DeleteSession()
 	if remoteErr != nil || cleanupErr != nil {
 		return errors.Join(wrapIf(remoteErr, "logging out"), wrapIf(cleanupErr, "deleting local session"))
 	}

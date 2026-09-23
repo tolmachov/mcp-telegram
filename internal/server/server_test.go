@@ -339,62 +339,41 @@ func newPipeServer(t *testing.T, stdin io.Reader) *Server {
 	return srv
 }
 
-// TestFinishRunClassifiesByPhase is the regression guard for the bug this
-// classification replaced: gotd reports a whole class of failures (corrupt
-// session, AUTH_KEY_UNREGISTERED, SESSION_EXPIRED, any connect-phase 401)
-// without ever running our callback, so no *blockedError exists for them.
-// Keying on the sentinel alone sent exactly those cases — the revoked
-// sessions this mode is for — to a hard exit.
-func TestFinishRunClassifiesByPhase(t *testing.T) {
-	// Over HTTP startBlocked returns the reason verbatim, which makes the
-	// routing decision directly observable without standing up a session.
-	newHTTP := func(t *testing.T) *Server {
-		t.Helper()
-		auth, store := testAuth(t, "http://127.0.0.1")
-		srv, err := New(Options{
-			Config:       &tgclient.Config{APIID: 1, APIHash: "hash"},
-			Version:      "test",
-			Transport:    TransportHTTP,
-			HTTPAddr:     ":0",
-			Auth:         auth,
-			SessionStore: store,
-			Stdin:        &bytes.Buffer{},
-			Stdout:       &bytes.Buffer{},
-			ErrOut:       &bytes.Buffer{},
-		})
-		require.NoError(t, err)
-		return srv
+// TestBlockedReasonClassifiesStartupFailures is the regression guard for the
+// routing Run applies to a failed startLocalClient. gotd reports a whole class
+// of failures (corrupt session, AUTH_KEY_UNREGISTERED, SESSION_EXPIRED, any
+// connect-phase 401) without ever running the ready callback; StartClient
+// folds the rejections into ErrSessionUnauthorized, and everything else must
+// still name the raw cause.
+func TestBlockedReasonClassifiesStartupFailures(t *testing.T) {
+	t.Run("a refused session asks for a login", func(t *testing.T) {
+		err := fmt.Errorf("starting Telegram client: %w", tgclient.ErrSessionUnauthorized)
+		assert.Equal(t, notLoggedInMessage, blockedReason(err))
+	})
+
+	t.Run("a connect-phase failure names its cause", func(t *testing.T) {
+		reason := blockedReason(errors.New("starting Telegram client: corrupted key"))
+		assert.Contains(t, reason, "could not connect to Telegram")
+		assert.Contains(t, reason, "corrupted key")
+		assert.Contains(t, reason, "logout", "a corrupt or revoked session needs the logout/login recovery")
+	})
+}
+
+// TestProbeVerdictSeparatesRejectionFromUndetermined pins the re-check's two
+// quirks: a session Telegram refused before the auth check ran is still the
+// verdict "not authorized", and a probe that ended without an answer (a
+// cancelled run, which gotd reports as a nil error) is never one.
+func TestProbeVerdictSeparatesRejectionFromUndetermined(t *testing.T) {
+	account, authorized, err := probeVerdict(nil, fmt.Errorf("starting Telegram client: %w", tgclient.ErrSessionUnauthorized))
+	require.NoError(t, err)
+	assert.False(t, authorized)
+	assert.Empty(t, account)
+
+	for _, cause := range []error{context.Canceled, errors.New("telegram client exited during startup")} {
+		_, authorized, err = probeVerdict(nil, cause)
+		require.ErrorIs(t, err, cause)
+		assert.False(t, authorized)
 	}
-
-	t.Run("blocked error survives the client's wrapping", func(t *testing.T) {
-		// Mirrors gotd: the callback error is wrapped ("callback: ...") and
-		// may be aggregated with close errors before it reaches us.
-		wrapped := fmt.Errorf("callback: %w", &blockedError{message: notLoggedInMessage})
-		err := newHTTP(t).finishRun(t.Context(), wrapped, false)
-		require.Error(t, err)
-		assert.Equal(t, notLoggedInMessage, err.Error())
-	})
-
-	t.Run("connect-phase failure is blocked too", func(t *testing.T) {
-		err := newHTTP(t).finishRun(t.Context(), errors.New("corrupted key"), false)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "could not connect to Telegram")
-		assert.Contains(t, err.Error(), "corrupted key")
-		assert.Contains(t, err.Error(), "logout", "a corrupt or revoked session needs the logout/login recovery")
-	})
-
-	t.Run("failure after serving started is fatal", func(t *testing.T) {
-		err := newHTTP(t).finishRun(t.Context(), errors.New("stream broke"), true)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "running server")
-		assert.Contains(t, err.Error(), "stream broke")
-		assert.NotContains(t, err.Error(), "could not connect",
-			"a mid-session failure must not be re-diagnosed as a startup problem")
-	})
-
-	t.Run("clean run stays clean", func(t *testing.T) {
-		assert.NoError(t, newHTTP(t).finishRun(t.Context(), nil, true))
-	})
 }
 
 func TestLoginCommandUsesRunningBinaryPath(t *testing.T) {
@@ -423,15 +402,12 @@ func TestIsTTYRejectsPipe(t *testing.T) {
 	assert.False(t, isTTY(r))
 }
 
-// TestFinishRunServesLoginRequiredOverStdio pins the delivery half of the
-// classification. TestFinishRunClassifiesByPhase uses HTTP servers so the
-// routing decision is observable as a returned error, which means it never
-// shows that a blocked stdio start actually produces a *connected* server.
-// This is the headline scenario of the whole mode — credentials present, the
-// connect phase fails, and the host gets a live session instead of exit 1 —
-// and Run's own early return for an empty config bypasses finishRun entirely,
-// so no other test reaches this composition.
-func TestFinishRunServesLoginRequiredOverStdio(t *testing.T) {
+// TestBlockedStartupServesLoginRequiredOverStdio pins the delivery half of
+// the classification: credentials present, the connect phase fails, and the
+// host gets a live session instead of exit 1. Run's own early return for an
+// empty config never reaches blockedReason, so no other test covers this
+// composition.
+func TestBlockedStartupServesLoginRequiredOverStdio(t *testing.T) {
 	ctx := t.Context()
 
 	clientR, serverW := io.Pipe()
@@ -448,10 +424,10 @@ func TestFinishRunServesLoginRequiredOverStdio(t *testing.T) {
 	require.NoError(t, err)
 	srv.authProbeFn = staticProbe("", false, nil)
 
-	// A connect-phase failure: no *blockedError, because gotd never ran our
-	// callback (this is what "corrupted key" out of restoreConnection looks
-	// like from here).
-	go func() { _ = srv.finishRun(ctx, errors.New("corrupted key"), false) }()
+	// What "corrupted key" out of restoreConnection looks like from Run.
+	go func() {
+		_ = srv.startBlocked(ctx, blockedReason(errors.New("starting Telegram client: corrupted key")))
+	}()
 
 	connectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

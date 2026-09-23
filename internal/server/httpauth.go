@@ -6,14 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"runtime/debug"
-	"time"
 
 	"github.com/modelcontextprotocol/experimental-ext-variants/go/sdk/variants"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/authsrv"
-	"github.com/tolmachov/mcp-telegram/internal/resources"
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
@@ -113,11 +111,11 @@ func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 		}
 
 		// Once the client is connected, any failure — including a PANIC in the
-		// wiring below (provider/watcher construction) that runBuild's recover
-		// turns into a build error — must close it, or the pool leaks a live
-		// MTProto connection (its Closer is never published). committed flips to
-		// true only on the successful return; until then these deferred guards
-		// tear down whatever has been started.
+		// wiring below that runBuild's recover turns into a build error — must
+		// close it, or the pool leaks a live MTProto connection (its Closer is
+		// never published). committed flips to true only on the successful
+		// return; until then these deferred guards tear down whatever has been
+		// started.
 		committed := false
 		defer func() {
 			if !committed {
@@ -125,47 +123,30 @@ func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 			}
 		}()
 
-		asm, err := s.buildAssembly(running.Client())
+		asm, err := s.buildAssembly(ctx, running.API(), s.logger.With("user", user.ID))
 		if err != nil {
 			return builtAssembly{}, err
 		}
+		defer func() {
+			if !committed {
+				_ = asm.Close()
+			}
+		}()
 
 		var handler http.Handler
-		var closers multiCloser
 		if asm.variants != nil {
 			handler = variants.NewStreamableHTTPHandler(asm.variants, streamableHTTPOptions())
-			vs := asm.variants
-			closers = append(closers, closerFunc(func() error { return vs.Close() }))
 		} else {
 			srv := asm.single
 			handler = mcp.NewStreamableHTTPHandler(func(_ *http.Request) *mcp.Server { return srv }, streamableHTTPOptions())
 		}
 
-		// Per-user pinned-chat watcher, torn down with the assembly. The 5s
-		// abandon bound mirrors runHappy's shutdown path.
-		watchCtx, cancelWatch := context.WithCancel(ctx)
-		defer func() {
-			if !committed {
-				cancelWatch()
-			}
-		}()
-		pinnedProvider := resources.NewPinnedChatsProvider(running.API(), asm.msgProvider, s.logger, asm.pinnedServers...)
-		pinnedDone := pinnedProvider.WatchInBackground(watchCtx, s.opts.PinnedRefresh)
-		closers = append(closers, closerFunc(func() error {
-			cancelWatch()
-			select {
-			case <-pinnedDone:
-			case <-time.After(5 * time.Second):
-				s.logger.Error("pinned-chat watcher did not exit in 5s; abandoning", "user", user.ID)
-			}
-			return nil
-		}))
-		closers = append(closers, closerFunc(running.Close))
-
 		committed = true
 		return builtAssembly{
 			Handler: handler,
-			Closer:  closers,
+			// The assembly (watcher, variants proxy) goes first, while the
+			// client it runs on is still connected.
+			Closer: multiCloser{asm, closerFunc(running.Close)},
 			// RunErr turns non-nil as soon as the client's Run loop exits —
 			// the signal (and reason) that this assembly must stop serving.
 			Health: running.RunErr,

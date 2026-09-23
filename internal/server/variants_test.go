@@ -385,7 +385,7 @@ func TestCompactMiddlewareIgnoresNonListMethods(t *testing.T) {
 }
 
 // TestOverrideVariantSelection guards the single-variant override decision that
-// runHappy makes (defForVariant → handler set + compaction). runHappy needs a
+// buildAssembly makes (defForVariant → handler set + compaction). buildAssembly needs a
 // live Telegram client, but the decision itself is pure, so we replay it here
 // to keep it from drifting away from buildVariantsServer.
 func TestOverrideVariantSelection(t *testing.T) {
@@ -407,7 +407,7 @@ func TestOverrideVariantSelection(t *testing.T) {
 			d, ok := defForVariant(tc.id)
 			require.True(t, ok)
 
-			// Drive the exact constructor runHappy's override branch uses, so the
+			// Drive the exact constructor buildAssembly's override branch uses, so the
 			// mode → (handlers, compaction) decision stays pinned to one place.
 			srv := newInnerForMode(impl, nil, full, research, d.mode, noWire, testLogger())
 			names := listToolNames(t, srv)
