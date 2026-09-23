@@ -29,6 +29,7 @@ require (
 	github.com/pkg/xattr v0.4.12 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
+	nhooyr.io/websocket v1.8.17 // indirect
 )
 
 require (

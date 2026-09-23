@@ -284,10 +284,12 @@ func toolFailure(ctx context.Context, req *mcp.CallToolRequest, tool string, err
 }
 
 // failureText renders a handler error as "Failed to <op>: <what happened>",
-// followed by the failure's note and then its hint. A systemic error gets its
-// fixed guidance as what happened (systemicText) and no hint; anything else
-// shows the error itself, followed by the failure's own hint or, lacking one,
-// the peer hint when the failure is about the chat the call named.
+// followed by the failure's note and then its hint. A refusal the home DC did
+// not confirm shows the error with what it means for the session instead of
+// any hint; a systemic error gets its fixed guidance as what happened
+// (systemicText) and no hint; anything else shows the error itself, followed
+// by the failure's own hint or, lacking one, the peer hint when the failure is
+// about the chat the call named.
 func failureText(tool string, err error) string {
 	// The outermost op names what failed; the outermost note and hint win.
 	op, note, hint, cause := "run "+tool, "", "", err
@@ -309,7 +311,10 @@ func failureText(tool string, err error) string {
 		e = f.err
 	}
 	var what string
+	var unconfirmed *tgclient.UnconfirmedRefusalError
 	switch {
+	case errors.As(cause, &unconfirmed):
+		what, hint = sentence(cause), unconfirmedRefusalHint(unconfirmed)
 	case tgclient.IsSystemic(cause):
 		what, hint = systemicText(tool, cause), ""
 	case hint == "" && tgclient.IsPeerSpecific(cause):
@@ -324,6 +329,16 @@ func failureText(tool string, err error) string {
 		}
 	}
 	return text
+}
+
+// unconfirmedRefusalHint says what a refusal the home DC did not confirm means
+// for the session, so the model does not send the user through a login the
+// session does not need.
+func unconfirmedRefusalHint(err *tgclient.UnconfirmedRefusalError) string {
+	if err.Check == nil {
+		return "The session itself is still valid, so do not ask the user to sign in again: the Telegram server this call was routed to (such as the one storing a file) refused the authorisation the server handed it, and keeps refusing such calls until the server reconnects to Telegram. Other tools keep working."
+	}
+	return "Whether the session is still valid is unknown: retry shortly, and ask the user to sign in again only if a later call reports that Telegram no longer accepts the session."
 }
 
 // systemicText renders err, for which tgclient.IsSystemic holds: a flood wait

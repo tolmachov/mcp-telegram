@@ -51,9 +51,20 @@ func TestFailureText(t *testing.T) {
 		assert.Contains(t, txt, "signs in again")
 	})
 
-	t.Run("an unconfirmed refusal is an ordinary failure", func(t *testing.T) {
-		txt := failureText("GetMedia", failed("download media", tgerr.New(401, "AUTH_KEY_UNREGISTERED")))
-		assert.Equal(t, "Failed to download media: rpc error code 401: AUTH_KEY_UNREGISTERED.", txt)
+	t.Run("an unconfirmed refusal says what it means for the session", func(t *testing.T) {
+		refusal := tgerr.New(401, "AUTH_KEY_UNREGISTERED")
+		ownHint := "Use a smaller thumb_size."
+
+		txt := failureText("GetMedia", failedHint("download media", &tgclient.UnconfirmedRefusalError{Refusal: refusal}, ownHint))
+		assert.True(t, strings.HasPrefix(txt, "Failed to download media: rpc error code 401: AUTH_KEY_UNREGISTERED (the account's home Telegram server still accepts the session)."), txt)
+		assert.Contains(t, txt, "do not ask the user to sign in again")
+		assert.NotContains(t, txt, ownHint, "the tool's own hint does not fit a refusal")
+
+		unreachable := &tgclient.UnconfirmedRefusalError{Refusal: refusal, Check: errors.New("asking the home DC: dial tcp: i/o timeout")}
+		txt = failureText("GetMedia", failedHint("download media", unreachable, ownHint))
+		assert.Contains(t, txt, "could not be asked whether the session still stands: asking the home DC: dial tcp: i/o timeout")
+		assert.Contains(t, txt, "Whether the session is still valid is unknown")
+		assert.NotContains(t, txt, "do not ask the user to sign in again")
 	})
 
 	t.Run("a chat that cannot be resolved gets the peer hint", func(t *testing.T) {

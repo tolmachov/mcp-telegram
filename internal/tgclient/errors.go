@@ -10,21 +10,52 @@ import (
 
 // ErrSessionUnauthorized is the verdict that Telegram no longer accepts the
 // stored session (never logged in, logged out remotely, the auth key revoked,
-// the account deactivated). Only the home DC delivers it: StartClient's auth
-// check, gotd ending Run on a refused connection, or a refused call confirmed
-// on the home DC (see Running.confirmRefusal). The HTTP layer maps it to 401
-// so the client re-runs the OAuth + QR login flow.
+// the account deactivated). Only the home DC delivers it: StartClient's
+// readiness check, gotd ending Run on a refused connection, or a refused call
+// confirmed on the home DC (see Running.confirmRefusal). The HTTP layer maps
+// it to 401 so the client re-runs the OAuth + QR login flow.
 var ErrSessionUnauthorized = errors.New("telegram session is not authorized")
 
 // isSessionRefusal reports whether err is one of the replies by which Telegram
 // declares a session dead. It is a candidate, not a verdict: a DC other than
 // the home one answers the same codes when the authorisation gotd exported to
 // it did not take, while the home session is fine. 401s that do not mean
-// death — SESSION_PASSWORD_NEEDED (a login waiting for its 2FA password),
-// AUTH_KEY_PERM_EMPTY (a temporary key not yet bound) — are excluded.
+// death when another DC answers a call — SESSION_PASSWORD_NEEDED (a login
+// waiting for its 2FA password), AUTH_KEY_PERM_EMPTY (a temporary key not yet
+// bound) — are excluded; the home DC's replies are judged by refusedByHome.
 func isSessionRefusal(err error) bool {
 	return tgerr.Is(err, "AUTH_KEY_UNREGISTERED", "AUTH_KEY_INVALID", "AUTH_KEY_DUPLICATED",
 		"SESSION_REVOKED", "SESSION_EXPIRED", "USER_DEACTIVATED", "USER_DEACTIVATED_BAN")
+}
+
+// UnconfirmedRefusalError is a call Telegram refused with a session-refusal
+// code (see isSessionRefusal) that the home DC did not confirm, so the client
+// keeps serving: Check is nil when the home DC still accepts the session, and
+// otherwise why it could not be asked.
+//
+// When the home DC accepts the session, the refusal came from another DC —
+// the one a download was sent to — that never took the authorisation gotd
+// exported to it. gotd keeps that DC's connection for the rest of the
+// client's Run loop and only exports the authorisation to a connection it
+// creates, so calls routed there keep being refused until the client
+// reconnects; gotd offers no way to drop that connection or export the authorisation to it again.
+type UnconfirmedRefusalError struct {
+	Refusal error
+	Check   error
+}
+
+func (e *UnconfirmedRefusalError) Error() string {
+	if e.Check == nil {
+		return fmt.Sprintf("%v (the account's home Telegram server still accepts the session)", e.Refusal)
+	}
+	return fmt.Sprintf("%v (the account's home Telegram server could not be asked whether the session still stands: %v)", e.Refusal, e.Check)
+}
+
+func (e *UnconfirmedRefusalError) Unwrap() []error {
+	if e.Check == nil {
+		return []error{e.Refusal}
+	}
+	return []error{e.Refusal, e.Check}
 }
 
 // IsSystemic reports whether err is a condition of the whole account or call —
