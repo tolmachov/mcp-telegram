@@ -3,6 +3,7 @@
 package keyedlimit
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -34,8 +35,12 @@ type Limiter[K comparable] struct {
 }
 
 // New returns a limiter granting each key rps events per second with the
-// given burst.
+// given burst. Both must be positive: a limiter that can never grant an event
+// is a configuration bug, so New panics on one.
 func New[K comparable](rps rate.Limit, burst int) *Limiter[K] {
+	if rps <= 0 || burst <= 0 {
+		panic(fmt.Sprintf("keyedlimit: rps (%v) and burst (%d) must be positive", rps, burst))
+	}
 	return &Limiter[K]{
 		buckets: map[K]*bucket{},
 		rps:     rps,
@@ -52,10 +57,7 @@ func (l *Limiter[K]) Allow(key K) bool {
 	now := l.now()
 	b, ok := l.buckets[key]
 	if !ok {
-		l.evictIdleLocked(now)
-		if len(l.buckets) >= maxKeys {
-			l.evictStalestLocked()
-		}
+		l.evictLocked(now)
 		b = &bucket{limiter: rate.NewLimiter(l.rps, l.burst)}
 		l.buckets[key] = b
 	}
@@ -63,29 +65,25 @@ func (l *Limiter[K]) Allow(key K) bool {
 	return b.limiter.Allow()
 }
 
-// evictIdleLocked drops buckets that have refilled completely. Called only
-// when a new key shows up, so steady-state traffic pays nothing.
-func (l *Limiter[K]) evictIdleLocked(now time.Time) {
-	for key, b := range l.buckets {
-		if now.Sub(b.lastSeen) > l.refill {
-			delete(l.buckets, key)
-		}
-	}
-}
-
-// evictStalestLocked recycles the least-recently-seen bucket when the map is
-// at capacity. Under a flood of fresh keys this bounds memory while keeping
-// the buckets of active callers (they refresh lastSeen constantly).
-func (l *Limiter[K]) evictStalestLocked() {
+// evictLocked makes room for a new key in one pass over the map: it drops
+// every bucket that has refilled completely and, if the map is still at
+// capacity, the least-recently-seen survivor. Called only when a new key shows
+// up, so steady-state traffic pays nothing. Under a flood of fresh keys the
+// cap bounds memory while keeping the buckets of active callers (they refresh
+// lastSeen constantly).
+func (l *Limiter[K]) evictLocked(now time.Time) {
 	var stalestKey K
 	var stalest time.Time
 	found := false
 	for key, b := range l.buckets {
-		if !found || b.lastSeen.Before(stalest) {
+		switch {
+		case now.Sub(b.lastSeen) > l.refill:
+			delete(l.buckets, key)
+		case !found || b.lastSeen.Before(stalest):
 			stalestKey, stalest, found = key, b.lastSeen, true
 		}
 	}
-	if found {
+	if len(l.buckets) >= maxKeys {
 		delete(l.buckets, stalestKey)
 	}
 }

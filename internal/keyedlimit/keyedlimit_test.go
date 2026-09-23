@@ -59,3 +59,9 @@ func TestLimiterCapRecyclesStalest(t *testing.T) {
 	assert.NotContains(t, l.buckets, 0)
 	assert.Contains(t, l.buckets, -1)
 }
+
+func TestNewRejectsNonPositiveSettings(t *testing.T) {
+	assert.Panics(t, func() { New[int](0, 1) })
+	assert.Panics(t, func() { New[int](-1, 1) })
+	assert.Panics(t, func() { New[int](1, 0) })
+}
