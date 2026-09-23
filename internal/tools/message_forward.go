@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -73,13 +74,14 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	}
 
 	// A bad chat ID surfaces as a resolve error before the mutation is issued.
+	op := fmt.Sprintf("forward message %s from chat %d to chat %d", in.MessageID, in.FromChatID, in.ToChatID)
 	fromPeer, err := tgclient.ResolvePeer(ctx, h.client, in.FromChatID)
 	if err != nil {
-		return errResolvePeer(in.FromChatID, err), nil, nil
+		return nil, nil, failed(op, err)
 	}
 	toPeer, err := tgclient.ResolvePeer(ctx, h.client, in.ToChatID)
 	if err != nil {
-		return errResolvePeer(in.ToChatID, err), nil, nil
+		return nil, nil, failed(op, err)
 	}
 
 	updates, err := h.client.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
@@ -89,14 +91,7 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 		RandomID: []int64{cryptoRandInt64()},
 	})
 	if err != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, "ForwardMessage", map[string]any{
-			"action":  "forward_failed",
-			"from_id": in.FromChatID,
-			"to_id":   in.ToChatID,
-			"msg_id":  msgID,
-			"error":   err.Error(),
-		})
-		return telegramErrResult("forward message", err), nil, nil
+		return nil, nil, failed(op, err)
 	}
 
 	forwardedMsgID, date := extractSentMessageID(updates)

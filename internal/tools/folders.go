@@ -11,6 +11,8 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // Folder (dialog filter) constraints enforced before hitting the Telegram API.
@@ -41,25 +43,6 @@ type FolderSkippedChat struct {
 // removePeer, peerBareIDs, nextFolderID, folderIDs, filterHasInclusion — live in
 // folder_peers.go.)
 
-// isFatalResolveErr reports whether a peer-resolution error is systemic — a
-// rate limit, a cancelled/timed-out context, or a dead session — rather than a
-// problem with one chat reference. Fatal errors must abort a batch instead of
-// being demoted to a per-chat skip: continuing would hammer a rate limit or a
-// dead session, and a "skipped" entry would hide a real failure behind a
-// successful-looking result.
-func isFatalResolveErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-	if _, ok := tgerr.AsFloodWait(err); ok {
-		return true
-	}
-	return tgerr.Is(err, "AUTH_KEY_UNREGISTERED", "SESSION_REVOKED", "SESSION_EXPIRED", "USER_DEACTIVATED")
-}
-
 // resolvePeerRef resolves a folder chat reference (a public @username or a
 // numeric chat ID) to an InputPeer of any kind, since folders can hold users,
 // channels and basic groups alike.
@@ -79,7 +62,7 @@ func resolvePeerRef(ctx context.Context, client *tg.Client, ref string) (peer tg
 		return peer, "", nil
 	case errors.Is(err, errInviteChatRef):
 		return nil, "is an invite link; join the chat first with JoinChat, then add it by @username or numeric ID", nil
-	case isFatalResolveErr(err):
+	case tgclient.IsSystemic(err):
 		return nil, "", err
 	default:
 		return nil, err.Error(), nil
@@ -88,7 +71,7 @@ func resolvePeerRef(ctx context.Context, client *tg.Client, ref string) (peer tg
 
 // resolveChatRefs resolves a batch of chat references into peers, collecting
 // per-chat skips. It aborts with a non-nil fatal error on a cancelled context
-// or the first systemic resolution failure (see isFatalResolveErr), so the
+// or the first systemic resolution failure (see tgclient.IsSystemic), so the
 // caller surfaces it rather than masking it as a successful no-op. Peers that
 // resolve to a form without a bare ID are skipped, so every returned peer is
 // safe to identify with peerBareID.
@@ -161,13 +144,13 @@ func formatSkipped(skipped []FolderSkippedChat) string {
 }
 
 // findEditableFolder fetches all folders and returns the standard DialogFilter
-// with the given ID, ready for an in-place edit. It returns an error result
-// when the ID is unknown or names a shared (imported chatlist) folder, whose
-// chats cannot be edited through updateDialogFilter.
-func findEditableFolder(ctx context.Context, client *tg.Client, folderID int) (*tg.DialogFilter, *mcp.CallToolResult) {
+// with the given ID, ready for an in-place edit. It fails when the ID is
+// unknown or names a shared (imported chatlist) folder, whose chats cannot be
+// edited through updateDialogFilter. op words the failure.
+func findEditableFolder(ctx context.Context, client *tg.Client, folderID int, op string) (*tg.DialogFilter, error) {
 	filters, err := client.MessagesGetDialogFilters(ctx)
 	if err != nil {
-		return nil, errResult(fmt.Sprintf("Failed to read folders: %v", err))
+		return nil, failed(op, fmt.Errorf("reading folders: %w", err))
 	}
 	for _, f := range filters.Filters {
 		switch df := f.(type) {
@@ -177,11 +160,11 @@ func findEditableFolder(ctx context.Context, client *tg.Client, folderID int) (*
 			}
 		case *tg.DialogFilterChatlist:
 			if df.ID == folderID {
-				return nil, errResult(fmt.Sprintf("Folder %d is a shared/imported folder; its chats can't be edited here. Manage it from the Telegram app instead.", folderID))
+				return nil, failedHint(op, errors.New("it is a shared/imported folder, whose chats can't be edited here"), "Manage it from the Telegram app instead.")
 			}
 		}
 	}
-	return nil, errResult(fmt.Sprintf("No folder with ID %d. List your folders with GetFolders to find the right ID.", folderID))
+	return nil, failedHint(op, fmt.Errorf("no folder with ID %d", folderID), "List your folders with GetFolders to find the right ID.")
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +263,7 @@ func (h *GetFoldersHandler) Register(s *mcp.Server) {
 func (h *GetFoldersHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, _ GetFoldersInput) (*mcp.CallToolResult, *GetFoldersResult, error) {
 	filters, err := h.client.MessagesGetDialogFilters(ctx)
 	if err != nil {
-		return errResult(fmt.Sprintf("Failed to get folders: %v", err)), nil, nil
+		return nil, nil, failed("get folders", err)
 	}
 	out := &GetFoldersResult{Folders: make([]FolderInfo, 0, len(filters.Filters))}
 	for _, f := range filters.Filters {
@@ -342,7 +325,7 @@ func (h *CreateFolderHandler) Register(s *mcp.Server) {
 	}, h.handle)
 }
 
-func (h *CreateFolderHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in CreateFolderInput) (*mcp.CallToolResult, *CreateFolderResult, error) {
+func (h *CreateFolderHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in CreateFolderInput) (*mcp.CallToolResult, *CreateFolderResult, error) {
 	title := strings.TrimSpace(in.Title)
 	if title == "" {
 		return errResult("title is required: a short folder name (max 12 characters)."), nil, nil
@@ -354,16 +337,16 @@ func (h *CreateFolderHandler) handle(ctx context.Context, req *mcp.CallToolReque
 		return errResult("a folder needs at least one chat to include or one include_* category flag (e.g. include_groups). Telegram rejects empty folders."), nil, nil
 	}
 
+	op := fmt.Sprintf("create folder %q", title)
 	filters, err := h.client.MessagesGetDialogFilters(ctx)
 	if err != nil {
-		return errResult(fmt.Sprintf("Failed to read existing folders: %v", err)), nil, nil
+		return nil, nil, failed(op, fmt.Errorf("reading existing folders: %w", err))
 	}
 	id := nextFolderID(folderIDs(filters))
 
 	peers, skipped, ferr := resolveChatRefs(ctx, h.client, in.Chats)
 	if ferr != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, "CreateFolder", map[string]any{"title": title, "error": ferr.Error()})
-		return errResult(fmt.Sprintf("Aborted creating folder %q: %v. Retry once the condition clears.", title, ferr)), nil, nil
+		return nil, nil, failed(op, ferr)
 	}
 	includePeers := make([]tg.InputPeerClass, 0, len(peers))
 	for _, peer := range peers {
@@ -372,7 +355,7 @@ func (h *CreateFolderHandler) handle(ctx context.Context, req *mcp.CallToolReque
 		}
 	}
 	if len(includePeers) == 0 && !in.hasCategoryInclude() {
-		return errResult("none of the provided chats could be resolved and no include_* flag was set, so the folder would be empty. Check the chat references (try ResolveUsername or SearchChats) and retry."), nil, nil
+		return nil, nil, failedHint(op, fmt.Errorf("none of the provided chats could be resolved (%s) and no include_* flag was set, so the folder would be empty", formatSkipped(skipped)), "Check the chat references (try ResolveUsername or SearchChats) and retry.")
 	}
 
 	filter := &tg.DialogFilter{
@@ -392,10 +375,9 @@ func (h *CreateFolderHandler) handle(ctx context.Context, req *mcp.CallToolReque
 	updReq.SetFilter(filter)
 	if _, err := h.client.MessagesUpdateDialogFilter(ctx, updReq); err != nil {
 		if tgerr.Is(err, "DIALOG_FILTERS_TOO_MUCH") {
-			return errResult("You've reached the maximum number of folders. Delete one with DeleteFolder first, or a Telegram Premium subscription raises the limit."), nil, nil
+			return nil, nil, failedHint(op, err, "You've reached the maximum number of folders. Delete one with DeleteFolder first, or a Telegram Premium subscription raises the limit.")
 		}
-		mcpLog(ctx, req.Session, logLevelWarning, "CreateFolder", map[string]any{"title": title, "error": err.Error()})
-		return errResult(fmt.Sprintf("Failed to create folder %q: %v", title, err)), nil, nil
+		return nil, nil, failed(op, err)
 	}
 	return nil, &CreateFolderResult{
 		FolderID:      id,
@@ -440,7 +422,7 @@ func (h *DeleteFolderHandler) Register(s *mcp.Server) {
 	}, h.handle)
 }
 
-func (h *DeleteFolderHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in DeleteFolderInput) (*mcp.CallToolResult, *DeleteFolderResult, error) {
+func (h *DeleteFolderHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in DeleteFolderInput) (*mcp.CallToolResult, *DeleteFolderResult, error) {
 	if in.FolderID <= 0 {
 		return errResult("folder_id is required: a positive folder ID from GetFolders."), nil, nil
 	}
@@ -448,18 +430,18 @@ func (h *DeleteFolderHandler) handle(ctx context.Context, req *mcp.CallToolReque
 		return errRes, nil, nil
 	}
 
+	op := fmt.Sprintf("delete folder %d", in.FolderID)
 	filters, err := h.client.MessagesGetDialogFilters(ctx)
 	if err != nil {
-		return errResult(fmt.Sprintf("Failed to read folders: %v", err)), nil, nil
+		return nil, nil, failed(op, fmt.Errorf("reading folders: %w", err))
 	}
 	if !slices.Contains(folderIDs(filters), in.FolderID) {
-		return errResult(fmt.Sprintf("No folder with ID %d. List your folders with GetFolders.", in.FolderID)), nil, nil
+		return nil, nil, failedHint(op, errors.New("no folder with that ID"), "List your folders with GetFolders.")
 	}
 
 	// Omitting Filter (no SetFilter) tells Telegram to delete the folder.
 	if _, err := h.client.MessagesUpdateDialogFilter(ctx, &tg.MessagesUpdateDialogFilterRequest{ID: in.FolderID}); err != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, "DeleteFolder", map[string]any{"folder_id": in.FolderID, "error": err.Error()})
-		return errResult(fmt.Sprintf("Failed to delete folder %d: %v", in.FolderID, err)), nil, nil
+		return nil, nil, failed(op, err)
 	}
 	return nil, &DeleteFolderResult{Status: folderStatusDeleted, FolderID: in.FolderID}, nil
 }
@@ -501,7 +483,7 @@ func (h *AddChatsToFolderHandler) Register(s *mcp.Server) {
 	}, h.handle)
 }
 
-func (h *AddChatsToFolderHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in AddChatsToFolderInput) (*mcp.CallToolResult, *AddChatsToFolderResult, error) {
+func (h *AddChatsToFolderHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in AddChatsToFolderInput) (*mcp.CallToolResult, *AddChatsToFolderResult, error) {
 	if in.FolderID <= 0 {
 		return errResult("folder_id is required: a positive folder ID from GetFolders."), nil, nil
 	}
@@ -509,9 +491,9 @@ func (h *AddChatsToFolderHandler) handle(ctx context.Context, req *mcp.CallToolR
 		return errResult("chats is required: one or more @usernames or numeric chat IDs to add."), nil, nil
 	}
 
-	added, present, skipped, errRes := editFolderChats(ctx, req, h.client, "AddChatsToFolder", in.FolderID, in.Chats, "added to", applyAdditions)
-	if errRes != nil {
-		return errRes, nil, nil
+	added, present, skipped, err := editFolderChats(ctx, h.client, in.FolderID, in.Chats, "added to", applyAdditions)
+	if err != nil {
+		return nil, nil, err
 	}
 	return nil, &AddChatsToFolderResult{FolderID: in.FolderID, Added: added, AlreadyPresent: present, Skipped: skipped}, nil
 }
@@ -553,7 +535,7 @@ func (h *RemoveChatsFromFolderHandler) Register(s *mcp.Server) {
 	}, h.handle)
 }
 
-func (h *RemoveChatsFromFolderHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in RemoveChatsFromFolderInput) (*mcp.CallToolResult, *RemoveChatsFromFolderResult, error) {
+func (h *RemoveChatsFromFolderHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in RemoveChatsFromFolderInput) (*mcp.CallToolResult, *RemoveChatsFromFolderResult, error) {
 	if in.FolderID <= 0 {
 		return errResult("folder_id is required: a positive folder ID from GetFolders."), nil, nil
 	}
@@ -561,9 +543,9 @@ func (h *RemoveChatsFromFolderHandler) handle(ctx context.Context, req *mcp.Call
 		return errResult("chats is required: one or more @usernames or numeric chat IDs to remove."), nil, nil
 	}
 
-	removed, absent, skipped, errRes := editFolderChats(ctx, req, h.client, "RemoveChatsFromFolder", in.FolderID, in.Chats, "removed from", applyRemovals)
-	if errRes != nil {
-		return errRes, nil, nil
+	removed, absent, skipped, err := editFolderChats(ctx, h.client, in.FolderID, in.Chats, "removed from", applyRemovals)
+	if err != nil {
+		return nil, nil, err
 	}
 	return nil, &RemoveChatsFromFolderResult{FolderID: in.FolderID, Removed: removed, NotPresent: absent, Skipped: skipped}, nil
 }
@@ -571,27 +553,24 @@ func (h *RemoveChatsFromFolderHandler) handle(ctx context.Context, req *mcp.Call
 // editFolderChats resolves chats, applies them to folder folderID with apply,
 // and writes the folder back when that changed anything. changed and unchanged
 // are apply's split of the resolved chats; verb ("added to", "removed from")
-// words the error for a call where every reference was skipped. errRes is
-// non-nil on any failure.
+// words the error for a call where every reference was skipped.
 func editFolderChats(
 	ctx context.Context,
-	req *mcp.CallToolRequest,
 	client *tg.Client,
-	tool string,
 	folderID int,
 	chats []string,
 	verb string,
 	apply func(*tg.DialogFilter, []tg.InputPeerClass) (changed, unchanged []int64),
-) (changed, unchanged []int64, skipped []FolderSkippedChat, errRes *mcp.CallToolResult) {
-	filter, errRes := findEditableFolder(ctx, client, folderID)
-	if errRes != nil {
-		return nil, nil, nil, errRes
+) (changed, unchanged []int64, skipped []FolderSkippedChat, err error) {
+	op := fmt.Sprintf("update folder %d", folderID)
+	filter, err := findEditableFolder(ctx, client, folderID, op)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	peers, skipped, ferr := resolveChatRefs(ctx, client, chats)
 	if ferr != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, tool, map[string]any{"folder_id": folderID, "error": ferr.Error()})
-		return nil, nil, nil, errResult(fmt.Sprintf("Aborted updating folder %d: %v. Retry once the condition clears.", folderID, ferr))
+		return nil, nil, nil, failed(op, ferr)
 	}
 
 	changed, unchanged = apply(filter, peers)
@@ -600,20 +579,19 @@ func editFolderChats(
 		// wanted state) from a total failure (every reference skipped) so the
 		// latter surfaces as an error instead of a successful-looking empty result.
 		if len(unchanged) == 0 && len(skipped) > 0 {
-			return nil, nil, nil, errResult(fmt.Sprintf("None of the chats could be %s folder %d: %s. Verify the references with ResolveUsername or SearchChats.", verb, folderID, formatSkipped(skipped)))
+			return nil, nil, nil, failedHint(op, fmt.Errorf("none of the chats could be %s it: %s", verb, formatSkipped(skipped)), "Verify the references with ResolveUsername or SearchChats.")
 		}
 		return changed, unchanged, skipped, nil // skip the write
 	}
 	// Only a removal can leave the folder without an inclusion.
 	if !filterHasInclusion(filter) {
-		return nil, nil, nil, errResult(fmt.Sprintf("Removing those chats would leave folder %d empty, which Telegram doesn't allow. Use DeleteFolder to remove the folder instead.", folderID))
+		return nil, nil, nil, failedHint(op, errors.New("removing those chats would leave the folder empty, which Telegram doesn't allow"), "Use DeleteFolder to remove the folder instead.")
 	}
 
 	updReq := &tg.MessagesUpdateDialogFilterRequest{ID: folderID}
 	updReq.SetFilter(filter)
 	if _, err := client.MessagesUpdateDialogFilter(ctx, updReq); err != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, tool, map[string]any{"folder_id": folderID, "error": err.Error()})
-		return nil, nil, nil, errResult(fmt.Sprintf("Failed to update folder %d: %v", folderID, err))
+		return nil, nil, nil, failed(op, err)
 	}
 	return changed, unchanged, skipped, nil
 }

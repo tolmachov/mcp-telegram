@@ -157,12 +157,7 @@ func (h *MessagesSearchHandler) handle(ctx context.Context, req *mcp.CallToolReq
 
 	result, err := h.provider.Search(ctx, in.ChatID, opts)
 	if err != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, "SearchMessages", map[string]any{
-			"action":  "provider_search_failed",
-			"chat_id": in.ChatID,
-			"error":   err.Error(),
-		})
-		return errResult(fmt.Sprintf("Failed to search messages: %v", err)), nil, nil
+		return nil, nil, failed(fmt.Sprintf("search messages in chat %d", in.ChatID), err)
 	}
 
 	out := &searchMessagesOutput{

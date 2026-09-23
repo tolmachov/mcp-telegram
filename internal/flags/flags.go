@@ -68,9 +68,9 @@ const DefaultRateLimitRPS = 1
 // timeout (Claude Desktop cancels at ~240s): auto-waiting longer is pointless
 // because the client cancels the call first, turning a recoverable rate limit
 // into a generic "no result received" timeout. So short, transient waits are
-// absorbed transparently, while anything longer fails fast: write tools render
-// it as an actionable retry-after message (see floodWaitResult) and read tools
-// surface the raw error, either beating the client's hang-until-timeout.
+// absorbed transparently, while anything longer fails fast and every tool
+// renders it as an actionable retry-after message (see tools.floodWaitMessage),
+// beating the client's hang-until-timeout.
 const DefaultFloodWaitMaxSeconds = 60
 
 // DefaultMediaMaxBytes is the default cap on a single GetMedia download.

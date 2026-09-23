@@ -67,7 +67,7 @@ func (h *UsernameResolveHandler) handle(ctx context.Context, _ *mcp.CallToolRequ
 
 	resolved, err := resolvePublicUsername(ctx, h.client, username)
 	if err != nil {
-		return errResult(fmt.Sprintf("Failed to resolve username: %v", err)), nil, nil
+		return nil, nil, failedHint("resolve @"+username, err, "The user/chat may not exist, may be private, or may not have a public @username. Try SearchChats with a partial title instead.")
 	}
 
 	out := &ResolveUsernameResult{

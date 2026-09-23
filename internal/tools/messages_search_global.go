@@ -104,11 +104,7 @@ func (h *MessagesSearchGlobalHandler) handle(ctx context.Context, req *mcp.CallT
 
 	result, err := h.provider.SearchGlobal(ctx, opts)
 	if err != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, "SearchMessagesGlobal", map[string]any{
-			"action": "provider_search_failed",
-			"error":  err.Error(),
-		})
-		return errResult(fmt.Sprintf("Failed to search globally: %v", err)), nil, nil
+		return nil, nil, failed("search globally", err)
 	}
 
 	out := &searchMessagesGlobalOutput{

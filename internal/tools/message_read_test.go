@@ -55,12 +55,11 @@ func TestMarkAsReadNonFloodErrorContinuesBatch(t *testing.T) {
 	errRes, out, err := h.handle(context.Background(), &mcp.CallToolRequest{}, MarkAsReadInput{
 		ChatIDs: []int64{100, 200, 300},
 	})
-	require.NoError(t, err)
+	require.Nil(t, errRes)
 	require.Nil(t, out, "all chats failed with a non-flood error, so the result collapses to an error")
-	require.NotNil(t, errRes)
-	assert.True(t, errRes.IsError)
+	require.Error(t, err)
 	// Every chat was attempted (no early stop), so the last one appears too.
-	assert.Contains(t, toolResultText(errRes), "chat_id=300")
+	assert.Contains(t, failureText("MarkAsRead", err), "chat_id=300")
 }
 
 func TestMarkAsReadChannelUsesCurrentTopMessage(t *testing.T) {

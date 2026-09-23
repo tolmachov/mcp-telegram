@@ -104,9 +104,9 @@ type GetMediaInput struct {
 
 // Register adds the tool to the MCP server.
 func (h *MediaGetHandler) Register(s *mcp.Server) {
-	// Plain mcp.AddTool: GetMedia returns image content with no typed output
+	// AddContentTool: GetMedia returns image content with no typed output
 	// (Out is any), so the SDK has no zero value to serialize.
-	mcp.AddTool(s, &mcp.Tool{
+	AddContentTool(s, &mcp.Tool{
 		Name:        "GetMedia",
 		Description: "Download a photo from Telegram using a media resource URI (telegram://media/...) returned by GetMessages. Returns MCP image content plus a short text status message.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
@@ -181,23 +181,14 @@ func (h *MediaGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest, 
 	})
 
 	if _, err := dl.Download(h.client, location).Stream(ctx, pw); err != nil {
+		op := fmt.Sprintf("download photo %d", mediaID)
 		if errors.Is(err, errMediaTooLarge) {
-			mcpLog(ctx, session, logLevelWarning, "GetMedia", map[string]any{
-				"media_id":   mediaID,
-				"max_bytes":  h.maxBytes,
-				"downloaded": buf.Len(),
-				"reason":     "size cap exceeded",
-			})
-			return errResult(fmt.Sprintf(
-				"Media exceeds the configured size limit of %d bytes (downloaded at least %d bytes before aborting). Use a smaller thumb_size, or raise --media-max-bytes / MCP_TELEGRAM_MEDIA_MAX_BYTES if you really need the full file.",
+			return nil, nil, failedHint(op, err, fmt.Sprintf(
+				"The configured limit is %d bytes and at least %d were downloaded before aborting. Use a smaller thumb_size, or raise --media-max-bytes / MCP_TELEGRAM_MEDIA_MAX_BYTES if you really need the full file.",
 				h.maxBytes, buf.Len(),
-			)), nil, nil
+			))
 		}
-		mcpLog(ctx, session, logLevelError, "GetMedia", map[string]any{
-			"media_id": mediaID,
-			"error":    err.Error(),
-		})
-		return errResult(fmt.Sprintf("failed to download photo: %v", err)), nil, nil
+		return nil, nil, failed(op, err)
 	}
 	sendProgressWithToken(ctx, session, token, float64(buf.Len()), float64(buf.Len()), fmt.Sprintf("Downloaded %d bytes", buf.Len()))
 

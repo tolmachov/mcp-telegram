@@ -76,7 +76,7 @@ func (h *ChatsSearchHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	}
 	snap, err := h.cache.Load(ctx, onProgress, false)
 	if err != nil {
-		return errResult(fmt.Sprintf("Failed to get chats: %v", err)), nil, nil
+		return nil, nil, failed("get chats", err)
 	}
 
 	results := scoreChats(query, snap.Chats)

@@ -8,6 +8,7 @@ import (
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -78,6 +79,15 @@ func TestAddToolNeverSerializesZeroOutput(t *testing.T) {
 		assert.True(t, res.IsError)
 		assert.Nil(t, res.StructuredContent)
 		assert.Contains(t, toolResultText(res), "MESSAGE_DELETE_FORBIDDEN")
+	})
+
+	t.Run("handler error is rendered as a tool error", func(t *testing.T) {
+		res := callTool(t, register(func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, *wrapperOut, error) {
+			return nil, nil, failed("delete messages", tgerr.New(403, "MESSAGE_DELETE_FORBIDDEN"))
+		}), "T", nil)
+		assert.True(t, res.IsError)
+		assert.Nil(t, res.StructuredContent)
+		assert.Equal(t, "Failed to delete messages: rpc error code 403: MESSAGE_DELETE_FORBIDDEN.", toolResultText(res))
 	})
 
 	t.Run("non-error result without output is an error", func(t *testing.T) {

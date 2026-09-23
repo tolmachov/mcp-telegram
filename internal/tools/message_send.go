@@ -160,9 +160,13 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		return errResult(fmt.Sprintf("schedule_at is only valid when mode=\"schedule\" (got mode=%q). Set mode=\"schedule\" or remove schedule_at.", mode)), nil, nil
 	}
 
+	op := fmt.Sprintf("send message to chat %d", in.ChatID)
+	if mode == sendModeDraft {
+		op = fmt.Sprintf("save draft in chat %d", in.ChatID)
+	}
 	peer, err := tgclient.ResolvePeer(ctx, h.client, in.ChatID)
 	if err != nil {
-		return errResolvePeer(in.ChatID, err), nil, nil
+		return nil, nil, failed(op, err)
 	}
 
 	// Draft mode: messages.saveDraft supports reply_to_msg_id but does not
@@ -176,7 +180,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 			draftReq.ReplyTo = &tg.InputReplyToMessage{ReplyToMsgID: replyToID}
 		}
 		if _, err := h.client.MessagesSaveDraft(ctx, draftReq); err != nil {
-			return telegramErrResult("save draft", err), nil, nil
+			return nil, nil, failed(op, err)
 		}
 		return nil, &SendMessageResult{
 			Status:             "drafted",
@@ -201,7 +205,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 
 	updates, err := h.client.MessagesSendMessage(ctx, sendReq)
 	if err != nil {
-		return telegramErrResult("send message", err), nil, nil
+		return nil, nil, failed(op, err)
 	}
 
 	res := &SendMessageResult{

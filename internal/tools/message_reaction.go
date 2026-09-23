@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -55,7 +56,7 @@ func (h *MessageReactionHandler) Register(s *mcp.Server) {
 	}, h.handle)
 }
 
-func (h *MessageReactionHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in SetReactionInput) (*mcp.CallToolResult, *SetReactionResult, error) {
+func (h *MessageReactionHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in SetReactionInput) (*mcp.CallToolResult, *SetReactionResult, error) {
 	if in.ChatID == 0 {
 		return errChatIDRequired(), nil, nil
 	}
@@ -64,9 +65,10 @@ func (h *MessageReactionHandler) handle(ctx context.Context, req *mcp.CallToolRe
 		return errRes, nil, nil
 	}
 
+	op := fmt.Sprintf("set reaction on message %s in chat %d", in.MessageID, in.ChatID)
 	peer, err := tgclient.ResolvePeer(ctx, h.client, in.ChatID)
 	if err != nil {
-		return errResolvePeer(in.ChatID, err), nil, nil
+		return nil, nil, failed(op, err)
 	}
 
 	sendReq := &tg.MessagesSendReactionRequest{
@@ -97,12 +99,7 @@ func (h *MessageReactionHandler) handle(ctx context.Context, req *mcp.CallToolRe
 	// Telegram to remove all of the current user's reactions from the message.
 
 	if _, err := h.client.MessagesSendReaction(ctx, sendReq); err != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, "SetReaction", map[string]any{
-			"chat_id":    in.ChatID,
-			"message_id": in.MessageID,
-			"error":      err.Error(),
-		})
-		return telegramErrResult("set reaction", err), nil, nil
+		return nil, nil, failed(op, err)
 	}
 
 	return nil, &SetReactionResult{

@@ -68,7 +68,7 @@ func (h *ChatMuteHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in
 
 	peer, err := tgclient.ResolvePeer(ctx, h.client, in.ChatID)
 	if err != nil {
-		return errResolvePeer(in.ChatID, err), nil, nil
+		return nil, nil, failed(fmt.Sprintf("change notification settings of chat %d", in.ChatID), err)
 	}
 
 	notifyPeer, ok := toInputNotifyPeer(peer)
@@ -82,7 +82,7 @@ func (h *ChatMuteHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in
 			Peer:     notifyPeer,
 			Settings: tg.InputPeerNotifySettings{MuteUntil: 0},
 		}); err != nil {
-			return errResult(fmt.Sprintf("Failed to unmute chat: %v", err)), nil, nil
+			return nil, nil, failed(fmt.Sprintf("unmute chat %d", in.ChatID), err)
 		}
 		return nil, &SetChatMuteResult{
 			Status: "unmuted",
@@ -102,7 +102,7 @@ func (h *ChatMuteHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in
 		Peer:     notifyPeer,
 		Settings: tg.InputPeerNotifySettings{MuteUntil: muteUntil},
 	}); err != nil {
-		return errResult(fmt.Sprintf("Failed to mute chat: %v", err)), nil, nil
+		return nil, nil, failed(fmt.Sprintf("mute chat %d", in.ChatID), err)
 	}
 
 	res := &SetChatMuteResult{

@@ -250,9 +250,8 @@ func (s *Server) finishRun(ctx context.Context, err error, served bool) error {
 // floodWaitLogger surfaces flood waits to the logs in a way that makes the
 // absorbed-vs-surfaced decision visible: waits under the configured max are
 // slept out and retried; longer ones fail fast rather than blocking past the
-// MCP client's tool-call timeout. Write tools then render that failure as a
-// retry-after error (via floodWaitResult); read tools surface the raw
-// wrapped error.
+// MCP client's tool-call timeout. Every tool then renders that failure as a
+// retry-after error (via tools.floodWaitMessage).
 func (s *Server) floodWaitLogger() tgclient.FloodWaitCallback {
 	floodMaxWait := s.opts.Config.FloodWaitMaxWait
 	return func(_ context.Context, d time.Duration) {
@@ -260,7 +259,7 @@ func (s *Server) floodWaitLogger() tgclient.FloodWaitCallback {
 			s.logger.Warn("telegram flood-wait exceeds max; failing fast",
 				"wait_seconds", d.Seconds(),
 				"max_wait_seconds", floodMaxWait.Seconds(),
-				"reason", "Telegram rate limit longer than the configured auto-wait; the call fails fast (write tools render a retry-after error) instead of blocking past the client timeout",
+				"reason", "Telegram rate limit longer than the configured auto-wait; the call fails fast (the tool renders a retry-after error) instead of blocking past the client timeout",
 			)
 			return
 		}

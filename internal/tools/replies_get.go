@@ -109,13 +109,7 @@ func (h *RepliesGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest
 
 	result, err := h.provider.FetchReplies(ctx, in.ChatID, rootID, opts)
 	if err != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, "GetReplies", map[string]any{
-			"action":     "provider_fetch_replies_failed",
-			"chat_id":    in.ChatID,
-			"message_id": in.MessageID,
-			"error":      err.Error(),
-		})
-		return errResult(fmt.Sprintf("Failed to get replies for message %s in chat %d: %v. Make sure the message has a comment thread (channel post with discussion) or is a forum topic id, and that you have access.", in.MessageID, in.ChatID, err)), nil, nil
+		return nil, nil, failedHint(fmt.Sprintf("get replies to message %s in chat %d", in.MessageID, in.ChatID), err, "Make sure the message has a comment thread (channel post with discussion) or is a forum topic id, and that you have access.")
 	}
 
 	out := &getRepliesOutput{

@@ -103,12 +103,7 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 
 	result, err := h.provider.Fetch(ctx, in.ChatID, opts)
 	if err != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, "GetMessages", map[string]any{
-			"action":  "provider_fetch_failed",
-			"chat_id": in.ChatID,
-			"error":   err.Error(),
-		})
-		return errResult(fmt.Sprintf("Failed to get messages: %v", err)), nil, nil
+		return nil, nil, failed(fmt.Sprintf("get messages from chat %d", in.ChatID), err)
 	}
 
 	out := &getMessagesOutput{

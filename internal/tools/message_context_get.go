@@ -66,13 +66,7 @@ func (h *MessageContextGetHandler) handle(ctx context.Context, req *mcp.CallTool
 
 	result, err := h.provider.FetchContext(ctx, in.ChatID, msgID, before, after)
 	if err != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, "GetMessageContext", map[string]any{
-			"action":  "provider_fetch_failed",
-			"chat_id": in.ChatID,
-			"msg_id":  msgID,
-			"error":   err.Error(),
-		})
-		return errResult(fmt.Sprintf("Failed to get message context: %v", err)), nil, nil
+		return nil, nil, failed(fmt.Sprintf("get context of message %s in chat %d", in.MessageID, in.ChatID), err)
 	}
 
 	out := &getMessageContextOutput{

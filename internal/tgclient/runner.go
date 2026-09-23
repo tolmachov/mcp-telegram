@@ -10,24 +10,8 @@ import (
 	"github.com/gotd/contrib/middleware/floodwait"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
-	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/tg"
-	"github.com/gotd/td/tgerr"
 )
-
-// ErrSessionUnauthorized means the stored session exists but Telegram no
-// longer accepts it (never logged in, logged out remotely, or the auth key
-// was revoked). The HTTP layer maps this to 401 so the client re-runs the
-// OAuth + QR login flow.
-var ErrSessionUnauthorized = errors.New("telegram session is not authorized")
-
-// IsSessionUnauthorized recognizes both our auth-status verdict and native
-// Telegram rejections, including those gotd raises before its ready callback.
-// Storage and transport failures must remain distinguishable from a dead key.
-func IsSessionUnauthorized(err error) bool {
-	return errors.Is(err, ErrSessionUnauthorized) || auth.IsUnauthorized(err) ||
-		tgerr.Is(err, "AUTH_KEY_UNREGISTERED", "SESSION_EXPIRED", "AUTH_KEY_DUPLICATED")
-}
 
 func sessionError(err error) error {
 	if IsSessionUnauthorized(err) && !errors.Is(err, ErrSessionUnauthorized) {

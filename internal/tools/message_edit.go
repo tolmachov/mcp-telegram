@@ -100,13 +100,13 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 
 	peer, err := tgclient.ResolvePeer(ctx, h.client, in.ChatID)
 	if err != nil {
-		return errResolvePeer(in.ChatID, err), nil, nil
+		return nil, nil, failed("edit message", err)
 	}
 	editReq.Peer = peer
 
 	updates, err := h.client.MessagesEditMessage(ctx, editReq)
 	if err != nil {
-		return telegramErrResult("edit message", err), nil, nil
+		return nil, nil, failed("edit message", err)
 	}
 
 	editedMsgID, date := extractEditedMessageID(updates)

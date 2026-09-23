@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -106,7 +105,7 @@ func (h *ChatSummarizeHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 
 	provider, err := h.createProvider(req.Session)
 	if err != nil {
-		return errResult(fmt.Sprintf("summarization misconfigured: %v", err)), nil, nil
+		return nil, nil, failed("set up summarization", err)
 	}
 	summarizer := summarize.NewSummarizer(provider, h.msgProvider, h.config.BatchTokens)
 
@@ -124,27 +123,19 @@ func (h *ChatSummarizeHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	}
 
 	result, err := summarizer.SummarizeDetailed(ctx, in.ChatID, in.Goal, since, maxMessages, onProgress)
-	if err != nil {
-		mcpLog(ctx, req.Session, logLevelError, "SummarizeChat", map[string]any{
-			"chat_id": in.ChatID,
-			"error":   err.Error(),
-		})
-	}
-	errRes, out := h.buildDetailedResult(in, since, periodEnd, result, err)
-	return errRes, out, nil
+	return h.buildDetailedResult(in, since, periodEnd, result, err)
 }
 
 // buildResult shapes the tool response from a summarizer outcome, kept separate
 // from handle so the (result, err) → response branching is unit-testable without
 // driving a live LLM. On success it returns the full summary; on a late failure
 // that still produced text it returns a partial result (salvaging completed
-// batches); the sampling-unsupported case gets a targeted error; and a total
-// failure returns a generic error.
-func (h *ChatSummarizeHandler) buildResult(in SummarizeChatInput, since, periodEnd time.Time, result string, err error) (*mcp.CallToolResult, *SummarizeChatResult) {
+// batches); and a total failure is returned as the handler error.
+func (h *ChatSummarizeHandler) buildResult(in SummarizeChatInput, since, periodEnd time.Time, result string, err error) (*mcp.CallToolResult, *SummarizeChatResult, error) {
 	return h.buildDetailedResult(in, since, periodEnd, summarize.Result{Summary: result}, err)
 }
 
-func (h *ChatSummarizeHandler) buildDetailedResult(in SummarizeChatInput, since, periodEnd time.Time, result summarize.Result, err error) (*mcp.CallToolResult, *SummarizeChatResult) {
+func (h *ChatSummarizeHandler) buildDetailedResult(in SummarizeChatInput, since, periodEnd time.Time, result summarize.Result, err error) (*mcp.CallToolResult, *SummarizeChatResult, error) {
 	out := &SummarizeChatResult{
 		ChatID:            in.ChatID,
 		Goal:              in.Goal,
@@ -161,14 +152,9 @@ func (h *ChatSummarizeHandler) buildDetailedResult(in SummarizeChatInput, since,
 
 	if err == nil {
 		if out.Partial || out.Truncated {
-			return &mcp.CallToolResult{Meta: mcp.Meta{MetaWarning: out.Warning}}, out
+			return &mcp.CallToolResult{Meta: mcp.Meta{MetaWarning: out.Warning}}, out, nil
 		}
-		return nil, out
-	}
-	// Specifically surface the sampling-unsupported case so the user gets a
-	// clear next step instead of a generic transport error.
-	if errors.Is(err, summarize.ErrSamplingUnsupported) {
-		return errResult(err.Error()), nil
+		return nil, out, nil
 	}
 	// A later batch failed but earlier batches produced a usable summary —
 	// return it marked partial rather than throwing the completed work away.
@@ -177,9 +163,9 @@ func (h *ChatSummarizeHandler) buildDetailedResult(in SummarizeChatInput, since,
 	if strings.TrimSpace(result.Summary) != "" {
 		out.Partial = true
 		out.Warning = fmt.Sprintf("summarization stopped early: %v", err)
-		return &mcp.CallToolResult{Meta: mcp.Meta{MetaWarning: out.Warning}}, out
+		return &mcp.CallToolResult{Meta: mcp.Meta{MetaWarning: out.Warning}}, out, nil
 	}
-	return errResult(fmt.Sprintf("Summarization failed: %v", err)), nil
+	return nil, nil, failed(fmt.Sprintf("summarize chat %d", in.ChatID), err)
 }
 
 func (h *ChatSummarizeHandler) parseSinceTime(in SummarizeChatInput) (time.Time, error) {

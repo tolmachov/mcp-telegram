@@ -81,6 +81,15 @@ func getChatName(ctx context.Context, raw *tg.Client, peer tg.InputPeerClass, ch
 	return fallback, false
 }
 
+// partialNote describes the partial messages a failed save was carrying, or
+// is empty when the fetch completed.
+func partialNote(count int, partialErr error) string {
+	if partialErr == nil {
+		return ""
+	}
+	return fmt.Sprintf(" for %d partial messages fetched before the error %q", count, partialErr.Error())
+}
+
 // MessageBackupHandler handles the BackupMessages tool.
 type MessageBackupHandler struct {
 	client       *tg.Client
@@ -337,9 +346,10 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	}
 
 	// Resolve the peer for chat name lookup.
+	op := fmt.Sprintf("back up chat %d", in.ChatID)
 	peer, err := tgclient.ResolvePeer(ctx, h.client, in.ChatID)
 	if err != nil {
-		return errResolvePeer(in.ChatID, err), nil, nil
+		return nil, nil, failed(op, err)
 	}
 
 	// Only operator-configured server paths are authority. MCP roots are
@@ -378,7 +388,7 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 		count,
 	)
 	if err := progress.Start(); err != nil {
-		return errResult(fmt.Sprintf("starting progress: %v", err)), nil, nil
+		return nil, nil, failed(op, fmt.Errorf("starting progress: %w", err))
 	}
 	defer func() {
 		// Use slog directly: the request context is likely already cancelled
@@ -423,15 +433,11 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	// bubble up as tool errors.
 	partialErr := err
 	if err != nil && (result == nil || len(result.Messages) == 0) {
-		mcpLog(ctx, req.Session, logLevelError, "BackupMessages", map[string]any{
-			"chat_id": in.ChatID,
-			"error":   err.Error(),
-		})
-		return errResult(fmt.Sprintf("Failed to get messages: %v", err)), nil, nil
+		return nil, nil, failed(op, err)
 	}
 	// Provider may return (nil, nil) which the guard above misses (no err to check).
 	if result == nil {
-		return errResult("provider returned no result"), nil, nil
+		return nil, nil, failed(op, errors.New("provider returned no result"))
 	}
 	if partialErr != nil {
 		mcpLog(ctx, req.Session, logLevelWarning, "BackupMessages", map[string]any{
@@ -449,19 +455,13 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	// Ensure parent directory exists.
 	parentDir := filepath.Dir(targetPath)
 	if err := os.MkdirAll(parentDir, 0o700); err != nil {
-		if partialErr != nil {
-			return errResult(fmt.Sprintf("Failed to create directory (%v) while trying to save %d partial messages from upstream error: %v", err, len(result.Messages), partialErr)), nil, nil
-		}
-		return errResult(fmt.Sprintf("Failed to create directory: %v", err)), nil, nil
+		return nil, nil, failed(op, fmt.Errorf("creating directory%s: %w", partialNote(len(result.Messages), partialErr), err))
 	}
 
 	// Replace the destination atomically so a crash cannot leave a truncated
 	// backup that looks successful.
 	if err := xdg.WriteFileAtomic(targetPath, []byte(content), 0o600, ".backup-*.tmp"); err != nil {
-		if partialErr != nil {
-			return errResult(fmt.Sprintf("Failed to write file (%v) while trying to save %d partial messages from upstream error: %v", err, len(result.Messages), partialErr)), nil, nil
-		}
-		return errResult(fmt.Sprintf("Failed to write file: %v", err)), nil, nil
+		return nil, nil, failed(op, fmt.Errorf("writing file%s: %w", partialNote(len(result.Messages), partialErr), err))
 	}
 
 	// Get an absolute path for clear output. On failure (e.g. Getwd returns
@@ -495,19 +495,19 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 		// Context deadline exceeded: surface as a tool error so the caller
 		// knows the backup is incomplete and can retry with a narrower window.
 		// The partial file is still useful, so we report it alongside the error.
-		return errResult(fmt.Sprintf(
-			"Backup timed out; partial file saved.\nMessages saved: %d\nFile: %s\nRetry with a narrower date window or smaller count.",
+		return nil, nil, failedHint(op, partialErr, fmt.Sprintf(
+			"The backup timed out; a partial file with %d messages was saved to %s. Retry with a narrower date window or smaller count.",
 			len(result.Messages), absPath,
-		)), nil, nil
+		))
 	default:
 		// Real mid-pagination failure (FLOOD_WAIT, transport error, etc.).
 		// We persisted what we fetched so the user doesn't lose minutes of
 		// work, but surface it as a tool error so the caller knows the
 		// backup is incomplete and needs a retry anchored past the saved
 		// file's last message.
-		return errResult(fmt.Sprintf(
-			"Backup failed mid-stream: %v\nPartial file saved with %d messages: %s\nRetry with a narrower date window or resume from the last saved message.",
-			partialErr, len(result.Messages), absPath,
-		)), nil, nil
+		return nil, nil, failedHint(op, partialErr, fmt.Sprintf(
+			"The backup stopped mid-stream; a partial file with %d messages was saved to %s. Retry with a narrower date window or resume from the last saved message.",
+			len(result.Messages), absPath,
+		))
 	}
 }

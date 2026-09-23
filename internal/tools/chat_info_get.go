@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -41,7 +40,7 @@ func (h *ChatInfoGetHandler) handle(ctx context.Context, _ *mcp.CallToolRequest,
 
 	info, err := tgdata.GetChatInfo(ctx, h.client, in.ChatID)
 	if err != nil {
-		return errResult(fmt.Sprintf("Failed to get chat info: %v", err)), nil, nil
+		return nil, nil, failed("get chat info", err)
 	}
 	return nil, info, nil
 }

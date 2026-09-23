@@ -2,7 +2,9 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/gotd/td/tgerr"
@@ -11,38 +13,45 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
-// TestFloodWaitResult verifies the flood-wait detector extracts the retry
-// duration both from a bare FLOOD_WAIT and from the wrapped form the
-// flood-wait middleware returns when the wait exceeds its max ("flood wait
-// argument is too big (... > ...)"). The wrapped case is the one that bit us:
-// the middleware wraps the original error, so detection must unwrap.
-func TestFloodWaitResult(t *testing.T) {
+// TestFailureText covers the single rendering of handler errors: the flood
+// wait and dead-session guidance, the peer hint, and the failure's own hint.
+func TestFailureText(t *testing.T) {
 	flood := &tgerr.Error{Code: 420, Message: "FLOOD_WAIT_265", Type: "FLOOD_WAIT", Argument: 265}
 
 	t.Run("bare flood wait", func(t *testing.T) {
-		res, ok := floodWaitResult("join", flood)
-		require.True(t, ok)
-		require.NotNil(t, res)
-		assert.True(t, res.IsError)
-		txt := toolResultText(res)
-		assert.Contains(t, txt, "265 seconds")
-		assert.Contains(t, txt, "join")
+		txt := failureText("JoinChat", failed(`join "@x"`, flood))
+		assert.True(t, strings.HasPrefix(txt, `Failed to join "@x": Telegram rate-limited this JoinChat call: wait 4m25s (265 seconds)`), txt)
 	})
 
+	// The waiter wraps the original error when the wait exceeds its max
+	// ("flood wait argument is too big (... > ...)"), so detection must unwrap.
 	t.Run("wrapped by the waiter (too big)", func(t *testing.T) {
 		wrapped := fmt.Errorf("flood wait argument is too big (4m25s > 1m0s): %w", flood)
-		res, ok := floodWaitResult("join", wrapped)
-		require.True(t, ok)
-		assert.Contains(t, toolResultText(res), "265 seconds")
+		assert.Contains(t, failureText("JoinChat", failed("join", wrapped)), "265 seconds")
 	})
 
-	t.Run("non-flood error returns false", func(t *testing.T) {
-		res, ok := floodWaitResult("join", fmt.Errorf("some other error"))
-		assert.False(t, ok)
-		assert.Nil(t, res)
+	t.Run("dead session", func(t *testing.T) {
+		txt := failureText("GetMe", failed("get current user", tgerr.New(401, "AUTH_KEY_UNREGISTERED")))
+		assert.Contains(t, txt, "Failed to get current user: Telegram no longer accepts this account's session")
+		assert.Contains(t, txt, "mcp-telegram login")
+	})
+
+	t.Run("unresolved chat gets the peer hint", func(t *testing.T) {
+		err := failed("send message to chat 42", &tgclient.PeerError{ID: 42, Err: errors.New("boom")})
+		assert.Equal(t, "Failed to send message to chat 42: resolving chat 42: boom. "+peerHint, failureText("SendMessage", err))
+	})
+
+	t.Run("own hint follows the error", func(t *testing.T) {
+		err := failedHint("get forum topics", errors.New("boom"), "Check the chat is a forum.")
+		assert.Equal(t, "Failed to get forum topics: boom. Check the chat is a forum.", failureText("GetForumTopics", err))
+	})
+
+	t.Run("plain error names the tool", func(t *testing.T) {
+		assert.Equal(t, "Failed to run GetMe: boom.", failureText("GetMe", errors.New("boom")))
 	})
 }
 

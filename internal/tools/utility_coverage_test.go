@@ -3,7 +3,6 @@ package tools
 import (
 	"bytes"
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -154,12 +153,7 @@ func TestReadOnlyHandlersUseExpectedRPCs(t *testing.T) {
 	})
 }
 
-func TestTelegramErrorHelpers(t *testing.T) {
-	result := telegramErrResult("send", errors.New("boom"))
-	require.NotNil(t, result)
-	assert.Contains(t, toolResultText(result), "send")
-	result = errResolvePeer(42, errors.New("boom"))
-	assert.Contains(t, toolResultText(result), "42")
+func TestTextResult(t *testing.T) {
 	assert.Equal(t, "ok", textResult("ok").Content[0].(*mcp.TextContent).Text)
 }
 

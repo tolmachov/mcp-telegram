@@ -81,7 +81,7 @@ func (h *MessageDeleteHandler) Register(s *mcp.Server) {
 	}, h.handle)
 }
 
-func (h *MessageDeleteHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in DeleteMessagesInput) (*mcp.CallToolResult, *DeleteMessagesResult, error) {
+func (h *MessageDeleteHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in DeleteMessagesInput) (*mcp.CallToolResult, *DeleteMessagesResult, error) {
 	if in.ChatID == 0 {
 		return errChatIDRequired(), nil, nil
 	}
@@ -111,23 +111,17 @@ func (h *MessageDeleteHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 
 	peer, err := tgclient.ResolvePeer(ctx, h.client, in.ChatID)
 	if err != nil {
-		return errResolvePeer(in.ChatID, err), nil, nil
+		return nil, nil, failed(fmt.Sprintf("delete messages in chat %d", in.ChatID), err)
 	}
 
 	var statuses map[int]string
-	var errRes *mcp.CallToolResult
 	if scheduled {
-		statuses, errRes = h.deleteScheduled(ctx, peer, ids)
+		statuses, err = h.deleteScheduled(ctx, peer, ids)
 	} else {
-		statuses, errRes = h.deleteRegular(ctx, peer, ids)
+		statuses, err = h.deleteRegular(ctx, peer, ids)
 	}
-	if errRes != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, "DeleteMessages", map[string]any{
-			"chat_id": in.ChatID,
-			"count":   len(ids),
-			"error":   toolResultText(errRes),
-		})
-		return errRes, nil, nil
+	if err != nil {
+		return nil, nil, err
 	}
 
 	res := &DeleteMessagesResult{Status: statusCompleted, ChatID: in.ChatID}
@@ -154,10 +148,10 @@ func (h *MessageDeleteHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 // never delete a message elsewhere. A message you may not delete for everyone
 // is reported forbidden and not sent: with revoke Telegram would still delete
 // it for you alone, hiding it from you while others keep seeing it.
-func (h *MessageDeleteHandler) deleteRegular(ctx context.Context, peer tg.InputPeerClass, ids []int) (map[int]string, *mcp.CallToolResult) {
+func (h *MessageDeleteHandler) deleteRegular(ctx context.Context, peer tg.InputPeerClass, ids []int) (map[int]string, error) {
 	msgs, chats, err := h.getRegular(ctx, peer, ids)
 	if err != nil {
-		return nil, telegramErrResult("read the messages to delete", err)
+		return nil, failed("read the messages to delete", err)
 	}
 	canDeleteOthers := canDeleteOthersMessages(peer, chats)
 
@@ -187,12 +181,12 @@ func (h *MessageDeleteHandler) deleteRegular(ctx context.Context, peer tg.InputP
 		_, err = h.client.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{Revoke: true, ID: toDelete})
 	}
 	if err != nil {
-		return nil, deleteErrResult(err)
+		return nil, deleteFailure(err)
 	}
 
 	left, _, err := h.getRegular(ctx, peer, toDelete)
 	if err != nil {
-		return nil, errResult(fmt.Sprintf("Telegram accepted the deletion but re-reading the messages failed: %v. Check with GetMessages which of them are gone.", err))
+		return nil, failedHint("re-read the messages after Telegram accepted the deletion", err, "Check with GetMessages which of them are gone.")
 	}
 	markVerified(statuses, toDelete, left)
 	return statuses, nil
@@ -200,10 +194,10 @@ func (h *MessageDeleteHandler) deleteRegular(ctx context.Context, peer tg.InputP
 
 // deleteScheduled cancels pending scheduled messages. The schedule queue is
 // per chat and holds only your own messages, so there is no ownership check.
-func (h *MessageDeleteHandler) deleteScheduled(ctx context.Context, peer tg.InputPeerClass, ids []int) (map[int]string, *mcp.CallToolResult) {
+func (h *MessageDeleteHandler) deleteScheduled(ctx context.Context, peer tg.InputPeerClass, ids []int) (map[int]string, error) {
 	msgs, err := h.getScheduled(ctx, peer, ids)
 	if err != nil {
-		return nil, telegramErrResult("read the scheduled messages to delete", err)
+		return nil, failed("read the scheduled messages to delete", err)
 	}
 	statuses := make(map[int]string, len(ids))
 	var toDelete []int
@@ -219,12 +213,12 @@ func (h *MessageDeleteHandler) deleteScheduled(ctx context.Context, peer tg.Inpu
 	}
 
 	if _, err := h.client.MessagesDeleteScheduledMessages(ctx, &tg.MessagesDeleteScheduledMessagesRequest{Peer: peer, ID: toDelete}); err != nil {
-		return nil, deleteErrResult(err)
+		return nil, deleteFailure(err)
 	}
 
 	left, err := h.getScheduled(ctx, peer, toDelete)
 	if err != nil {
-		return nil, errResult(fmt.Sprintf("Telegram accepted the cancellation but re-reading the schedule queue failed: %v. Check with GetMessages include_scheduled=true which of them are gone.", err))
+		return nil, failedHint("re-read the schedule queue after Telegram accepted the cancellation", err, "Check with GetMessages include_scheduled=true which of them are gone.")
 	}
 	markVerified(statuses, toDelete, left)
 	return statuses, nil
@@ -336,11 +330,11 @@ func canDeleteOthersMessages(peer tg.InputPeerClass, chats []tg.ChatClass) bool 
 	return false
 }
 
-// deleteErrResult reports a failed delete call with Telegram's error as-is,
+// deleteFailure reports a failed delete call with Telegram's error as-is,
 // adding the rights hint when Telegram refused on permission grounds.
-func deleteErrResult(err error) *mcp.CallToolResult {
+func deleteFailure(err error) error {
 	if tgerr.Is(err, "MESSAGE_DELETE_FORBIDDEN", "CHAT_ADMIN_REQUIRED") {
-		return errResult(fmt.Sprintf("Failed to delete messages: %v. %s", err, deleteRightsHint))
+		return failedHint("delete messages", err, deleteRightsHint)
 	}
-	return telegramErrResult("delete messages", err)
+	return failed("delete messages", err)
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/presentation"
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // MCP logging level constants. The official SDK exposes LoggingLevel as a
@@ -177,8 +178,9 @@ func cryptoRandInt64() int64 {
 // StructuredContent from the zero value whenever the handler returns a nil
 // output, and hosts that render structured content then show an empty
 // {"status":""} object instead of the error text or the real outcome. So:
-//   - an IsError result is turned into a Go error, which the SDK sends as
-//     IsError + text with no structured content;
+//   - a handler error is rendered and logged by toolFailure;
+//   - an IsError result (input validation) is turned into a Go error, which
+//     the SDK sends as IsError + text with no structured content;
 //   - a non-error result without a typed output is a handler bug and is
 //     reported as an error rather than an empty success.
 //
@@ -188,7 +190,7 @@ func AddTool[In, Out any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, *
 	mcp.AddTool(s, t, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, *Out, error) {
 		res, out, err := h(ctx, req, in)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, toolFailure(ctx, req, t.Name, err)
 		}
 		if res != nil && res.IsError {
 			return nil, nil, errors.New(toolResultText(res))
@@ -198,6 +200,95 @@ func AddTool[In, Out any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, *
 		}
 		return res, out, nil
 	})
+}
+
+// AddContentTool registers a tool with no typed output (e.g. GetMedia, which
+// returns image content), routing its handler errors through toolFailure like
+// AddTool does.
+func AddContentTool[In any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, any]) {
+	mcp.AddTool(s, t, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
+		res, out, err := h(ctx, req, in)
+		if err != nil {
+			return nil, nil, toolFailure(ctx, req, t.Name, err)
+		}
+		return res, out, nil
+	})
+}
+
+// failure is a tool call that failed past input validation — a Telegram RPC
+// or another runtime error. Handlers return it as their Go error and
+// toolFailure renders it as "Failed to <op>: <err>" plus the optional hint.
+type failure struct {
+	op   string
+	hint string
+	err  error
+}
+
+func (f *failure) Error() string { return f.op + ": " + f.err.Error() }
+
+func (f *failure) Unwrap() error { return f.err }
+
+// failed reports that op — a phrase fitting "Failed to <op>", e.g. "send
+// message" — failed with err.
+func failed(op string, err error) error {
+	return &failure{op: op, err: err}
+}
+
+// failedHint is failed with a recovery hint the model can act on.
+func failedHint(op string, err error, hint string) error {
+	return &failure{op: op, hint: hint, err: err}
+}
+
+// peerHint follows a failure to resolve a chat ID.
+const peerHint = "The chat may not exist, you may not have access, or the ID may be wrong. Use SearchChats or GetChats to verify, or ResolveUsername if you only have a @handle."
+
+// toolFailure is the single place a handler's Go error becomes the tool error
+// the model reads: it classifies err through tgclient, renders it, and logs
+// it under the tool's name.
+func toolFailure(ctx context.Context, req *mcp.CallToolRequest, tool string, err error) error {
+	level := logLevelError
+	if _, ok := tgerr.AsFloodWait(err); ok {
+		level = logLevelWarning
+	}
+	mcpLog(ctx, req.Session, level, tool, map[string]any{"error": err.Error()})
+	return errors.New(failureText(tool, err))
+}
+
+// failureText renders a handler error as "Failed to <op>: <what happened>".
+// A dead session and a flood wait get their fixed guidance as what happened;
+// anything else shows the error itself, followed by the failure's own hint or,
+// lacking one, the peer hint when a chat ID failed to resolve.
+func failureText(tool string, err error) string {
+	op, hint, cause := "run "+tool, "", err
+	var f *failure
+	if errors.As(err, &f) {
+		op, hint, cause = f.op, f.hint, f.err
+	}
+	var what string
+	var pe *tgclient.PeerError
+	switch flood, isFlood := floodWaitMessage(tool, err); {
+	case tgclient.IsSessionUnauthorized(err):
+		what = fmt.Sprintf("Telegram no longer accepts this account's session (%v): it was logged out, revoked or expired. Log in again — `mcp-telegram login` for a local server, or reconnect the client to repeat the QR login — then retry.", cause)
+	case isFlood:
+		what = flood
+	case hint == "" && errors.As(err, &pe):
+		what = sentence(cause) + " " + peerHint
+	default:
+		what = sentence(cause)
+	}
+	text := fmt.Sprintf("Failed to %s: %s", op, what)
+	// The hint follows the fixed guidance too: it may carry the outcome, e.g.
+	// a partial backup that was saved before the flood wait.
+	if hint != "" {
+		text += " " + hint
+	}
+	return text
+}
+
+// sentence renders err as a sentence ending in a full stop, so a hint can
+// follow it.
+func sentence(err error) string {
+	return strings.TrimSuffix(err.Error(), ".") + "."
 }
 
 // toolResultText concatenates the text blocks of a tool result.
@@ -316,66 +407,27 @@ func firstMessageInUpdates(updates tg.UpdatesClass, typeIDs ...uint32) (int, int
 	return 0, 0
 }
 
-// floodWaitResult detects a Telegram FLOOD_WAIT — including the form the
-// flood-wait middleware wraps when the wait exceeds its configured max
-// (tgerr.AsFloodWait unwraps the chain) — and renders a deterministic,
-// actionable error telling the caller exactly how long to wait. Returns
-// (nil, false) when err is not a flood wait. The action verb fits "Telegram
-// rate-limited this <action>", e.g. "join".
+// floodWaitMessage returns the deterministic retry-after guidance for a
+// Telegram FLOOD_WAIT — including the form the flood-wait middleware wraps
+// when the wait exceeds its configured max (tgerr.AsFloodWait unwraps the
+// chain) — or ok=false when err is not a flood wait. toolFailure renders it
+// for every tool; batch handlers (e.g. MarkAsRead) embed it in an aggregated
+// result instead.
 //
 // FLOOD_WAIT here is an account-level limit (cumulative actions over a window,
 // not request rate), so a local rate limiter cannot prevent it — the only
 // remedy is to wait the reported duration and space the calls out, which the
 // message states so the model stops retry-spamming.
-func floodWaitResult(action string, err error) (*mcp.CallToolResult, bool) {
-	msg, ok := floodWaitMessage(action, err)
-	if !ok {
-		return nil, false
-	}
-	return errResult(msg), true
-}
-
-// floodWaitMessage returns the deterministic retry-after guidance for a
-// FLOOD_WAIT error, or ok=false when err is not a flood wait. Split out from
-// floodWaitResult so batch handlers (e.g. MarkAsRead) can embed the same text in
-// an aggregated result instead of a standalone error.
-func floodWaitMessage(action string, err error) (string, bool) {
+func floodWaitMessage(tool string, err error) (string, bool) {
 	d, ok := tgerr.AsFloodWait(err)
 	if !ok {
 		return "", false
 	}
 	d = d.Round(time.Second)
 	return fmt.Sprintf(
-		"Telegram rate-limited this %s: wait %s (%d seconds) before retrying. This is an account-level flood limit (cumulative actions, not request rate), so spacing out %s calls is the only way to avoid it — do not retry immediately.",
-		action, d, int(d/time.Second), action,
+		"Telegram rate-limited this %s call: wait %s (%d seconds) before retrying. This is an account-level flood limit (cumulative actions, not request rate), so spacing out %s calls is the only way to avoid it — do not retry immediately.",
+		tool, d, int(d/time.Second), tool,
 	), true
-}
-
-// telegramErrResult renders a failed Telegram API call as a tool error,
-// preferring the deterministic FLOOD_WAIT message (floodWaitResult) when the
-// failure is a rate limit and falling back to a plain "Failed to <action>"
-// otherwise. Single-call write tools (SendMessage, ForwardMessage, SetReaction,
-// EditMessage, …) route their API errors through this so a FLOOD_WAIT never
-// reaches the model as a bare "rpc error 420" that invites an immediate retry.
-// Batch tools like MarkAsRead instead call floodWaitMessage directly so they can
-// stop the batch early and still emit a structured result. The action verb fits
-// both "Telegram rate-limited this <action>" and "Failed to <action>", e.g.
-// "send message".
-func telegramErrResult(action string, err error) *mcp.CallToolResult {
-	if res, ok := floodWaitResult(action, err); ok {
-		return res
-	}
-	return errResult(fmt.Sprintf("Failed to %s: %v", action, err))
-}
-
-// errResolvePeer wraps a peer-resolution failure with an actionable hint.
-// Use this whenever tgclient.ResolvePeer fails so the model knows how to
-// recover (e.g. switch to SearchChats / GetChats / ResolveUsername).
-func errResolvePeer(chatID int64, err error) *mcp.CallToolResult {
-	return errResult(fmt.Sprintf(
-		"Failed to resolve chat %d: %v. The chat may not exist, you may not have access, or the ID may be wrong. Use SearchChats or GetChats to verify, or ResolveUsername if you only have a @handle.",
-		chatID, err,
-	))
 }
 
 // requireExplicitConfirmation is the sole authority gate for irreversible

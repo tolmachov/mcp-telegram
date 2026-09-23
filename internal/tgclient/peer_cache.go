@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
-	"github.com/gotd/td/tgerr"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -86,10 +85,4 @@ func (c *PeerCache) Invalidate(id int64) {
 	c.mu.Lock()
 	delete(c.byID, id)
 	c.mu.Unlock()
-}
-
-// ShouldRefreshPeer identifies stale-access-hash errors for which a caller may
-// invalidate and perform exactly one fresh resolve/RPC attempt.
-func ShouldRefreshPeer(err error) bool {
-	return tgerr.Is(err, "PEER_ID_INVALID", "CHANNEL_INVALID", "CHAT_ID_INVALID")
 }

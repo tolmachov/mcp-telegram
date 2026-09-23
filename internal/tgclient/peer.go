@@ -26,8 +26,17 @@ type peerProbe func(ctx context.Context, client *tg.Client, id int64) (tg.InputP
 // messages.getChats path entirely. Users take priority on the astronomically
 // unlikely numeric collision.
 //
-// Non-positive IDs, including Bot-API "-100…" marked IDs, are rejected.
+// Non-positive IDs, including Bot-API "-100…" marked IDs, are rejected. Every
+// failure is a *PeerError.
 func ResolvePeer(ctx context.Context, client *tg.Client, dialogID int64) (tg.InputPeerClass, error) {
+	peer, err := probePeer(ctx, client, dialogID)
+	if err != nil {
+		return nil, &PeerError{ID: dialogID, Err: err}
+	}
+	return peer, nil
+}
+
+func probePeer(ctx context.Context, client *tg.Client, dialogID int64) (tg.InputPeerClass, error) {
 	if dialogID <= 0 {
 		return nil, fmt.Errorf("chat id %d is invalid: pass the positive ID Telegram clients show (Bot-API \"-100…\" IDs are not accepted)", dialogID)
 	}

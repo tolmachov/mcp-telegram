@@ -31,14 +31,18 @@ context loading); admin and posting features are secondary. Two transports:
 1. New file in `internal/tools`: an input struct (descriptions go in `jsonschema`
    tags; closed value sets via `inputSchemaWithEnums`) and a `Register` method.
 2. Register with `tools.AddTool`, not `mcp.AddTool` — it keeps error results from
-   reaching the client as an empty structured output. Use plain `mcp.AddTool`
+   reaching the client as an empty structured output. Use `tools.AddContentTool`
    only for tools with no typed output (e.g. `GetMedia`).
-3. Add the handler to `buildHandlers` in `internal/server/server.go`: `research`
+3. Return `errResult` only for input validation. Return every other failure as
+   the handler's Go error via `failed(op, err)` / `failedHint`: the registration
+   helpers classify it (dead session, flood wait, unresolved chat), render the
+   text the model sees and log it under the tool's name.
+4. Add the handler to `buildHandlers` in `internal/server/server.go`: `research`
    for read-only tools, `mutating` for anything that changes state. The split
    drives the server variants (see README "Server Variants").
-4. Make the first sentence of `Description` self-contained: the `compact` and
+5. Make the first sentence of `Description` self-contained: the `compact` and
    `research` variants keep only that sentence.
-5. Update the tool list and tool counts in README.md.
+6. Update the tool list and tool counts in README.md.
 
 ## Commands
 

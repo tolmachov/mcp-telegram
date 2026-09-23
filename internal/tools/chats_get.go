@@ -76,7 +76,7 @@ func (h *ChatsGetHandler) handleFreshLoad(ctx context.Context, req *mcp.CallTool
 
 	snap, err := h.cache.Load(ctx, onProgress, true)
 	if err != nil {
-		return errResult(fmt.Sprintf("Failed to get chats: %v", err)), nil, nil
+		return nil, nil, failed("get chats", err)
 	}
 
 	return nil, h.pageFrom(snap, 0, limit), nil

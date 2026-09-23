@@ -87,7 +87,7 @@ func (h *MessageLinkResolveHandler) handle(ctx context.Context, _ *mcp.CallToolR
 	if parsed.Username != "" {
 		resolved, err := resolvePublicUsername(ctx, h.client, parsed.Username)
 		if err != nil {
-			return errResult(fmt.Sprintf("failed to resolve username from link: %v", err)), nil, nil
+			return nil, nil, failed("resolve the link's username", err)
 		}
 		chatID, title, found := resolvedPeerInfo(resolved)
 		if !found {

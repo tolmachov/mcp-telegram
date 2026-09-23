@@ -155,11 +155,11 @@ func (f *deleteInvoker) Invoke(_ context.Context, input bin.Encoder, output bin.
 	return nil
 }
 
-func runDelete(t *testing.T, inv *deleteInvoker, chatID int64, ids ...string) (*mcp.CallToolResult, *DeleteMessagesResult) {
+func runDelete(t *testing.T, inv *deleteInvoker, ids ...string) (*mcp.CallToolResult, *DeleteMessagesResult) {
 	t.Helper()
 	h := NewMessageDeleteHandler(tg.NewClient(inv))
 	errRes, out, err := h.handle(context.Background(), &mcp.CallToolRequest{}, DeleteMessagesInput{
-		ChatID:     chatID,
+		ChatID:     testBasicChatID,
 		MessageIDs: ids,
 		Confirm:    true,
 	})
@@ -182,7 +182,7 @@ func TestDeleteMessagesBasicGroup(t *testing.T) {
 		inv := newBasicGroupInvoker()
 		inv.admin = true
 		inv.add(559966, false)
-		errRes, out := runDelete(t, inv, chatID, "559966")
+		errRes, out := runDelete(t, inv, "559966")
 		require.Nil(t, errRes)
 		assert.Equal(t, statusCompleted, out.Status)
 		assert.Equal(t, int64(chatID), out.ChatID)
@@ -195,7 +195,7 @@ func TestDeleteMessagesBasicGroup(t *testing.T) {
 	t.Run("non-admin leaves a bot message untouched", func(t *testing.T) {
 		inv := newBasicGroupInvoker()
 		inv.add(559966, false)
-		errRes, out := runDelete(t, inv, chatID, "559966")
+		errRes, out := runDelete(t, inv, "559966")
 		require.Nil(t, errRes)
 		assert.Equal(t, map[string]string{"559966": statusForbidden}, statusesOf(out))
 		assert.Equal(t, 0, out.Deleted)
@@ -206,7 +206,7 @@ func TestDeleteMessagesBasicGroup(t *testing.T) {
 	t.Run("own message is deleted without admin rights", func(t *testing.T) {
 		inv := newBasicGroupInvoker()
 		inv.add(42, true)
-		errRes, out := runDelete(t, inv, chatID, "42")
+		errRes, out := runDelete(t, inv, "42")
 		require.Nil(t, errRes)
 		assert.Equal(t, map[string]string{"42": statusDeleted}, statusesOf(out))
 		assert.NotContains(t, inv.msgs, 42)
@@ -216,10 +216,10 @@ func TestDeleteMessagesBasicGroup(t *testing.T) {
 		inv := newBasicGroupInvoker()
 		inv.admin = true
 		inv.add(42, false)
-		_, first := runDelete(t, inv, chatID, "42")
+		_, first := runDelete(t, inv, "42")
 		assert.Equal(t, statusDeleted, statusesOf(first)["42"])
 
-		errRes, out := runDelete(t, inv, chatID, "42")
+		errRes, out := runDelete(t, inv, "42")
 		require.Nil(t, errRes)
 		assert.Equal(t, map[string]string{"42": statusNotFound}, statusesOf(out))
 		assert.Len(t, inv.deleted, 1, "the repeat call must not reach messages.deleteMessages")
@@ -229,7 +229,7 @@ func TestDeleteMessagesBasicGroup(t *testing.T) {
 		inv := newBasicGroupInvoker()
 		inv.admin = true
 		inv.msgs[99] = &tg.PeerUser{UserID: 1}
-		errRes, out := runDelete(t, inv, chatID, "99")
+		errRes, out := runDelete(t, inv, "99")
 		require.Nil(t, errRes)
 		assert.Equal(t, map[string]string{"99": statusNotFound}, statusesOf(out))
 		assert.Empty(t, inv.deleted)
@@ -241,7 +241,7 @@ func TestDeleteMessagesBasicGroup(t *testing.T) {
 		inv.admin = true
 		inv.skipRevoke = true
 		inv.add(42, false)
-		errRes, out := runDelete(t, inv, chatID, "42")
+		errRes, out := runDelete(t, inv, "42")
 		require.Nil(t, errRes)
 		assert.Equal(t, map[string]string{"42": statusForbidden}, statusesOf(out))
 		assert.Equal(t, 0, out.Deleted)
@@ -251,7 +251,7 @@ func TestDeleteMessagesBasicGroup(t *testing.T) {
 		inv := newBasicGroupInvoker()
 		inv.add(1, true)
 		inv.add(2, false)
-		errRes, out := runDelete(t, inv, chatID, "1", "2", "3", "1")
+		errRes, out := runDelete(t, inv, "1", "2", "3", "1")
 		require.Nil(t, errRes)
 		assert.Equal(t, []DeletedMessage{
 			{MessageID: "1", Status: statusDeleted},
@@ -269,11 +269,15 @@ func TestDeleteMessagesChannelError(t *testing.T) {
 	inv.admin = true
 	inv.deleteErr = tgerr.New(403, "MESSAGE_DELETE_FORBIDDEN")
 	inv.add(42, false)
-	errRes, out := runDelete(t, inv, testChannelID, "42")
+	h := NewMessageDeleteHandler(tg.NewClient(inv))
+	_, out, err := h.handle(context.Background(), &mcp.CallToolRequest{}, DeleteMessagesInput{
+		ChatID:     testChannelID,
+		MessageIDs: []string{"42"},
+		Confirm:    true,
+	})
 	require.Nil(t, out)
-	require.NotNil(t, errRes)
-	assert.True(t, errRes.IsError)
-	text := toolResultText(errRes)
+	require.ErrorIs(t, err, inv.deleteErr)
+	text := failureText("DeleteMessages", err)
 	assert.Contains(t, text, "MESSAGE_DELETE_FORBIDDEN")
 	assert.Contains(t, text, "admin rights")
 }
@@ -281,7 +285,7 @@ func TestDeleteMessagesChannelError(t *testing.T) {
 func TestDeleteMessagesScheduled(t *testing.T) {
 	inv := newBasicGroupInvoker()
 	inv.scheduled = map[int]bool{7: true}
-	errRes, out := runDelete(t, inv, testBasicChatID, "s:7", "s:8")
+	errRes, out := runDelete(t, inv, "s:7", "s:8")
 	require.Nil(t, errRes)
 	assert.Equal(t, map[string]string{"s:7": statusDeleted, "s:8": statusNotFound}, statusesOf(out))
 	assert.Equal(t, [][]int{{7}}, inv.deleted)

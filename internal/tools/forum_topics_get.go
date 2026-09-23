@@ -88,12 +88,7 @@ func (h *ForumTopicsGetHandler) handle(ctx context.Context, req *mcp.CallToolReq
 
 	result, err := h.provider.FetchForumTopics(ctx, in.ChatID, in.Query, limit, offsetTopic, offsetID, offsetDate, seen)
 	if err != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, "GetForumTopics", map[string]any{
-			"action":  "provider_fetch_forum_topics_failed",
-			"chat_id": in.ChatID,
-			"error":   err.Error(),
-		})
-		return errResult(fmt.Sprintf("Failed to get forum topics for chat %d: %v. This call only works on forum-enabled supergroups; verify the chat is a forum and that you have access.", in.ChatID, err)), nil, nil
+		return nil, nil, failedHint(fmt.Sprintf("get forum topics for chat %d", in.ChatID), err, "This call only works on forum-enabled supergroups; verify the chat is a forum and that you have access.")
 	}
 
 	out := &getForumTopicsOutput{

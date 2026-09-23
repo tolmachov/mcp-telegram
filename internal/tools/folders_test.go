@@ -2,13 +2,10 @@ package tools
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/gotd/td/tg"
-	"github.com/gotd/td/tgerr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -202,18 +199,6 @@ func TestResolvePeerRefLocalBranches(t *testing.T) {
 	assert.Nil(t, peer)
 	assert.NoError(t, fatal)
 	assert.Contains(t, reason, "invite link")
-}
-
-// TestIsFatalResolveErr distinguishes systemic failures from per-chat problems.
-func TestIsFatalResolveErr(t *testing.T) {
-	assert.False(t, isFatalResolveErr(nil))
-	assert.False(t, isFatalResolveErr(errors.New("plain failure")))
-	assert.True(t, isFatalResolveErr(context.Canceled))
-	assert.True(t, isFatalResolveErr(context.DeadlineExceeded))
-	assert.True(t, isFatalResolveErr(&tgerr.Error{Code: 420, Type: "FLOOD_WAIT", Message: "FLOOD_WAIT_5", Argument: 5}))
-	assert.True(t, isFatalResolveErr(&tgerr.Error{Code: 401, Type: "SESSION_REVOKED", Message: "SESSION_REVOKED"}))
-	// A wrapped fatal error (as resolvePeerRef wraps it) is still fatal.
-	assert.True(t, isFatalResolveErr(fmt.Errorf("resolving @x: %w", context.Canceled)))
 }
 
 // TestCreateFolderValidation covers input validation before any API call, so a

@@ -2,8 +2,8 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -97,7 +97,7 @@ func (h *MessageReadHandler) handle(ctx context.Context, req *mcp.CallToolReques
 			// remaining chats would fire more ReadHistory calls into the flood
 			// window and deepen the limit. Stop the batch and report the rest as
 			// skipped so the model waits instead of retry-spamming.
-			if msg, ok := floodWaitMessage("mark chats as read", err); ok {
+			if msg, ok := floodWaitMessage("MarkAsRead", err); ok {
 				out := h.buildResult(results)
 				out.SkippedIDs = append([]int64(nil), in.ChatIDs[i+1:]...)
 				out.Warning = msg
@@ -114,12 +114,11 @@ func (h *MessageReadHandler) handle(ctx context.Context, req *mcp.CallToolReques
 func (h *MessageReadHandler) finalResult(results []markReadResult) (*mcp.CallToolResult, *MarkAsReadResult, error) {
 	out := h.buildResult(results)
 	if out.Failed > 0 && out.Successful == 0 {
-		var b strings.Builder
-		fmt.Fprintf(&b, "Failed to mark all %d chat(s) as read:", out.Failed)
-		for _, f := range out.Failures {
-			fmt.Fprintf(&b, "\n  chat_id=%d: %s", f.ChatID, f.Error)
+		errs := make([]error, 0, len(results))
+		for _, r := range results {
+			errs = append(errs, fmt.Errorf("chat_id=%d: %w", r.chatID, r.err))
 		}
-		return errResult(b.String()), nil, nil
+		return nil, nil, failed(fmt.Sprintf("mark any of the %d chat(s) as read", out.Failed), errors.Join(errs...))
 	}
 	return nil, out, nil
 }

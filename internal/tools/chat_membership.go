@@ -104,7 +104,7 @@ func (h *LeaveChatHandler) Register(s *mcp.Server) {
 	}, h.handle)
 }
 
-func (h *JoinChatHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in JoinChatInput) (*mcp.CallToolResult, *JoinChatResult, error) {
+func (h *JoinChatHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in JoinChatInput) (*mcp.CallToolResult, *JoinChatResult, error) {
 	chat := strings.TrimSpace(in.Chat)
 	if chat == "" {
 		return errResult("chat is required: pass a public @username, a numeric chat ID, or an invite link (t.me/+hash)."), nil, nil
@@ -113,35 +113,35 @@ func (h *JoinChatHandler) handle(ctx context.Context, req *mcp.CallToolRequest, 
 	kind, value := classifyChatRef(chat)
 	switch kind {
 	case chatRefInvite:
-		return h.joinByInvite(ctx, req, chat, value)
+		return h.joinByInvite(ctx, chat, value)
 	case chatRefUsername:
-		return h.joinByUsername(ctx, req, chat, value)
+		return h.joinByUsername(ctx, chat, value)
 	default: // chatRefID
-		return h.joinByID(ctx, req, chat, value)
+		return h.joinByID(ctx, chat, value)
 	}
 }
 
 // joinByInvite imports a private invite hash via messages.importChatInvite.
-func (h *JoinChatHandler) joinByInvite(ctx context.Context, req *mcp.CallToolRequest, chat, hash string) (*mcp.CallToolResult, *JoinChatResult, error) {
+func (h *JoinChatHandler) joinByInvite(ctx context.Context, chat, hash string) (*mcp.CallToolResult, *JoinChatResult, error) {
 	res, err := h.client.MessagesImportChatInvite(ctx, hash)
 	if err != nil {
-		return h.joinError(ctx, req, chat, &JoinChatResult{Status: statusAlreadyMember, Chat: chat}, err)
+		return joinError(chat, &JoinChatResult{Status: statusAlreadyMember, Chat: chat}, err)
 	}
 	return nil, joinResultFrom(chat, statusJoined, res), nil
 }
 
 // joinByUsername resolves a public @username to a channel and joins it.
-func (h *JoinChatHandler) joinByUsername(ctx context.Context, req *mcp.CallToolRequest, chat, username string) (*mcp.CallToolResult, *JoinChatResult, error) {
+func (h *JoinChatHandler) joinByUsername(ctx context.Context, chat, username string) (*mcp.CallToolResult, *JoinChatResult, error) {
 	input, channel, err := resolveChannelByUsername(ctx, h.client, username)
 	if err != nil {
-		return errResult(fmt.Sprintf("Failed to resolve @%s: %v. You can only join channels and supergroups by username; for a private chat use its invite link instead.", username, err)), nil, nil
+		return nil, nil, failedHint("resolve @"+username, err, "You can only join channels and supergroups by username; for a private chat use its invite link instead.")
 	}
 	known := &JoinChatResult{Status: statusAlreadyMember, Chat: chat}
 	fillJoinResultFromChannel(known, channel)
 
 	res, err := h.client.ChannelsJoinChannel(ctx, input)
 	if err != nil {
-		return h.joinError(ctx, req, chat, known, err)
+		return joinError(chat, known, err)
 	}
 	out := joinResultFrom(chat, statusJoined, res)
 	if out.ChatID == 0 {
@@ -152,14 +152,14 @@ func (h *JoinChatHandler) joinByUsername(ctx context.Context, req *mcp.CallToolR
 
 // joinByID resolves a numeric ID to a peer and joins it (channels/supergroups
 // only — basic groups and users cannot be joined by ID).
-func (h *JoinChatHandler) joinByID(ctx context.Context, req *mcp.CallToolRequest, chat, value string) (*mcp.CallToolResult, *JoinChatResult, error) {
+func (h *JoinChatHandler) joinByID(ctx context.Context, chat, value string) (*mcp.CallToolResult, *JoinChatResult, error) {
 	id, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
 		return errResult(fmt.Sprintf("invalid chat reference %q: expected a public @username, a numeric chat ID, or an invite link.", chat)), nil, nil
 	}
 	peer, err := tgclient.ResolvePeer(ctx, h.client, id)
 	if err != nil {
-		return errResolvePeer(id, err), nil, nil
+		return nil, nil, failed(fmt.Sprintf("join %q", chat), err)
 	}
 	ch, ok := peer.(*tg.InputPeerChannel)
 	if !ok {
@@ -170,7 +170,7 @@ func (h *JoinChatHandler) joinByID(ctx context.Context, req *mcp.CallToolRequest
 
 	res, err := h.client.ChannelsJoinChannel(ctx, input)
 	if err != nil {
-		return h.joinError(ctx, req, chat, known, err)
+		return joinError(chat, known, err)
 	}
 	out := joinResultFrom(chat, statusJoined, res)
 	if out.ChatID == 0 {
@@ -182,7 +182,7 @@ func (h *JoinChatHandler) joinByID(ctx context.Context, req *mcp.CallToolRequest
 // joinError maps a join failure to either a soft success (already a member /
 // request sent) or a hard error. alreadyResult carries any chat info we
 // already know so an "already a member" outcome still reports it.
-func (h *JoinChatHandler) joinError(ctx context.Context, req *mcp.CallToolRequest, chat string, alreadyResult *JoinChatResult, err error) (*mcp.CallToolResult, *JoinChatResult, error) {
+func joinError(chat string, alreadyResult *JoinChatResult, err error) (*mcp.CallToolResult, *JoinChatResult, error) {
 	switch {
 	case tgerr.Is(err, "USER_ALREADY_PARTICIPANT"):
 		alreadyResult.Status = statusAlreadyMember
@@ -191,17 +191,10 @@ func (h *JoinChatHandler) joinError(ctx context.Context, req *mcp.CallToolReques
 		alreadyResult.Status = statusRequested
 		return nil, alreadyResult, nil
 	}
-	mcpLog(ctx, req.Session, logLevelWarning, "JoinChat", map[string]any{
-		"chat":  chat,
-		"error": err.Error(),
-	})
-	if res, ok := floodWaitResult("join", err); ok {
-		return res, nil, nil
-	}
-	return errResult(fmt.Sprintf("Failed to join %q: %v", chat, err)), nil, nil
+	return nil, nil, failed(fmt.Sprintf("join %q", chat), err)
 }
 
-func (h *LeaveChatHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in LeaveChatInput) (*mcp.CallToolResult, *LeaveChatResult, error) {
+func (h *LeaveChatHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in LeaveChatInput) (*mcp.CallToolResult, *LeaveChatResult, error) {
 	chat := strings.TrimSpace(in.Chat)
 	if chat == "" {
 		return errResult("chat is required: pass a public @username or a numeric chat ID of a chat you're a member of."), nil, nil
@@ -215,7 +208,7 @@ func (h *LeaveChatHandler) handle(ctx context.Context, req *mcp.CallToolRequest,
 		return errResult("LeaveChat does not accept invite links. Pass the chat's @username or numeric ID instead (find it with GetChats or SearchChats)."), nil, nil
 	}
 	if err != nil {
-		return errResult(fmt.Sprintf("Failed to resolve %q: %v. The chat may not exist or you may not have access; use SearchChats or GetChats to verify.", chat, err)), nil, nil
+		return nil, nil, failedHint(fmt.Sprintf("resolve %q", chat), err, "The chat may not exist or you may not have access; use SearchChats or GetChats to verify.")
 	}
 
 	// Reject peers that cannot be left before issuing the mutation.
@@ -226,30 +219,26 @@ func (h *LeaveChatHandler) handle(ctx context.Context, req *mcp.CallToolRequest,
 	}
 
 	if isChannel {
-		return h.leaveChannel(ctx, req, chat, channelPeer)
+		return h.leaveChannel(ctx, chat, channelPeer)
 	}
-	return h.leaveBasicChat(ctx, req, chat, chatPeer)
+	return h.leaveBasicChat(ctx, chat, chatPeer)
 }
 
-func (h *LeaveChatHandler) leaveChannel(ctx context.Context, req *mcp.CallToolRequest, chat string, p *tg.InputPeerChannel) (*mcp.CallToolResult, *LeaveChatResult, error) {
+func (h *LeaveChatHandler) leaveChannel(ctx context.Context, chat string, p *tg.InputPeerChannel) (*mcp.CallToolResult, *LeaveChatResult, error) {
 	_, err := h.client.ChannelsLeaveChannel(ctx, &tg.InputChannel{ChannelID: p.ChannelID, AccessHash: p.AccessHash})
 	if err != nil {
 		if tgerr.Is(err, "USER_NOT_PARTICIPANT") {
 			return nil, &LeaveChatResult{Status: statusNotMember, Chat: chat, ChatID: p.ChannelID, Kind: tgdata.ChatTypeChannel}, nil
 		}
 		if tgerr.Is(err, "USER_CREATOR") {
-			return errResult(fmt.Sprintf("Cannot leave %q: you are its owner. Transfer ownership or delete the channel instead.", chat)), nil, nil
+			return nil, nil, failedHint(fmt.Sprintf("leave %q", chat), err, "You are its owner: transfer ownership or delete the channel instead.")
 		}
-		mcpLog(ctx, req.Session, logLevelWarning, "LeaveChat", map[string]any{"chat": chat, "error": err.Error()})
-		if res, ok := floodWaitResult("leave", err); ok {
-			return res, nil, nil
-		}
-		return errResult(fmt.Sprintf("Failed to leave %q: %v", chat, err)), nil, nil
+		return nil, nil, failed(fmt.Sprintf("leave %q", chat), err)
 	}
 	return nil, &LeaveChatResult{Status: statusLeft, Chat: chat, ChatID: p.ChannelID, Kind: tgdata.ChatTypeChannel}, nil
 }
 
-func (h *LeaveChatHandler) leaveBasicChat(ctx context.Context, req *mcp.CallToolRequest, chat string, p *tg.InputPeerChat) (*mcp.CallToolResult, *LeaveChatResult, error) {
+func (h *LeaveChatHandler) leaveBasicChat(ctx context.Context, chat string, p *tg.InputPeerChat) (*mcp.CallToolResult, *LeaveChatResult, error) {
 	_, err := h.client.MessagesDeleteChatUser(ctx, &tg.MessagesDeleteChatUserRequest{
 		ChatID: p.ChatID,
 		UserID: &tg.InputUserSelf{},
@@ -258,11 +247,7 @@ func (h *LeaveChatHandler) leaveBasicChat(ctx context.Context, req *mcp.CallTool
 		if tgerr.Is(err, "USER_NOT_PARTICIPANT") {
 			return nil, &LeaveChatResult{Status: statusNotMember, Chat: chat, ChatID: p.ChatID, Kind: tgdata.ChatTypeGroup}, nil
 		}
-		mcpLog(ctx, req.Session, logLevelWarning, "LeaveChat", map[string]any{"chat": chat, "error": err.Error()})
-		if res, ok := floodWaitResult("leave", err); ok {
-			return res, nil, nil
-		}
-		return errResult(fmt.Sprintf("Failed to leave %q: %v", chat, err)), nil, nil
+		return nil, nil, failed(fmt.Sprintf("leave %q", chat), err)
 	}
 	return nil, &LeaveChatResult{Status: statusLeft, Chat: chat, ChatID: p.ChatID, Kind: tgdata.ChatTypeGroup}, nil
 }
