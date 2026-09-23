@@ -129,7 +129,7 @@ the tools below, the server is up but Telegram is not authorized — see
 | `GetForumTopics` | List a forum supergroup's topics with opaque cursor-based pagination |
 | `SendMessage` | Send, reply, schedule, or draft a message. `mode` = `send` (default) / `schedule` / `draft`; `reply_to_message_id` works with any mode; `schedule_at` is RFC3339; text is limited to 4096 UTF-16 code units |
 | `EditMessage` | Edit a message within the same 4096 UTF-16 limit; for scheduled handles, `schedule_at` reschedules delivery in the same call |
-| `DeleteMessages` | Delete up to 100 same-kind messages per call with per-message `deleted` / `not_found` / `forbidden` outcomes; `"s:<id>"` handles cancel scheduled messages; requires `confirm: true` |
+| `DeleteMessages` | Delete up to 100 same-kind messages per call with per-message `deleted` / `not_found` / `forbidden` / `unverified` outcomes; `"s:<id>"` handles cancel scheduled messages; requires `confirm: true` |
 | `ForwardMessage` | Forward a delivered message; scheduled handles are rejected and `confirm: true` is required |
 | `SetReaction` | Set or clear your emoji reactions on a message (empty list clears) |
 | `JoinChat` | Join a channel/group/supergroup by @username, numeric ID, or invite link (`t.me/+hash`) |

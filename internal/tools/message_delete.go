@@ -22,6 +22,9 @@ const (
 	statusDeleted   = "deleted"
 	statusNotFound  = "not_found"
 	statusForbidden = "forbidden"
+	// statusUnverified: Telegram accepted the deletion, but re-reading the
+	// message to confirm it failed.
+	statusUnverified = "unverified"
 )
 
 // statusCompleted is the top-level DeleteMessages status once the batch has
@@ -59,7 +62,7 @@ type DeleteMessagesInput struct {
 // DeletedMessage is the outcome for one requested handle.
 type DeletedMessage struct {
 	MessageID string `json:"message_id"`
-	Status    string `json:"status"` // "deleted" | "not_found" | "forbidden"
+	Status    string `json:"status"` // "deleted" | "not_found" | "forbidden" | "unverified"
 }
 
 // DeleteMessagesResult is the typed output of DeleteMessages. "deleted" is
@@ -71,13 +74,22 @@ type DeleteMessagesResult struct {
 	Deleted int              `json:"deleted"`
 	Results []DeletedMessage `json:"results,omitempty"`
 	Hint    string           `json:"hint,omitempty"`
+	Note    string           `json:"note,omitempty"`
+}
+
+// deleteOutcome is what one delete attempt established.
+type deleteOutcome struct {
+	statuses map[int]string
+	// verifyErr is why the messages Telegram accepted for deletion could not
+	// be re-read; they are marked unverified.
+	verifyErr error
 }
 
 // Register adds the tool to the MCP server.
 func (h *MessageDeleteHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "DeleteMessages",
-		Description: "Delete up to 100 messages from one chat in a single call. Regular handles (\"42\") delete delivered messages for all participants and cannot be undone; scheduled handles (\"s:42\") cancel pending delivery. One kind per call. Reports each message as deleted (verified gone), not_found (no such message in this chat) or forbidden (you lack the right to delete it for everyone — left untouched rather than deleted only for you). The call is rejected unless confirm=true. Use GetMessages first (with include_scheduled=true for the scheduled queue) to get the handles.",
+		Description: "Delete up to 100 messages from one chat in a single call. Regular handles (\"42\") delete delivered messages for all participants and cannot be undone; scheduled handles (\"s:42\") cancel pending delivery. One kind per call. Reports each message as deleted (verified gone), not_found (no such message in this chat), forbidden (you lack the right to delete it for everyone — left untouched rather than deleted only for you) or unverified (Telegram accepted the deletion but it could not be confirmed). The call is rejected unless confirm=true. Use GetMessages first (with include_scheduled=true for the scheduled queue) to get the handles.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: new(true), OpenWorldHint: new(true)},
 	}, h.handle)
 }
@@ -110,7 +122,7 @@ func (h *MessageDeleteHandler) handle(ctx context.Context, _ *mcp.CallToolReques
 		return errRes, nil, nil
 	}
 
-	statuses, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, func(p tgclient.Peer) (map[int]string, error) {
+	outcome, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, func(p tgclient.Peer) (deleteOutcome, error) {
 		if scheduled {
 			return h.deleteScheduled(ctx, p.Input, ids)
 		}
@@ -121,12 +133,19 @@ func (h *MessageDeleteHandler) handle(ctx context.Context, _ *mcp.CallToolReques
 	}
 
 	res := &DeleteMessagesResult{Status: statusCompleted, ChatID: in.ChatID}
+	if outcome.verifyErr != nil {
+		check := "GetMessages"
+		if scheduled {
+			check = "GetMessages with include_scheduled=true"
+		}
+		res.Note = fmt.Sprintf("Telegram accepted the deletion of the messages marked unverified, but re-reading them to confirm failed (%v). Check with %s which of them are gone.", outcome.verifyErr, check)
+	}
 	for _, id := range ids {
 		handle := presentation.FormatRegularRef(id)
 		if scheduled {
 			handle = presentation.MessageRef{ID: id, Scheduled: true}.Format()
 		}
-		st := statuses[id]
+		st := outcome.statuses[id]
 		switch st {
 		case statusDeleted:
 			res.Deleted++
@@ -144,10 +163,10 @@ func (h *MessageDeleteHandler) handle(ctx context.Context, _ *mcp.CallToolReques
 // never delete a message elsewhere. A message you may not delete for everyone
 // is reported forbidden and not sent: with revoke Telegram would still delete
 // it for you alone, hiding it from you while others keep seeing it.
-func (h *MessageDeleteHandler) deleteRegular(ctx context.Context, peer tg.InputPeerClass, ids []int) (map[int]string, error) {
+func (h *MessageDeleteHandler) deleteRegular(ctx context.Context, peer tg.InputPeerClass, ids []int) (deleteOutcome, error) {
 	msgs, chats, err := h.getRegular(ctx, peer, ids)
 	if err != nil {
-		return nil, fmt.Errorf("reading the messages to delete: %w", err)
+		return deleteOutcome{}, fmt.Errorf("reading the messages to delete: %w", err)
 	}
 	canDeleteOthers := canDeleteOthersMessages(peer, chats)
 
@@ -165,7 +184,7 @@ func (h *MessageDeleteHandler) deleteRegular(ctx context.Context, peer tg.InputP
 		}
 	}
 	if len(toDelete) == 0 {
-		return statuses, nil
+		return deleteOutcome{statuses: statuses}, nil
 	}
 
 	if ch, ok := peer.(*tg.InputPeerChannel); ok {
@@ -177,23 +196,19 @@ func (h *MessageDeleteHandler) deleteRegular(ctx context.Context, peer tg.InputP
 		_, err = h.client.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{Revoke: true, ID: toDelete})
 	}
 	if err != nil {
-		return nil, deleteFailure(err)
+		return deleteOutcome{}, deleteFailure(err)
 	}
 
 	left, _, err := h.getRegular(ctx, peer, toDelete)
-	if err != nil {
-		return nil, withNote(fmt.Errorf("re-reading the messages: %w", err), "Telegram accepted the deletion; check with GetMessages which of them are gone.")
-	}
-	markVerified(statuses, toDelete, left)
-	return statuses, nil
+	return verified(statuses, toDelete, left, err), nil
 }
 
 // deleteScheduled cancels pending scheduled messages. The schedule queue is
 // per chat and holds only your own messages, so there is no ownership check.
-func (h *MessageDeleteHandler) deleteScheduled(ctx context.Context, peer tg.InputPeerClass, ids []int) (map[int]string, error) {
+func (h *MessageDeleteHandler) deleteScheduled(ctx context.Context, peer tg.InputPeerClass, ids []int) (deleteOutcome, error) {
 	msgs, err := h.getScheduled(ctx, peer, ids)
 	if err != nil {
-		return nil, fmt.Errorf("reading the scheduled messages to delete: %w", err)
+		return deleteOutcome{}, fmt.Errorf("reading the scheduled messages to delete: %w", err)
 	}
 	statuses := make(map[int]string, len(ids))
 	var toDelete []int
@@ -205,31 +220,35 @@ func (h *MessageDeleteHandler) deleteScheduled(ctx context.Context, peer tg.Inpu
 		}
 	}
 	if len(toDelete) == 0 {
-		return statuses, nil
+		return deleteOutcome{statuses: statuses}, nil
 	}
 
 	if _, err := h.client.MessagesDeleteScheduledMessages(ctx, &tg.MessagesDeleteScheduledMessagesRequest{Peer: peer, ID: toDelete}); err != nil {
-		return nil, deleteFailure(err)
+		return deleteOutcome{}, deleteFailure(err)
 	}
 
 	left, err := h.getScheduled(ctx, peer, toDelete)
-	if err != nil {
-		return nil, withNote(fmt.Errorf("re-reading the schedule queue: %w", err), "Telegram accepted the cancellation; check with GetMessages include_scheduled=true which of them are gone.")
-	}
-	markVerified(statuses, toDelete, left)
-	return statuses, nil
+	return verified(statuses, toDelete, left, err), nil
 }
 
-// markVerified sets deleted/forbidden for each attempted ID from what is
-// still readable after the delete call.
-func markVerified(statuses map[int]string, attempted []int, left map[int]tg.NotEmptyMessage) {
+// verified settles each ID Telegram accepted for deletion from the re-read
+// after the delete call: deleted when gone, forbidden when still readable,
+// and unverified for all of them when the re-read itself failed (readErr).
+// A failed re-read is an outcome, not an error, so WithPeer never repeats a
+// deletion Telegram has already accepted.
+func verified(statuses map[int]string, attempted []int, left map[int]tg.NotEmptyMessage, readErr error) deleteOutcome {
 	for _, id := range attempted {
-		if _, still := left[id]; still {
+		_, still := left[id]
+		switch {
+		case readErr != nil:
+			statuses[id] = statusUnverified
+		case still:
 			statuses[id] = statusForbidden
-		} else {
+		default:
 			statuses[id] = statusDeleted
 		}
 	}
+	return deleteOutcome{statuses: statuses, verifyErr: readErr}
 }
 
 // getRegular reads delivered messages by ID and returns those that exist in

@@ -30,6 +30,7 @@ type deleteInvoker struct {
 	admin      bool
 	skipRevoke bool  // delete call succeeds but removes nothing
 	deleteErr  error // delete call fails with this Telegram error
+	rereadErr  error // reads after a delete call fail with this error
 	msgs       map[int]tg.PeerClass
 	out        map[int]bool
 	scheduled  map[int]bool
@@ -114,6 +115,9 @@ func (f *deleteInvoker) Invoke(_ context.Context, input bin.Encoder, output bin.
 		}
 		output.(*tg.MessagesChatsBox).Chats = &tg.MessagesChats{Chats: []tg.ChatClass{f.chat()}}
 	case *tg.MessagesGetMessagesRequest:
+		if f.rereadErr != nil && len(f.deleted) > 0 {
+			return f.rereadErr
+		}
 		output.(*tg.MessagesMessagesBox).Messages = &tg.MessagesMessages{
 			Messages: f.messages(inputIDs(req.ID)),
 			Chats:    []tg.ChatClass{f.chat()},
@@ -139,6 +143,9 @@ func (f *deleteInvoker) Invoke(_ context.Context, input bin.Encoder, output bin.
 		f.remove(req.ID)
 		*output.(*tg.MessagesAffectedMessages) = tg.MessagesAffectedMessages{Pts: 1, PtsCount: len(req.ID)}
 	case *tg.MessagesGetScheduledMessagesRequest:
+		if f.rereadErr != nil && len(f.deleted) > 0 {
+			return f.rereadErr
+		}
 		var msgs []tg.MessageClass
 		for _, id := range req.ID {
 			if f.scheduled[id] {
@@ -291,6 +298,37 @@ func TestDeleteMessagesScheduled(t *testing.T) {
 	require.Nil(t, errRes)
 	assert.Equal(t, map[string]string{"s:7": statusDeleted, "s:8": statusNotFound}, statusesOf(out))
 	assert.Equal(t, [][]int{{7}}, inv.deleted)
+}
+
+// TestDeleteMessagesUnverified pins that a deletion Telegram accepted but that
+// could not be re-read is reported as unverified in a completed result — not
+// as a failed deletion, and without sending the deletion again.
+func TestDeleteMessagesUnverified(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*deleteInvoker)
+		ids   []string
+		check string
+	}{
+		{"regular", func(inv *deleteInvoker) { inv.add(42, true) }, []string{"42", "43"}, "GetMessages which"},
+		{"scheduled", func(inv *deleteInvoker) { inv.scheduled = map[int]bool{42: true} }, []string{"s:42", "s:43"}, "include_scheduled=true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := newBasicGroupInvoker()
+			tc.setup(inv)
+			inv.rereadErr = tgerr.New(500, "INTERNAL")
+			errRes, out := runDelete(t, inv, tc.ids...)
+			require.Nil(t, errRes)
+			require.NotNil(t, out)
+			assert.Equal(t, statusCompleted, out.Status)
+			assert.Equal(t, map[string]string{tc.ids[0]: statusUnverified, tc.ids[1]: statusNotFound}, statusesOf(out))
+			assert.Zero(t, out.Deleted, "an unverified deletion is not counted as deleted")
+			assert.Contains(t, out.Note, "Telegram accepted the deletion")
+			assert.Contains(t, out.Note, "INTERNAL")
+			assert.Contains(t, out.Note, tc.check)
+			assert.Equal(t, [][]int{{42}}, inv.deleted, "the deletion is sent exactly once")
+		})
+	}
 }
 
 func TestDeleteMessagesConfirmGate(t *testing.T) {
