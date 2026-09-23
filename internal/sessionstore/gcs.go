@@ -168,15 +168,20 @@ func (g *GCS) DeleteRevoked(ctx context.Context, userID tgid.UserID, sid string)
 	return nil
 }
 
-// newWriter opens a single-request upload. Every object here is at most a few
-// KiB, so the default 16 MiB chunk buffer per writer is pure waste. Without
-// the buffer the client cannot retry a failed upload itself; callers already
-// surface write errors, and the conditional grant writes must not be blindly
-// retried anyway (a retry after a lost success reads as a precondition
-// failure).
+// writerChunkSize is the upload buffer of every writer: the library minimum
+// (256 KiB), which holds any object this package writes in one request.
+const writerChunkSize = 256 << 10
+
+// newWriter opens an upload with a small buffer instead of the default 16 MiB
+// one. The buffer is what lets the library resend a request after a transient
+// error; under the default policy it does so only for writes with a
+// precondition — the conditional grant writes — and leaves unconditioned
+// session and tombstone writes to fail to the caller. A grant retry that
+// follows a lost success gets 412, which StoreGrant reports as
+// ErrGrantConflict and the compare-and-swap loop settles by re-reading.
 func newWriter(ctx context.Context, object *storage.ObjectHandle) *storage.Writer {
 	w := object.NewWriter(ctx)
-	w.ChunkSize = 0
+	w.ChunkSize = writerChunkSize
 	return w
 }
 
