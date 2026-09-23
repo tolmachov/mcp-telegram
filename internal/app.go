@@ -76,7 +76,7 @@ func buildAuthOptions(ctx context.Context, cmd *cli.Command) (*authsrv.Config, s
 
 	bucket := cmd.String(flags.AuthSessionBucket)
 	dir := cmd.String(flags.AuthSessionDir)
-	var backend sessionstore.Store
+	cipher := sessionstore.NewCipher(keys, cfg.IssuerURL)
 	switch {
 	case bucket != "" && dir != "":
 		return nil, nil, fmt.Errorf("--%s and --%s are mutually exclusive", flags.AuthSessionBucket, flags.AuthSessionDir)
@@ -85,18 +85,16 @@ func buildAuthOptions(ctx context.Context, cmd *cli.Command) (*authsrv.Config, s
 		if err != nil {
 			return nil, nil, err
 		}
-		backend = gcs
+		return cfg, sessionstore.Encrypted(gcs, cipher), nil
 	case dir != "":
 		fs, err := sessionstore.NewFS(dir)
 		if err != nil {
 			return nil, nil, err
 		}
-		backend = fs
+		return cfg, sessionstore.Encrypted(fs, cipher), nil
 	default:
 		return nil, nil, fmt.Errorf("HTTP requires exactly one of --%s / --%s", flags.AuthSessionBucket, flags.AuthSessionDir)
 	}
-
-	return cfg, sessionstore.Encrypted(backend, sessionstore.NewCipher(keys, cfg.IssuerURL)), nil
 }
 
 // New creates a new instance of application.

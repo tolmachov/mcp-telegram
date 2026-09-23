@@ -1,23 +1,25 @@
 package sessionstoretest
 
 import (
+	"crypto/rand"
 	"testing"
 	"time"
 )
 
-// TestMemoryList pins that List reports stored sessions and that the
-// injectable clock stamps writes.
-func TestMemoryList(t *testing.T) {
+// TestList pins that List reports stored sessions and that the injected clock
+// stamps writes.
+func TestList(t *testing.T) {
 	ctx := t.Context()
-	m := NewMemory()
 	stamp := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	m.Now = func() time.Time { return stamp }
+	store := NewWithClock(t, func() time.Time { return stamp })
+	key := make([]byte, 32)
+	_, _ = rand.Read(key)
 
-	if err := m.Session(7, "0123456789abcdef0123456789abcdef", nil).StoreSession(ctx, []byte("a")); err != nil {
+	if err := store.Session(7, "0123456789abcdef0123456789abcdef", key).StoreSession(ctx, []byte("a")); err != nil {
 		t.Fatalf("store a: %v", err)
 	}
 
-	refs, err := m.List(ctx)
+	refs, err := store.List(ctx)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}

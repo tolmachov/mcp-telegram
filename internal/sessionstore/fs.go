@@ -105,7 +105,7 @@ func (f *FS) revokedPath(userID tgid.UserID, sid string) string {
 	return filepath.Join(f.revokedDir(), sessionBase(userID, sid))
 }
 
-func (f *FS) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {
+func (f *FS) Session(userID tgid.UserID, sid string) session.Storage {
 	return xdg.FileSession{Path: f.path(userID, sid)}
 }
 

@@ -27,24 +27,57 @@ const (
 	testGrantFamily = "fedcba9876543210fedcba9876543210"
 )
 
-func newFS(t *testing.T) *sessionstore.FS {
+// stores returns an empty Encrypted store over every backend.
+func stores(t *testing.T) map[string]sessionstore.Store {
 	t.Helper()
+	key := make([]byte, keyring.MasterKeyLen)
+	_, err := rand.Read(key)
+	require.NoError(t, err)
+	ring, err := keyring.Parse([]string{base64.StdEncoding.EncodeToString(key)})
+	require.NoError(t, err)
+	cipher := sessionstore.NewCipher(ring, "https://mcp.example.com")
 	fs, err := sessionstore.NewFS(filepath.Join(t.TempDir(), "sessions"))
 	require.NoError(t, err)
-	return fs
+	return map[string]sessionstore.Store{
+		"memory": sessionstoretest.New(t),
+		"fs":     sessionstore.Encrypted(fs, cipher),
+		"gcs":    sessionstore.Encrypted(sessionstore.NewTestGCS(t), cipher),
+	}
 }
 
-func grantStores(t *testing.T) map[string]sessionstore.Store {
-	t.Helper()
-	return map[string]sessionstore.Store{
-		"memory": sessionstoretest.NewMemory(),
-		"fs":     newFS(t),
-		"gcs":    sessionstore.NewTestGCS(t),
+// TestGrantStoreCASContract pins the compare-and-swap every backend's
+// StoreGrant must keep, step by step and without concurrency.
+func TestGrantStoreCASContract(t *testing.T) {
+	for name, store := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			first := sessionstore.GrantRecord{SID: testSID, ExpiresAt: time.Now().Add(time.Hour).UTC()}
+			require.NoError(t, store.StoreGrant(ctx, testGrantFamily, first, 0))
+			require.ErrorIs(t, store.StoreGrant(ctx, testGrantFamily, first, 0), sessionstore.ErrGrantConflict,
+				"version 0 creates only when no record exists")
+
+			got, version, err := store.LoadGrant(ctx, testGrantFamily)
+			require.NoError(t, err)
+			require.NotZero(t, version)
+			assert.Equal(t, first, got)
+
+			second := first
+			second.Generation = 1
+			require.NoError(t, store.StoreGrant(ctx, testGrantFamily, second, version))
+			third := second
+			third.Generation = 2
+			require.ErrorIs(t, store.StoreGrant(ctx, testGrantFamily, third, version), sessionstore.ErrGrantConflict,
+				"a version that was already written over is stale")
+
+			got, _, err = store.LoadGrant(ctx, testGrantFamily)
+			require.NoError(t, err)
+			assert.Equal(t, second, got)
+		})
 	}
 }
 
 func TestGrantStoreContract(t *testing.T) {
-	for name, store := range grantStores(t) {
+	for name, store := range stores(t) {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
 			now := time.Now()
@@ -88,7 +121,7 @@ func TestGrantStoreContract(t *testing.T) {
 }
 
 func TestGrantStoreRotateAndRevokeContract(t *testing.T) {
-	for name, store := range grantStores(t) {
+	for name, store := range stores(t) {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
 			now := time.Now()
@@ -120,7 +153,7 @@ func TestGrantStoreRotateAndRevokeContract(t *testing.T) {
 }
 
 func TestGrantStoreExpiryContract(t *testing.T) {
-	for name, store := range grantStores(t) {
+	for name, store := range stores(t) {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
 			expiresAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -149,7 +182,7 @@ func TestGrantStoreExpiryContract(t *testing.T) {
 }
 
 func TestGrantStoreSweepContract(t *testing.T) {
-	for name, store := range grantStores(t) {
+	for name, store := range stores(t) {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
 			now := time.Now()
@@ -172,24 +205,8 @@ func TestGrantStoreSweepContract(t *testing.T) {
 	}
 }
 
-// encryptedStores wraps every backend in Encrypted, the boundary that
-// validates session ids and grant families before they reach a backend.
-func encryptedStores(t *testing.T) map[string]sessionstore.Store {
-	t.Helper()
-	key := make([]byte, keyring.MasterKeyLen)
-	_, err := rand.Read(key)
-	require.NoError(t, err)
-	ring, err := keyring.Parse([]string{base64.StdEncoding.EncodeToString(key)})
-	require.NoError(t, err)
-	stores := grantStores(t)
-	for name, backend := range stores {
-		stores[name] = sessionstore.Encrypted(backend, sessionstore.NewCipher(ring, "https://mcp.example.com"))
-	}
-	return stores
-}
-
 func TestGrantStoreRejectsMalformedIdentity(t *testing.T) {
-	for name, store := range encryptedStores(t) {
+	for name, store := range stores(t) {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
 			_, err := sessionstore.RedeemCode(ctx, store, "../not-a-family", testSID, time.Now().Add(time.Hour))
@@ -204,7 +221,7 @@ func TestGrantStoreRejectsMalformedIdentity(t *testing.T) {
 }
 
 func TestSessionStoreRejectsMalformedIdentity(t *testing.T) {
-	for name, store := range encryptedStores(t) {
+	for name, store := range stores(t) {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
 			bad := "../../outside"
@@ -220,61 +237,45 @@ func TestSessionStoreRejectsMalformedIdentity(t *testing.T) {
 	}
 }
 
-// TestRevokeTombstone exercises the tombstone lifecycle on every real backend:
+// TestRevokeTombstone exercises the tombstone lifecycle on every backend:
 // Revoke marks + deletes the blob, Revoked reflects it, tombstones are listed
 // by ListRevoked but NOT by List (not mistaken for sessions), and DeleteRevoked
 // clears them.
 func TestRevokeTombstone(t *testing.T) {
 	const user = tgid.UserID(55)
-	const sid = "0123456789abcdef0123456789abcdef"
-	for _, tc := range []struct {
-		name string
-		make func(t *testing.T) sessionstore.Store
-	}{
-		{"memory", func(_ *testing.T) sessionstore.Store { return sessionstoretest.NewMemory() }},
-		{"fs", func(t *testing.T) sessionstore.Store { return newFS(t) }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+	userKey := make([]byte, 32)
+	_, err := rand.Read(userKey)
+	require.NoError(t, err)
+	for name, store := range stores(t) {
+		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
-			store := tc.make(t)
-			if err := store.Session(user, sid, nil).StoreSession(ctx, []byte("blob")); err != nil {
-				t.Fatalf("StoreSession: %v", err)
-			}
+			require.NoError(t, store.Session(user, testSID, userKey).StoreSession(ctx, []byte("blob")))
 
-			if r, err := store.Revoked(ctx, user, sid); err != nil || r {
-				t.Fatalf("Revoked before revoke = (%v, %v), want (false, nil)", r, err)
-			}
-			if err := store.Revoke(ctx, user, sid); err != nil {
-				t.Fatalf("Revoke: %v", err)
-			}
-			if r, err := store.Revoked(ctx, user, sid); err != nil || !r {
-				t.Errorf("Revoked after revoke = (%v, %v), want (true, nil)", r, err)
-			}
+			revoked, err := store.Revoked(ctx, user, testSID)
+			require.NoError(t, err)
+			require.False(t, revoked)
+			require.NoError(t, store.Revoke(ctx, user, testSID))
+			revoked, err = store.Revoked(ctx, user, testSID)
+			require.NoError(t, err)
+			assert.True(t, revoked)
+
 			// The blob is gone; the tombstone is not listed as a session.
-			if ok, _ := store.Exists(ctx, user, sid); ok {
-				t.Error("Revoke must delete the session blob")
-			}
+			exists, err := store.Exists(ctx, user, testSID)
+			require.NoError(t, err)
+			assert.False(t, exists, "Revoke must delete the session blob")
 			sessions, err := store.List(ctx)
-			if err != nil {
-				t.Fatalf("List: %v", err)
-			}
-			if len(sessions) != 0 {
-				t.Errorf("List returned %d sessions, want 0 (tombstone must not appear as a session)", len(sessions))
-			}
-			revoked, err := store.ListRevoked(ctx)
-			if err != nil {
-				t.Fatalf("ListRevoked: %v", err)
-			}
-			if len(revoked) != 1 || revoked[0].UserID != user || revoked[0].SID != sid {
-				t.Errorf("ListRevoked = %+v, want one tombstone for (%d,%s)", revoked, user, sid)
-			}
+			require.NoError(t, err)
+			assert.Empty(t, sessions, "a tombstone must not appear as a session")
+			tombstones, err := store.ListRevoked(ctx)
+			require.NoError(t, err)
+			require.Len(t, tombstones, 1)
+			assert.Equal(t, user, tombstones[0].UserID)
+			assert.Equal(t, testSID, tombstones[0].SID)
 
-			if err := store.DeleteRevoked(ctx, user, sid); err != nil {
-				t.Fatalf("DeleteRevoked: %v", err)
-			}
-			if r, _ := store.Revoked(ctx, user, sid); r {
-				t.Error("Revoked after DeleteRevoked = true, want false")
-			}
+			require.NoError(t, store.DeleteRevoked(ctx, user, testSID))
+			revoked, err = store.Revoked(ctx, user, testSID)
+			require.NoError(t, err)
+			assert.False(t, revoked)
 		})
 	}
 }

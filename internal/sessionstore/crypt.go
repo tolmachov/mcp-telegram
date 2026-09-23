@@ -120,18 +120,21 @@ func (c *Cipher) open(userID tgid.UserID, userKey, blob []byte) ([]byte, error) 
 	return plaintext, nil
 }
 
-// Encrypted wraps a backend so that it only ever sees AEAD ciphertext. It is
-// also the one place session ids and grant families are validated: a
-// token-derived value must not become an object-name or file-path suffix
-// unchecked, and the backends trust what reaches them.
-func Encrypted(inner Store, cipher *Cipher) Store {
+// Encrypted wraps a backend (FS, GCS) so that it only ever sees AEAD
+// ciphertext, and is the only way to obtain a Store. Every session id and
+// grant family a caller presents is therefore validated here: a token-derived
+// value must not become an object-name or file-path suffix unchecked, and the
+// backends trust what reaches them.
+func Encrypted(inner backend, cipher *Cipher) Store {
 	return &encryptedStore{inner: inner, cipher: cipher}
 }
 
 type encryptedStore struct {
-	inner  Store
+	inner  backend
 	cipher *Cipher
 }
+
+func (*encryptedStore) encrypted() {}
 
 // ErrInvalidSID is returned by the Encrypted store when a caller presents a
 // malformed session id or grant family (see ValidSID).
@@ -150,7 +153,7 @@ func (s *encryptedStore) Session(userID tgid.UserID, sid string, userKey []byte)
 		return brokenSession{err: ErrInvalidSID}
 	}
 	return &encryptedSession{
-		inner:   s.inner.Session(userID, sid, nil),
+		inner:   s.inner.Session(userID, sid),
 		cipher:  s.cipher,
 		userID:  userID,
 		userKey: userKey,

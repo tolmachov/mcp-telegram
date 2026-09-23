@@ -49,7 +49,7 @@ func (failedSessionStorage) StoreSession(context.Context, []byte) error {
 
 func TestAuthorizeBeforeStartFailsWithoutLaunchingTelegram(t *testing.T) {
 	starts := 0
-	a, err := New(testConfig(t), slog.New(slog.DiscardHandler), sessionstoretest.NewMemory(), func(context.Context) (LoginFlow, error) {
+	a, err := New(testConfig(t), slog.New(slog.DiscardHandler), sessionstoretest.New(t), func(context.Context) (LoginFlow, error) {
 		starts++
 		return newFakeFlow(), nil
 	}, noInvalidate)
@@ -79,7 +79,7 @@ func TestAuthorizeBeforeStartFailsWithoutLaunchingTelegram(t *testing.T) {
 }
 
 func TestAuthLifecycleAndPanicIsolationBranches(t *testing.T) {
-	a, err := New(testConfig(t), slog.New(slog.DiscardHandler), sessionstoretest.NewMemory(), neverStartLogin, noInvalidate)
+	a, err := New(testConfig(t), slog.New(slog.DiscardHandler), sessionstoretest.New(t), neverStartLogin, noInvalidate)
 	require.NoError(t, err)
 	assert.Error(t, a.Start(nil)) //nolint:staticcheck // Explicitly verifies the public nil-context rejection.
 	require.NoError(t, a.Start(t.Context()))
@@ -92,7 +92,7 @@ func TestAuthLifecycleAndPanicIsolationBranches(t *testing.T) {
 	a.runTick("test", func() { panic("tick panic") })
 
 	// A malicious LoginFlow.Abort cannot unwind the pending-login sweeper.
-	b, err := New(testConfig(t), slog.New(slog.DiscardHandler), sessionstoretest.NewMemory(), neverStartLogin, noInvalidate)
+	b, err := New(testConfig(t), slog.New(slog.DiscardHandler), sessionstoretest.New(t), neverStartLogin, noInvalidate)
 	require.NoError(t, err)
 	flow := panicAbortFlow{newFakeFlow()}
 	require.NoError(t, b.addPending("request", flow, "127.0.0.1"))
@@ -102,7 +102,7 @@ func TestAuthLifecycleAndPanicIsolationBranches(t *testing.T) {
 }
 
 func TestTokenAndIdentityDefensiveBranches(t *testing.T) {
-	a, ts := newTestServer(t, testConfig(t), sessionstoretest.NewMemory(), neverStartLogin)
+	a, ts := newTestServer(t, testConfig(t), sessionstoretest.New(t), neverStartLogin)
 
 	recorder := httptest.NewRecorder()
 	a.mintTokens(recorder, mintInput{})
@@ -122,7 +122,7 @@ func TestTokenAndIdentityDefensiveBranches(t *testing.T) {
 }
 
 func TestLoginQRWithoutExportedTokenIsNotFound(t *testing.T) {
-	a, _ := newTestServer(t, testConfig(t), sessionstoretest.NewMemory(), neverStartLogin)
+	a, _ := newTestServer(t, testConfig(t), sessionstoretest.New(t), neverStartLogin)
 	flow := newFakeFlow()
 	flow.setURL("")
 	require.NoError(t, a.addPending("request", flow, "127.0.0.1"))
@@ -140,7 +140,7 @@ func TestLoginQRWithoutExportedTokenIsNotFound(t *testing.T) {
 }
 
 func TestWriteJSONHandlesUnwritableResponse(t *testing.T) {
-	a, _ := newTestServer(t, testConfig(t), sessionstoretest.NewMemory(), neverStartLogin)
+	a, _ := newTestServer(t, testConfig(t), sessionstoretest.New(t), neverStartLogin)
 	writer := &errorResponseWriter{header: make(http.Header)}
 	a.writeJSON(writer, http.StatusOK, map[string]string{"ok": "yes"})
 }
@@ -154,7 +154,7 @@ func TestFinalizeLoginRejectsIncompleteOrInvalidFlows(t *testing.T) {
 	}{
 		{
 			name:  "invalid sealed authorization request",
-			store: sessionstoretest.NewMemory(),
+			store: sessionstoretest.New(t),
 			flow: func() LoginFlow {
 				f := newFakeFlow()
 				f.complete(LoginUser{ID: allowedUser}, []byte("session"))
@@ -164,7 +164,7 @@ func TestFinalizeLoginRejectsIncompleteOrInvalidFlows(t *testing.T) {
 		},
 		{
 			name:  "completed without user",
-			store: sessionstoretest.NewMemory(),
+			store: sessionstoretest.New(t),
 			flow: func() LoginFlow {
 				f := newFakeFlow()
 				f.complete(LoginUser{ID: allowedUser}, []byte("session"))
@@ -173,7 +173,7 @@ func TestFinalizeLoginRejectsIncompleteOrInvalidFlows(t *testing.T) {
 		},
 		{
 			name:  "user denied by allowlist",
-			store: sessionstoretest.NewMemory(),
+			store: sessionstoretest.New(t),
 			flow: func() LoginFlow {
 				f := newFakeFlow()
 				f.complete(LoginUser{ID: forbiddenUser}, []byte("session"))
@@ -182,7 +182,7 @@ func TestFinalizeLoginRejectsIncompleteOrInvalidFlows(t *testing.T) {
 		},
 		{
 			name:  "completed without session",
-			store: sessionstoretest.NewMemory(),
+			store: sessionstoretest.New(t),
 			flow: func() LoginFlow {
 				f := newFakeFlow()
 				f.complete(LoginUser{ID: allowedUser}, nil)
@@ -191,7 +191,7 @@ func TestFinalizeLoginRejectsIncompleteOrInvalidFlows(t *testing.T) {
 		},
 		{
 			name:  "session backend failure",
-			store: failedSessionStore{Store: sessionstoretest.NewMemory()},
+			store: failedSessionStore{Store: sessionstoretest.New(t)},
 			flow: func() LoginFlow {
 				f := newFakeFlow()
 				f.complete(LoginUser{ID: allowedUser}, []byte("session"))
@@ -229,7 +229,7 @@ func TestFinalizeLoginRejectsIncompleteOrInvalidFlows(t *testing.T) {
 }
 
 func TestFinalizeLoginCleansSessionWhenRedirectCannotBeBuilt(t *testing.T) {
-	store := sessionstoretest.NewMemory()
+	store := sessionstoretest.New(t)
 	a, err := New(testConfig(t), slog.New(slog.DiscardHandler), store, neverStartLogin, noInvalidate)
 	require.NoError(t, err)
 	t.Cleanup(a.Close)
@@ -255,7 +255,7 @@ func TestFinalizeLoginCleansSessionWhenRedirectCannotBeBuilt(t *testing.T) {
 }
 
 func TestPasswordEndpointDefensiveBranches(t *testing.T) {
-	a, _ := newTestServer(t, testConfig(t), sessionstoretest.NewMemory(), neverStartLogin)
+	a, _ := newTestServer(t, testConfig(t), sessionstoretest.New(t), neverStartLogin)
 
 	tooLarge := httptest.NewRequest(http.MethodPost, "/login/password", strings.NewReader(strings.Repeat("x", maxFormBody+1)))
 	tooLarge.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -281,7 +281,7 @@ func TestPasswordEndpointDefensiveBranches(t *testing.T) {
 }
 
 func TestRegistrationRejectsInvalidMetadata(t *testing.T) {
-	_, ts := newTestServer(t, testConfig(t), sessionstoretest.NewMemory(), neverStartLogin)
+	_, ts := newTestServer(t, testConfig(t), sessionstoretest.New(t), neverStartLogin)
 	tests := []struct {
 		name string
 		body string
@@ -303,7 +303,7 @@ func TestRegistrationRejectsInvalidMetadata(t *testing.T) {
 }
 
 func TestAuthorizeRejectsProtocolErrorsAndLoginStartFailure(t *testing.T) {
-	a, err := New(testConfig(t), slog.New(slog.DiscardHandler), sessionstoretest.NewMemory(), func(context.Context) (LoginFlow, error) {
+	a, err := New(testConfig(t), slog.New(slog.DiscardHandler), sessionstoretest.New(t), func(context.Context) (LoginFlow, error) {
 		return nil, errors.New("simulated Telegram startup failure")
 	}, noInvalidate)
 	require.NoError(t, err)
@@ -352,7 +352,7 @@ func TestAuthorizeRejectsProtocolErrorsAndLoginStartFailure(t *testing.T) {
 }
 
 func TestInvalidAuthorizeClientAndRedirectAreNeverFollowed(t *testing.T) {
-	_, ts := newTestServer(t, testConfig(t), sessionstoretest.NewMemory(), neverStartLogin)
+	_, ts := newTestServer(t, testConfig(t), sessionstoretest.New(t), neverStartLogin)
 	resp, err := http.Get(ts.URL + "/authorize?client_id=invalid&redirect_uri=https://attacker.example")
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
@@ -372,7 +372,7 @@ func TestInvalidAuthorizeClientAndRedirectAreNeverFollowed(t *testing.T) {
 }
 
 func TestVerifierRejectsMalformedSubjectAndForeignResource(t *testing.T) {
-	a, _ := newTestServer(t, testConfig(t), sessionstoretest.NewMemory(), neverStartLogin)
+	a, _ := newTestServer(t, testConfig(t), sessionstoretest.New(t), neverStartLogin)
 	now := a.now()
 	base := accessClaims{
 		Subject: allowedUser.String(), ClientID: "client", Resource: a.cfg.IssuerURL,
@@ -401,7 +401,7 @@ func TestVerifierRejectsMalformedSubjectAndForeignResource(t *testing.T) {
 }
 
 func TestLoginHandlersCoverConcurrentAndImpossibleStates(t *testing.T) {
-	a, _ := newTestServer(t, testConfig(t), sessionstoretest.NewMemory(), neverStartLogin)
+	a, _ := newTestServer(t, testConfig(t), sessionstoretest.New(t), neverStartLogin)
 
 	qrFlow := newFakeFlow()
 	require.NoError(t, a.addPending("request", qrFlow, "127.0.0.1"))

@@ -51,7 +51,7 @@ func testAuth(t *testing.T, issuer string) (*authsrv.Config, sessionstore.Store)
 		IssuerURL: issuer,
 		Allow:     allow,
 		Keys:      keys,
-	}, sessionstoretest.NewMemory()
+	}, sessionstoretest.New(t)
 }
 
 // freePort reserves an ephemeral port and immediately releases it so

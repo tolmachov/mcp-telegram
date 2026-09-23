@@ -2,6 +2,7 @@ package authsrv
 
 import (
 	"context"
+	"crypto/rand"
 	"testing"
 	"time"
 
@@ -18,19 +19,19 @@ import (
 func TestSweepOrphanSessions(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	store := sessionstoretest.NewMemory()
+	writeTime := base
+	store := sessionstoretest.NewWithClock(t, func() time.Time { return writeTime })
 
 	const staleSID = "0123456789abcdef0123456789abcdef"
 	const freshSID = "fedcba9876543210fedcba9876543210"
 
 	// Written at base: unreachable once the clock passes TTL+margin.
-	store.Now = func() time.Time { return base }
-	require.NoError(t, store.Session(allowedUser, staleSID, nil).StoreSession(ctx, []byte("stale")))
+	require.NoError(t, store.Session(allowedUser, staleSID, sessionKey(t)).StoreSession(ctx, []byte("stale")))
 
 	// Written "now": a live session (gotd re-stores keep active blobs fresh).
 	sweepTime := base.Add(refreshTokenTTL + sweepMargin + time.Hour)
-	store.Now = func() time.Time { return sweepTime.Add(-time.Minute) }
-	require.NoError(t, store.Session(allowedUser, freshSID, nil).StoreSession(ctx, []byte("fresh")))
+	writeTime = sweepTime.Add(-time.Minute)
+	require.NoError(t, store.Session(allowedUser, freshSID, sessionKey(t)).StoreSession(ctx, []byte("fresh")))
 
 	a, _ := newTestServer(t, testConfig(t), store, neverStartLogin)
 	a.now = func() time.Time { return sweepTime }
@@ -55,10 +56,9 @@ func TestSweepOrphanSessions(t *testing.T) {
 func TestSweepSessionCutoffBoundary(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	store := sessionstoretest.NewMemory()
-	store.Now = func() time.Time { return base }
+	store := sessionstoretest.NewWithClock(t, func() time.Time { return base })
 	const sid = "0123456789abcdef0123456789abcdef"
-	require.NoError(t, store.Session(allowedUser, sid, nil).StoreSession(ctx, []byte("s")))
+	require.NoError(t, store.Session(allowedUser, sid, sessionKey(t)).StoreSession(ctx, []byte("s")))
 
 	a, _ := newTestServer(t, testConfig(t), store, neverStartLogin)
 
@@ -83,16 +83,16 @@ func TestSweepSessionCutoffBoundary(t *testing.T) {
 func TestSweepExpiredTombstones(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	store := sessionstoretest.NewMemory()
+	writeTime := base
+	store := sessionstoretest.NewWithClock(t, func() time.Time { return writeTime })
 
 	const staleSID = "0123456789abcdef0123456789abcdef"
 	const freshSID = "fedcba9876543210fedcba9876543210"
 
-	store.Now = func() time.Time { return base }
 	require.NoError(t, store.Revoke(ctx, allowedUser, staleSID))
 
 	sweepTime := base.Add(refreshTokenTTL + sweepMargin + time.Hour)
-	store.Now = func() time.Time { return sweepTime.Add(-time.Minute) }
+	writeTime = sweepTime.Add(-time.Minute)
 	require.NoError(t, store.Revoke(ctx, allowedUser, freshSID))
 
 	a, _ := newTestServer(t, testConfig(t), store, neverStartLogin)
@@ -117,8 +117,7 @@ func TestSweepExpiredTombstones(t *testing.T) {
 func TestSweepTombstoneCutoffBoundary(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	store := sessionstoretest.NewMemory()
-	store.Now = func() time.Time { return base }
+	store := sessionstoretest.NewWithClock(t, func() time.Time { return base })
 	const sid = "0123456789abcdef0123456789abcdef"
 	require.NoError(t, store.Revoke(ctx, allowedUser, sid))
 
@@ -141,10 +140,19 @@ func TestSweepTombstoneCutoffBoundary(t *testing.T) {
 	assert.False(t, revoked, "tombstone past the cutoff must be reclaimed")
 }
 
+// sessionKey returns a fresh per-session key of the length the store requires.
+func sessionKey(t *testing.T) []byte {
+	t.Helper()
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	require.NoError(t, err)
+	return key
+}
+
 // panicListStore panics from List, standing in for a store backend that faults
 // (or hits a bug) mid-sweep.
 type panicListStore struct {
-	*sessionstoretest.Memory
+	sessionstore.Store
 }
 
 func (panicListStore) List(context.Context) ([]sessionstore.SessionRef, error) {
@@ -155,7 +163,7 @@ func (panicListStore) List(context.Context) ([]sessionstore.SessionRef, error) {
 // sweep is recovered, so one bad entry (or a backend bug) cannot unwind the
 // sweeper goroutine and crash the whole auth-server process.
 func TestSweepSurvivesPanickingBackend(t *testing.T) {
-	store := panicListStore{Memory: sessionstoretest.NewMemory()}
+	store := panicListStore{Store: sessionstoretest.New(t)}
 	a, _ := newTestServer(t, testConfig(t), store, neverStartLogin)
 	assert.NotPanics(t, func() { a.runTick("test", func() { a.runSweep(context.Background()) }) },
 		"a panicking backend must be recovered, not propagated out of the sweep")

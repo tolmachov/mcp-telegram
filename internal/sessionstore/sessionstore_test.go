@@ -130,62 +130,78 @@ func newTestFS(t *testing.T) *FS {
 	return fs
 }
 
-func TestFSStore(t *testing.T) {
-	ctx := t.Context()
-	fs, err := NewFS(filepath.Join(t.TempDir(), "sessions"))
-	if err != nil {
-		t.Fatalf("NewFS: %v", err)
-	}
-	const user = tgid.UserID(100)
+// backends returns every storage backend, fresh and empty.
+func backends(t *testing.T) map[string]backend {
+	t.Helper()
+	return map[string]backend{"fs": newTestFS(t), "gcs": NewTestGCS(t)}
+}
 
-	if _, err := fs.Session(user, testSID, nil).LoadSession(ctx); !errors.Is(err, session.ErrNotFound) {
-		t.Errorf("LoadSession on empty store: err = %v, want session.ErrNotFound", err)
-	}
-	if ok, err := fs.Exists(ctx, user, testSID); err != nil || ok {
-		t.Errorf("Exists on empty store = (%v, %v), want (false, nil)", ok, err)
-	}
+func TestBackendSessionLifecycle(t *testing.T) {
+	for name, b := range backends(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			const user = tgid.UserID(100)
 
-	if err := fs.Session(user, testSID, nil).StoreSession(ctx, []byte("blob")); err != nil {
-		t.Fatalf("StoreSession: %v", err)
-	}
-	if ok, err := fs.Exists(ctx, user, testSID); err != nil || !ok {
-		t.Errorf("Exists after store = (%v, %v), want (true, nil)", ok, err)
-	}
-	data, err := fs.Session(user, testSID, nil).LoadSession(ctx)
-	if err != nil || string(data) != "blob" {
-		t.Errorf("LoadSession = (%q, %v), want (%q, nil)", data, err, "blob")
-	}
+			if _, err := b.Session(user, testSID).LoadSession(ctx); !errors.Is(err, session.ErrNotFound) {
+				t.Errorf("LoadSession on empty store: err = %v, want session.ErrNotFound", err)
+			}
+			if ok, err := b.Exists(ctx, user, testSID); err != nil || ok {
+				t.Errorf("Exists on empty store = (%v, %v), want (false, nil)", ok, err)
+			}
 
-	if err := fs.Delete(ctx, user, testSID); err != nil {
-		t.Fatalf("Delete: %v", err)
-	}
-	if ok, _ := fs.Exists(ctx, user, testSID); ok {
-		t.Error("Exists after delete = true, want false")
-	}
-	if err := fs.Delete(ctx, user, testSID); err != nil {
-		t.Errorf("Delete of a missing session should be a no-op, got %v", err)
+			if err := b.Session(user, testSID).StoreSession(ctx, []byte("blob")); err != nil {
+				t.Fatalf("StoreSession: %v", err)
+			}
+			if ok, err := b.Exists(ctx, user, testSID); err != nil || !ok {
+				t.Errorf("Exists after store = (%v, %v), want (true, nil)", ok, err)
+			}
+			data, err := b.Session(user, testSID).LoadSession(ctx)
+			if err != nil || string(data) != "blob" {
+				t.Errorf("LoadSession = (%q, %v), want (%q, nil)", data, err, "blob")
+			}
+
+			if err := b.Delete(ctx, user, testSID); err != nil {
+				t.Fatalf("Delete: %v", err)
+			}
+			if ok, _ := b.Exists(ctx, user, testSID); ok {
+				t.Error("Exists after delete = true, want false")
+			}
+			if err := b.Delete(ctx, user, testSID); err != nil {
+				t.Errorf("Delete of a missing session should be a no-op, got %v", err)
+			}
+		})
 	}
 }
 
-// TestFSExistsZeroByteAbsent pins FS/GCS parity: a 0-byte session file reads as
-// absent, matching LoadSession (empty -> session.ErrNotFound) and GCS.Exists
-// (attrs.Size > 0). Without it the refresh Exists gate could pass a session the
-// client build would then reject.
-func TestFSExistsZeroByteAbsent(t *testing.T) {
-	ctx := t.Context()
-	fs, err := NewFS(filepath.Join(t.TempDir(), "sessions"))
-	if err != nil {
-		t.Fatalf("NewFS: %v", err)
-	}
-	const user = tgid.UserID(100)
-	if err := os.WriteFile(fs.path(user, testSID), nil, 0o600); err != nil {
-		t.Fatalf("seeding 0-byte session file: %v", err)
-	}
-	if ok, err := fs.Exists(ctx, user, testSID); err != nil || ok {
-		t.Errorf("Exists on a 0-byte session file = (%v, %v), want (false, nil)", ok, err)
-	}
-	if _, err := fs.Session(user, testSID, nil).LoadSession(ctx); !errors.Is(err, session.ErrNotFound) {
-		t.Errorf("LoadSession on a 0-byte file: err = %v, want session.ErrNotFound", err)
+// TestBackendZeroByteBlob pins backend parity for a truncated (0-byte) session
+// blob: Exists and LoadSession treat it as absent, so the refresh Exists gate
+// never passes a session the client build would then reject, while List still
+// reports it and Delete removes it, so the sweeper can reclaim it.
+func TestBackendZeroByteBlob(t *testing.T) {
+	for name, b := range backends(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			const user = tgid.UserID(100)
+			if err := b.Session(user, testSID).StoreSession(ctx, nil); err != nil {
+				t.Fatalf("seeding a 0-byte session: %v", err)
+			}
+			if ok, err := b.Exists(ctx, user, testSID); err != nil || ok {
+				t.Errorf("Exists on a 0-byte session = (%v, %v), want (false, nil)", ok, err)
+			}
+			if _, err := b.Session(user, testSID).LoadSession(ctx); !errors.Is(err, session.ErrNotFound) {
+				t.Errorf("LoadSession on a 0-byte session: err = %v, want session.ErrNotFound", err)
+			}
+			refs, err := b.List(ctx)
+			if err != nil || len(refs) != 1 || refs[0].UserID != user || refs[0].SID != testSID {
+				t.Fatalf("List = (%+v, %v), want the 0-byte session", refs, err)
+			}
+			if err := b.Delete(ctx, user, testSID); err != nil {
+				t.Fatalf("Delete: %v", err)
+			}
+			if refs, err := b.List(ctx); err != nil || len(refs) != 0 {
+				t.Errorf("List after Delete = (%+v, %v), want empty", refs, err)
+			}
+		})
 	}
 }
 
@@ -203,7 +219,7 @@ func TestListSkipsNonCanonicalNames(t *testing.T) {
 		t.Fatalf("NewFS: %v", err)
 	}
 	const user = tgid.UserID(7)
-	if err := fs.Session(user, testSID, nil).StoreSession(ctx, []byte("live")); err != nil {
+	if err := fs.Session(user, testSID).StoreSession(ctx, []byte("live")); err != nil {
 		t.Fatalf("StoreSession: %v", err)
 	}
 	for _, foreign := range []string{"07.bin", "+7.bin"} {
@@ -234,7 +250,7 @@ func TestEncryptedStore(t *testing.T) {
 	}
 
 	// The backend must hold ciphertext, not the plaintext.
-	raw, err := backend.Session(user, testSID, nil).LoadSession(ctx)
+	raw, err := backend.Session(user, testSID).LoadSession(ctx)
 	if err != nil {
 		t.Fatalf("backend LoadSession: %v", err)
 	}
@@ -250,7 +266,7 @@ func TestEncryptedStore(t *testing.T) {
 	// A blob that cannot be decrypted must surface as ErrCorruptSession —
 	// distinct from ErrNotFound so the caller does not mistake a key/issuer
 	// misconfiguration for "new user" and destroy a recoverable session.
-	if err := backend.Session(user, testSID, nil).StoreSession(ctx, []byte("garbage")); err != nil {
+	if err := backend.Session(user, testSID).StoreSession(ctx, []byte("garbage")); err != nil {
 		t.Fatalf("backend StoreSession: %v", err)
 	}
 	_, err = store.Session(user, testSID, uk).LoadSession(ctx)
@@ -435,10 +451,10 @@ func TestFSList(t *testing.T) {
 	}
 
 	const sidA = "0123456789abcdef0123456789abcdef"
-	if err := fs.Session(1, sidA, nil).StoreSession(ctx, []byte("a")); err != nil {
+	if err := fs.Session(1, sidA).StoreSession(ctx, []byte("a")); err != nil {
 		t.Fatalf("store a: %v", err)
 	}
-	if err := fs.Session(2, sidA, nil).StoreSession(ctx, []byte("b")); err != nil {
+	if err := fs.Session(2, sidA).StoreSession(ctx, []byte("b")); err != nil {
 		t.Fatalf("store b: %v", err)
 	}
 	// Foreign files must be skipped, not attributed or failed on — including an

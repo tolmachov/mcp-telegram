@@ -105,7 +105,7 @@ func TestConfigValidate(t *testing.T) {
 
 func TestNewCopiesConfig(t *testing.T) {
 	cfg := validConfig(t)
-	a, err := New(cfg, nil, sessionstoretest.NewMemory(), neverStartLogin, noInvalidate)
+	a, err := New(cfg, nil, sessionstoretest.New(t), neverStartLogin, noInvalidate)
 	require.NoError(t, err)
 	t.Cleanup(a.Close)
 
@@ -119,10 +119,10 @@ func TestNewRequiresCollaborators(t *testing.T) {
 	_, err := New(validConfig(t), nil, nil, neverStartLogin, noInvalidate)
 	assert.ErrorContains(t, err, "session store")
 
-	_, err = New(validConfig(t), nil, sessionstoretest.NewMemory(), nil, noInvalidate)
+	_, err = New(validConfig(t), nil, sessionstoretest.New(t), nil, noInvalidate)
 	assert.ErrorContains(t, err, "start-login")
 
-	_, err = New(validConfig(t), nil, sessionstoretest.NewMemory(), neverStartLogin, nil)
+	_, err = New(validConfig(t), nil, sessionstoretest.New(t), neverStartLogin, nil)
 	assert.ErrorContains(t, err, "session invalidator")
 }
 

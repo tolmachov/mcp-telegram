@@ -27,7 +27,7 @@ import (
 // token without logging out leaves an object behind. The authsrv orphan
 // sweeper reclaims those via List: an object older than the refresh-token TTL
 // can never be used again (its refresh would be rejected as expired) and is
-// deleted. Revocation tombstones live under a separate revoked/ prefix (see
+// deleted. Revocation tombstones live under a separate revoked-v3/ prefix (see
 // Revoke) and are swept the same way.
 type GCS struct {
 	bucket *storage.BucketHandle
@@ -63,7 +63,7 @@ func objectName(userID tgid.UserID, sid string) string {
 	return sessionPrefix + sessionBase(userID, sid)
 }
 
-func (g *GCS) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {
+func (g *GCS) Session(userID tgid.UserID, sid string) session.Storage {
 	return gcsSession{object: g.bucket.Object(objectName(userID, sid))}
 }
 

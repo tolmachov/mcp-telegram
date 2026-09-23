@@ -4,11 +4,12 @@
 // session id (sid), so one account may hold several independent sessions at
 // once (one per logged-in client) instead of fighting over a single object.
 //
-// Backends store ciphertext only: the server wraps any backend with Encrypted
-// (AEAD). The v3 key is derived from BOTH the MCP_AUTH_TOKEN_KEYS master keys AND a
-// random per-session key that lives only inside the client's OAuth token
-// (never persisted here), so a leaked bucket + secret manager, without a live
-// token, cannot decrypt a session. Earlier formats and empty session ids are
+// Encrypted is the only way to obtain a Store: it validates every session id
+// and grant family before a backend sees it, and backends (FS, GCS) hold AEAD
+// ciphertext only. The v3 key is derived from BOTH the MCP_AUTH_TOKEN_KEYS
+// master keys AND a random per-session key that lives only inside the client's
+// OAuth token (never persisted here), so a leaked bucket + secret manager,
+// without a live token, cannot decrypt a session. Earlier formats and empty session ids are
 // intentionally unreadable.
 //
 // The single-account stdio mode does NOT use this package — it keeps its
@@ -88,9 +89,8 @@ const (
 // Session returns a gotd session.Storage view bound to one (userID, sid)
 // session; its LoadSession must return session.ErrNotFound when that session
 // does not exist yet (gotd's "start unauthenticated" signal). userKey is the
-// per-session secret from the OAuth token that the Encrypted wrapper mixes
-// into the AEAD key; the storage backends themselves ignore it (they only ever
-// hold ciphertext). Both sid and userKey are mandatory.
+// per-session secret from the OAuth token that is mixed into the AEAD key.
+// Both sid and userKey are mandatory.
 //
 // Exists is a cheap probe used by token refresh to force a re-login after a
 // session was deleted. Delete removes one session; the pool builder calls it
@@ -135,6 +135,28 @@ type Store interface {
 	// The grant policy lives in RedeemCode, RotateGrant and RevokeGrant.
 	StoreGrant(ctx context.Context, family string, grant GrantRecord, version int64) error
 	// SweepAuthState deletes grant records that are expired at now.
+	SweepAuthState(ctx context.Context, now time.Time) error
+
+	// encrypted restricts implementations to the store Encrypted returns (and
+	// wrappers embedding it), so no Store can skip identity validation.
+	encrypted()
+}
+
+// backend is a storage backend (FS, GCS, the test memory store): it keeps
+// ciphertext blobs under ids Encrypted has already validated. The methods
+// mean what they mean on Store; Session takes no key because a backend never
+// decrypts.
+type backend interface {
+	Session(userID tgid.UserID, sid string) session.Storage
+	Exists(ctx context.Context, userID tgid.UserID, sid string) (bool, error)
+	Delete(ctx context.Context, userID tgid.UserID, sid string) error
+	List(ctx context.Context) ([]SessionRef, error)
+	Revoke(ctx context.Context, userID tgid.UserID, sid string) error
+	Revoked(ctx context.Context, userID tgid.UserID, sid string) (bool, error)
+	ListRevoked(ctx context.Context) ([]SessionRef, error)
+	DeleteRevoked(ctx context.Context, userID tgid.UserID, sid string) error
+	LoadGrant(ctx context.Context, family string) (grant GrantRecord, version int64, err error)
+	StoreGrant(ctx context.Context, family string, grant GrantRecord, version int64) error
 	SweepAuthState(ctx context.Context, now time.Time) error
 }
 

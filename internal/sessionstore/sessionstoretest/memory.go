@@ -1,17 +1,43 @@
 // Package sessionstoretest provides an in-process sessionstore.Store for tests
-// in other packages.
+// in other packages. The store is an Encrypted one over an in-memory backend,
+// so tests exercise the same identity validation and encryption as
+// production.
 package sessionstoretest
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/gotd/td/session"
 
+	"github.com/tolmachov/mcp-telegram/internal/keyring"
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
+
+// New returns an empty in-memory store whose blobs are stamped by the wall
+// clock.
+func New(t testing.TB) sessionstore.Store { return NewWithClock(t, time.Now) }
+
+// NewWithClock returns an empty in-memory store whose blob and tombstone write
+// times (the storage mtime other backends take from the filesystem or bucket)
+// come from now, so List and sweep behaviour can be made deterministic. Grant
+// expiry uses the time the caller passes in, as on every backend.
+func NewWithClock(t testing.TB, now func() time.Time) sessionstore.Store {
+	t.Helper()
+	master := make([]byte, keyring.MasterKeyLen)
+	_, _ = rand.Read(master) // crypto/rand.Read never returns an error
+	ring, err := keyring.Parse([]string{base64.StdEncoding.EncodeToString(master)})
+	if err != nil {
+		t.Fatalf("sessionstoretest: building key ring: %v", err)
+	}
+	m := &memory{now: now, blobs: map[memKey]memBlob{}, revoked: map[memKey]time.Time{}, grants: map[string]memGrant{}}
+	return sessionstore.Encrypted(m, sessionstore.NewCipher(ring, "https://sessionstoretest.invalid"))
+}
 
 // memKey identifies one session: a user plus a per-authorization session id.
 type memKey struct {
@@ -25,20 +51,6 @@ type memBlob struct {
 	updatedAt time.Time
 }
 
-// Memory is an in-process Store for tests. Now is the blob write-timestamp
-// clock (the storage mtime other backends take from the filesystem or bucket);
-// tests may override it (before use) to make List/sweep behaviour
-// deterministic. Grant expiry uses the time the caller passes in, as on every
-// backend.
-type Memory struct {
-	Now func() time.Time
-
-	mu      sync.Mutex
-	blobs   map[memKey]memBlob
-	revoked map[memKey]time.Time
-	grants  map[string]memGrant
-}
-
 // memGrant is one authorization-code family's refresh-grant record and its
 // write counter, the version StoreGrant compares.
 type memGrant struct {
@@ -46,31 +58,35 @@ type memGrant struct {
 	version int64
 }
 
-// NewMemory returns an empty in-memory store stamped by the wall clock.
-func NewMemory() *Memory {
-	return &Memory{Now: time.Now, blobs: map[memKey]memBlob{}, revoked: map[memKey]time.Time{}, grants: map[string]memGrant{}}
+// memory is the in-process storage backend behind New.
+type memory struct {
+	now func() time.Time
+
+	mu      sync.Mutex
+	blobs   map[memKey]memBlob
+	revoked map[memKey]time.Time
+	grants  map[string]memGrant
 }
 
-// Session returns the blob storage for one session.
-func (m *Memory) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {
+func (m *memory) Session(userID tgid.UserID, sid string) session.Storage {
 	return memorySession{store: m, key: memKey{userID, sid}}
 }
 
-func (m *Memory) Exists(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
+func (m *memory) Exists(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	b, ok := m.blobs[memKey{userID, sid}]
 	return ok && len(b.data) > 0, nil
 }
 
-func (m *Memory) Delete(_ context.Context, userID tgid.UserID, sid string) error {
+func (m *memory) Delete(_ context.Context, userID tgid.UserID, sid string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.blobs, memKey{userID, sid})
 	return nil
 }
 
-func (m *Memory) List(_ context.Context) ([]sessionstore.SessionRef, error) {
+func (m *memory) List(_ context.Context) ([]sessionstore.SessionRef, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	refs := make([]sessionstore.SessionRef, 0, len(m.blobs))
@@ -80,23 +96,23 @@ func (m *Memory) List(_ context.Context) ([]sessionstore.SessionRef, error) {
 	return refs, nil
 }
 
-func (m *Memory) Revoke(_ context.Context, userID tgid.UserID, sid string) error {
+func (m *memory) Revoke(_ context.Context, userID tgid.UserID, sid string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	k := memKey{userID, sid}
-	m.revoked[k] = m.Now()
+	m.revoked[k] = m.now()
 	delete(m.blobs, k)
 	return nil
 }
 
-func (m *Memory) Revoked(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
+func (m *memory) Revoked(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, ok := m.revoked[memKey{userID, sid}]
 	return ok, nil
 }
 
-func (m *Memory) ListRevoked(_ context.Context) ([]sessionstore.SessionRef, error) {
+func (m *memory) ListRevoked(_ context.Context) ([]sessionstore.SessionRef, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	refs := make([]sessionstore.SessionRef, 0, len(m.revoked))
@@ -106,21 +122,21 @@ func (m *Memory) ListRevoked(_ context.Context) ([]sessionstore.SessionRef, erro
 	return refs, nil
 }
 
-func (m *Memory) DeleteRevoked(_ context.Context, userID tgid.UserID, sid string) error {
+func (m *memory) DeleteRevoked(_ context.Context, userID tgid.UserID, sid string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.revoked, memKey{userID, sid})
 	return nil
 }
 
-func (m *Memory) LoadGrant(_ context.Context, family string) (sessionstore.GrantRecord, int64, error) {
+func (m *memory) LoadGrant(_ context.Context, family string) (sessionstore.GrantRecord, int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	g := m.grants[family]
 	return g.record, g.version, nil
 }
 
-func (m *Memory) StoreGrant(_ context.Context, family string, grant sessionstore.GrantRecord, version int64) error {
+func (m *memory) StoreGrant(_ context.Context, family string, grant sessionstore.GrantRecord, version int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	current := m.grants[family]
@@ -131,7 +147,7 @@ func (m *Memory) StoreGrant(_ context.Context, family string, grant sessionstore
 	return nil
 }
 
-func (m *Memory) SweepAuthState(_ context.Context, now time.Time) error {
+func (m *memory) SweepAuthState(_ context.Context, now time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for family, grant := range m.grants {
@@ -143,7 +159,7 @@ func (m *Memory) SweepAuthState(_ context.Context, now time.Time) error {
 }
 
 type memorySession struct {
-	store *Memory
+	store *memory
 	key   memKey
 }
 
@@ -164,6 +180,6 @@ func (s memorySession) StoreSession(_ context.Context, data []byte) error {
 	defer s.store.mu.Unlock()
 	cp := make([]byte, len(data))
 	copy(cp, data)
-	s.store.blobs[s.key] = memBlob{data: cp, updatedAt: s.store.Now()}
+	s.store.blobs[s.key] = memBlob{data: cp, updatedAt: s.store.now()}
 	return nil
 }
