@@ -29,3 +29,10 @@ func TestGCSGrantCorruptionFailsWithoutOverwrite(t *testing.T) {
 	require.NoError(t, r.Close())
 	assert.Equal(t, "not-json", string(data), "a failed read must not rewrite authorization state")
 }
+
+// TestGrantRotationZeroIsRefusal pins that an outcome nobody set cannot pass
+// the token endpoint's success check.
+func TestGrantRotationZeroIsRefusal(t *testing.T) {
+	var unset GrantRotation
+	assert.NotEqual(t, GrantRotated, unset)
+}

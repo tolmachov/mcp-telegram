@@ -68,18 +68,19 @@ type SessionRef struct {
 	UpdatedAt time.Time
 }
 
-// GrantRotation is the outcome of RotateGrant.
+// GrantRotation is the outcome of RotateGrant. The zero value is a refusal,
+// so an outcome that was never set cannot read as a successful rotation.
 type GrantRotation int
 
 const (
-	// GrantRotated means the presented generation was current and is now
-	// superseded by the next one.
-	GrantRotated GrantRotation = iota
+	// GrantMissing means the family does not exist or has expired.
+	GrantMissing GrantRotation = iota
 	// GrantReplay means a stale generation (or a revoked family) was presented;
 	// the whole family is now revoked.
 	GrantReplay
-	// GrantMissing means the family does not exist or has expired.
-	GrantMissing
+	// GrantRotated means the presented generation was current and is now
+	// superseded by the next one.
+	GrantRotated
 )
 
 // Store is a collection of per-authorization Telegram sessions.
