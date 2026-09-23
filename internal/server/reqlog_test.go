@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -23,18 +22,14 @@ func callToolReq(name string, args string) *mcp.CallToolRequest {
 }
 
 // runMiddleware drives requestLogMiddleware around a stub handler and returns
-// the captured log output. ctx carries an authenticated identity when userID>0.
+// the captured log output. The logger serves user userID when userID>0.
 func runMiddleware(t *testing.T, level slog.Leveler, userID tgid.UserID, method string, req mcp.Request, res mcp.Result, err error) string {
 	t.Helper()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: level}))
-	// Attach identity the way the SDK does: on the per-request Extra.
+	// Tag the logger the way the per-user assembly builder does.
 	if userID > 0 {
-		if ctr, ok := req.(*mcp.CallToolRequest); ok {
-			ctr.Extra = &mcp.RequestExtra{
-				TokenInfo: authsrv.UserIdentity{ID: userID}.TokenInfo(time.Now().Add(time.Hour)),
-			}
-		}
+		logger = userLogger(logger, &authsrv.UserIdentity{ID: userID, Username: "u" + userID.String()})
 	}
 	handler := requestLogMiddleware(logger)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
 		return res, err
@@ -47,8 +42,8 @@ func TestRequestLogUserID(t *testing.T) {
 	out := runMiddleware(t, slog.LevelInfo, 424242, methodCallTool,
 		callToolReq("GetChats", `{}`),
 		&mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil)
-	if !strings.Contains(out, "user_id=424242") {
-		t.Errorf("expected user_id in log, got: %q", out)
+	if !strings.Contains(out, "user_id=424242") || !strings.Contains(out, "username=u424242") {
+		t.Errorf("expected user_id and username in log, got: %q", out)
 	}
 	if !strings.Contains(out, "tool=GetChats") {
 		t.Errorf("expected tool name in log, got: %q", out)
@@ -155,7 +150,7 @@ func TestRequestLogServiceMethodAtDebug(t *testing.T) {
 }
 
 func TestRequestLogNoIdentityInStdio(t *testing.T) {
-	// No TokenInfo in ctx (stdio mode) → no user_id attr, but still logs.
+	// No per-user logger (stdio mode) → no user_id attr, but still logs.
 	out := runMiddleware(t, slog.LevelInfo, 0, methodCallTool,
 		callToolReq("GetChats", `{}`),
 		&mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil)

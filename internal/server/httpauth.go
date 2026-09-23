@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"runtime/debug"
 
@@ -80,13 +81,25 @@ func (s *Server) startLogin(ctx context.Context) (authsrv.LoginFlow, error) {
 	return qrLoginFlow{flow: flow}, nil
 }
 
+// userLogger tags every log line of user's assembly, the request log
+// included, with the user it serves. The pool keys an assembly by one
+// authorization, so the identity it was built for is the identity of every
+// request it serves.
+func userLogger(base *slog.Logger, user *authsrv.UserIdentity) *slog.Logger {
+	logger := base.With("user_id", user.ID.Int64())
+	if user.Username != "" {
+		logger = logger.With("username", user.Username)
+	}
+	return logger
+}
+
 // userAssemblyBuilder returns the pool's builder: for each authenticated
 // user it connects a Telegram client on their stored session and constructs
 // a fresh MCP assembly on top of it. A session Telegram refuses comes back as
 // ErrSessionUnauthorized, which the pool acts on (see userPool.dropSession).
 func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 	return func(ctx context.Context, user *authsrv.UserIdentity) (builtAssembly, error) {
-		logger := s.logger.With("user", user.ID)
+		logger := userLogger(s.logger, user)
 		running, err := tgclient.StartClient(ctx, s.opts.Config, s.opts.SessionStore.Session(user.ID, user.SessionID, user.SessionKey), logger, s.floodWaitLogger())
 		if err != nil {
 			if errors.Is(err, sessionstore.ErrCorruptSession) {
@@ -95,7 +108,7 @@ func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 				// dead session (a token always carries its own object's key).
 				// Surface it loudly; the pool preserves the blob, since deleting
 				// it would make a recoverable operator mistake permanent.
-				s.logger.Error("stored session could not be decrypted; check MCP_AUTH_TOKEN_KEYS / MCP_AUTH_ISSUER_URL", "user", user.ID, "session", user.SessionID, "err", err)
+				logger.Error("stored session could not be decrypted; check MCP_AUTH_TOKEN_KEYS / MCP_AUTH_ISSUER_URL", "session", user.SessionID, "err", err)
 			}
 			return builtAssembly{}, fmt.Errorf("connecting Telegram client for user %s: %w", user.ID, err)
 		}

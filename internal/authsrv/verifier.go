@@ -13,7 +13,7 @@ import (
 
 // extraIdentityKey is the single TokenInfo.Extra key this package sets. The
 // identity travels as one UserIdentity value that only this package writes
-// and reads, so IdentityFromTokenInfo asserts exactly that type; any other
+// and reads, so identityFromTokenInfo asserts exactly that type; any other
 // value under the key reads as no identity.
 const extraIdentityKey = "mcp-telegram/identity"
 
@@ -53,7 +53,11 @@ func (a *AuthServer) Verifier() auth.TokenVerifier {
 			return nil, fmt.Errorf("%w: not a valid access token", auth.ErrInvalidToken)
 		}
 		u := UserIdentity{ID: userID, Username: c.Username, SessionID: c.SessionID, SessionKey: c.SessionKey}
-		return u.TokenInfo(time.Unix(c.ExpiresAt, 0)), nil
+		return &auth.TokenInfo{
+			Expiration: time.Unix(c.ExpiresAt, 0),
+			UserID:     userID.String(),
+			Extra:      map[string]any{extraIdentityKey: u},
+		}, nil
 	}
 }
 
@@ -74,30 +78,15 @@ type UserIdentity struct {
 	SessionKey []byte
 }
 
-// TokenInfo encodes u as the bearer TokenInfo that IdentityFromTokenInfo
-// reads back. TokenInfo.UserID is the decimal Telegram user ID.
-func (u UserIdentity) TokenInfo(expires time.Time) *auth.TokenInfo {
-	return &auth.TokenInfo{
-		Expiration: expires,
-		UserID:     u.ID.String(),
-		Extra:      map[string]any{extraIdentityKey: u},
-	}
-}
-
-// Identity returns the authenticated user of the request, or ok=false when
-// the request was not authenticated by this package (stdio transport or
-// auth disabled). It reads the token frozen at session-connect time from the
-// context; for the freshest per-request token use IdentityFromTokenInfo with
-// req.GetExtra().TokenInfo.
+// Identity returns the user whose bearer token authenticated the HTTP request
+// ctx belongs to, or ok=false when this package did not authenticate it.
 func Identity(ctx context.Context) (*UserIdentity, bool) {
-	return IdentityFromTokenInfo(auth.TokenInfoFromContext(ctx))
+	return identityFromTokenInfo(auth.TokenInfoFromContext(ctx))
 }
 
-// IdentityFromTokenInfo decodes the authenticated user from a bearer
-// TokenInfo (as this package's Verifier produced), or ok=false when info is
-// nil or carries no identity. The MCP SDK attaches the per-request TokenInfo
-// to each server request as req.GetExtra().TokenInfo — the freshest source.
-func IdentityFromTokenInfo(info *auth.TokenInfo) (*UserIdentity, bool) {
+// identityFromTokenInfo decodes the user from a TokenInfo the Verifier
+// produced, or ok=false when info is nil or carries no identity.
+func identityFromTokenInfo(info *auth.TokenInfo) (*UserIdentity, bool) {
 	if info == nil {
 		return nil, false
 	}

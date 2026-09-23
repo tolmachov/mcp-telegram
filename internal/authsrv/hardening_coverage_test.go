@@ -113,11 +113,11 @@ func TestTokenAndIdentityDefensiveBranches(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 
-	_, ok := IdentityFromTokenInfo(nil)
+	_, ok := identityFromTokenInfo(nil)
 	assert.False(t, ok)
-	_, ok = IdentityFromTokenInfo(&auth.TokenInfo{})
+	_, ok = identityFromTokenInfo(&auth.TokenInfo{})
 	assert.False(t, ok)
-	_, ok = IdentityFromTokenInfo(&auth.TokenInfo{Extra: map[string]any{extraIdentityKey: "wrong type"}})
+	_, ok = identityFromTokenInfo(&auth.TokenInfo{Extra: map[string]any{extraIdentityKey: "wrong type"}})
 	assert.False(t, ok)
 }
 

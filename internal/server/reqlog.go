@@ -9,7 +9,6 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/tolmachov/mcp-telegram/internal/authsrv"
 	"github.com/tolmachov/mcp-telegram/internal/tools"
 )
 
@@ -55,8 +54,8 @@ var safeParamFields = map[string]struct{}{
 
 // requestLogMiddleware records every JSON-RPC method call server-side — which
 // the SDK does not do on its own. It answers three operational questions the
-// bare "POST 200" access log cannot: who called (Telegram user id), what they
-// called (method + tool + redacted params), and whether an error was returned
+// bare "POST 200" access log cannot: who called (the user_id and username a
+// per-user assembly's logger carries, see userLogger), what they called (method + tool + redacted params), and whether an error was returned
 // to them (and which). Content methods log at Info (with redacted params for
 // tools/call); lifecycle/list methods at Debug. A Go error escalates to Error
 // (and, via the GCP handler, to Error Reporting); an IsError tool result — a
@@ -75,14 +74,7 @@ func requestLogMiddleware(logger *slog.Logger) mcp.Middleware {
 			res, err := next(ctx, method, req)
 			elapsed := time.Since(start)
 
-			attrs := []any{"method", method, "duration_ms", elapsed.Milliseconds()}
-			if u, ok := requestUser(ctx, req); ok {
-				attrs = append(attrs, "user_id", u.ID.Int64())
-				if u.Username != "" {
-					attrs = append(attrs, "username", u.Username)
-				}
-			}
-			attrs = append(attrs, requestAttrs(method, req)...)
+			attrs := append([]any{"method", method, "duration_ms", elapsed.Milliseconds()}, requestAttrs(method, req)...)
 
 			switch {
 			case err != nil:
@@ -109,22 +101,6 @@ func requestLogMiddleware(logger *slog.Logger) mcp.Middleware {
 func isContentMethod(method string) bool {
 	_, ok := contentMethods[method]
 	return ok
-}
-
-// requestUser resolves the authenticated Telegram user for this request. It
-// prefers the per-request token the SDK attaches to each server request
-// (req.GetExtra().TokenInfo), falling back to the session-frozen token in the
-// context. Both yield the same user in the per-user pool (the SDK pins one
-// user per session); ok is false in stdio mode (no auth).
-func requestUser(ctx context.Context, req mcp.Request) (*authsrv.UserIdentity, bool) {
-	if req != nil {
-		if extra := req.GetExtra(); extra != nil {
-			if u, ok := authsrv.IdentityFromTokenInfo(extra.TokenInfo); ok {
-				return u, true
-			}
-		}
-	}
-	return authsrv.Identity(ctx)
 }
 
 func isErrorResult(res mcp.Result) bool {
