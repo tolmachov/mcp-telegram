@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/gotd/td/tg"
+
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // This file is the single username-resolution seam for the tool handlers.
@@ -60,23 +62,24 @@ var errResolvedNotPresent = errors.New("resolved peer not present in response en
 // errNoSharedDialog reports a resolved user or channel without an access hash.
 var errNoSharedDialog = errors.New("resolved but missing access hash (no shared dialog)")
 
-// resolvedInputPeer builds the InputPeer for the canonical resolved peer.
-func resolvedInputPeer(r *tg.ContactsResolvedPeer) (tg.InputPeerClass, error) {
+// resolvedPeer builds the peer — InputPeer and entity, as the resolver
+// returns them — for the canonical resolved peer.
+func resolvedPeer(r *tg.ContactsResolvedPeer) (tgclient.Peer, error) {
 	switch e := resolvedEntity(r).(type) {
 	case *tg.User:
 		if e.AccessHash == 0 {
-			return nil, errNoSharedDialog
+			return tgclient.Peer{}, errNoSharedDialog
 		}
-		return &tg.InputPeerUser{UserID: e.ID, AccessHash: e.AccessHash}, nil
+		return tgclient.Peer{Input: &tg.InputPeerUser{UserID: e.ID, AccessHash: e.AccessHash}, User: e}, nil
 	case *tg.Chat:
-		return &tg.InputPeerChat{ChatID: e.ID}, nil
+		return tgclient.Peer{Input: &tg.InputPeerChat{ChatID: e.ID}, Chat: e}, nil
 	case *tg.Channel:
 		if e.AccessHash == 0 {
-			return nil, errNoSharedDialog
+			return tgclient.Peer{}, errNoSharedDialog
 		}
-		return &tg.InputPeerChannel{ChannelID: e.ID, AccessHash: e.AccessHash}, nil
+		return tgclient.Peer{Input: &tg.InputPeerChannel{ChannelID: e.ID, AccessHash: e.AccessHash}, Chat: e}, nil
 	}
-	return nil, errResolvedNotPresent
+	return tgclient.Peer{}, errResolvedNotPresent
 }
 
 // resolvedPeerInfo returns the canonical resolved peer's bare MTProto ID and

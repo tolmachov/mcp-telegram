@@ -85,7 +85,7 @@ type LeaveChatResult struct {
 	Status string          `json:"status"` // "left" | "not_member"
 	Chat   string          `json:"chat"`
 	ChatID int64           `json:"chat_id,omitempty"`
-	Kind   tgdata.ChatType `json:"kind,omitempty"` // "channel" | "group" (supergroups report as "channel")
+	Kind   tgdata.ChatType `json:"kind,omitempty"` // "channel" | "supergroup" | "group"
 }
 
 // Register adds the JoinChat tool to the MCP server.
@@ -220,30 +220,31 @@ func (h *LeaveChatHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, i
 	}
 
 	// Reject peers that cannot be left before issuing the mutation.
-	channelPeer, isChannel := peer.(*tg.InputPeerChannel)
-	chatPeer, isChat := peer.(*tg.InputPeerChat)
+	channel, isChannel := peer.Chat.(*tg.Channel)
+	chatPeer, isChat := peer.Input.(*tg.InputPeerChat)
 	if !isChannel && !isChat {
 		return errResult(fmt.Sprintf("%q is a private (one-to-one) chat, not a group or channel — there's nothing to leave. Use DeleteMessages or your client to clear the conversation instead.", chat)), nil, nil
 	}
 
 	if isChannel {
-		return h.leaveChannel(ctx, chat, channelPeer)
+		return h.leaveChannel(ctx, chat, channel)
 	}
 	return h.leaveBasicChat(ctx, chat, chatPeer)
 }
 
-func (h *LeaveChatHandler) leaveChannel(ctx context.Context, chat string, p *tg.InputPeerChannel) (*mcp.CallToolResult, *LeaveChatResult, error) {
-	_, err := h.client.ChannelsLeaveChannel(ctx, &tg.InputChannel{ChannelID: p.ChannelID, AccessHash: p.AccessHash})
+func (h *LeaveChatHandler) leaveChannel(ctx context.Context, chat string, channel *tg.Channel) (*mcp.CallToolResult, *LeaveChatResult, error) {
+	kind := tgdata.ChannelType(channel)
+	_, err := h.client.ChannelsLeaveChannel(ctx, channel.AsInput())
 	if err != nil {
 		if tgerr.Is(err, "USER_NOT_PARTICIPANT") {
-			return nil, &LeaveChatResult{Status: statusNotMember, Chat: chat, ChatID: p.ChannelID, Kind: tgdata.ChatTypeChannel}, nil
+			return nil, &LeaveChatResult{Status: statusNotMember, Chat: chat, ChatID: channel.ID, Kind: kind}, nil
 		}
 		if tgerr.Is(err, "USER_CREATOR") {
 			return nil, nil, failedHint(fmt.Sprintf("leave %q", chat), err, "You are its owner: transfer ownership or delete the channel instead.")
 		}
 		return nil, nil, failed(fmt.Sprintf("leave %q", chat), err)
 	}
-	return nil, &LeaveChatResult{Status: statusLeft, Chat: chat, ChatID: p.ChannelID, Kind: tgdata.ChatTypeChannel}, nil
+	return nil, &LeaveChatResult{Status: statusLeft, Chat: chat, ChatID: channel.ID, Kind: kind}, nil
 }
 
 func (h *LeaveChatHandler) leaveBasicChat(ctx context.Context, chat string, p *tg.InputPeerChat) (*mcp.CallToolResult, *LeaveChatResult, error) {
@@ -303,38 +304,38 @@ func classifyChatRef(s string) (kind, value string) {
 var errInviteChatRef = errors.New("invite links name no chat until joined")
 
 // resolveChatRef resolves a chat reference — a public @username or t.me link,
-// or a numeric chat ID — to the InputPeer of whatever it names: a user, basic
-// group or channel. Invite links are rejected with errInviteChatRef.
+// or a numeric chat ID — to the peer of whatever it names: a user, basic group
+// or channel, with its entity. Invite links are rejected with errInviteChatRef.
 //
 // A numeric ID goes through the resolver but without the stale-hash retry of
 // tgclient.WithPeer, which has to wrap the RPC that uses the peer: these
 // callers (LeaveChat, the folder tools) issue theirs later, over peers mixed
 // with username resolutions, so a stale cached hash fails that call.
-func resolveChatRef(ctx context.Context, peers *tgclient.Resolver, ref string) (tg.InputPeerClass, error) {
+func resolveChatRef(ctx context.Context, peers *tgclient.Resolver, ref string) (tgclient.Peer, error) {
 	kind, value := classifyChatRef(ref)
 	switch kind {
 	case chatRefInvite:
-		return nil, errInviteChatRef
+		return tgclient.Peer{}, errInviteChatRef
 	case chatRefUsername:
 		resolved, err := resolvePublicUsername(ctx, peers.Client(), value)
 		if err != nil {
-			return nil, err
+			return tgclient.Peer{}, err
 		}
-		peer, err := resolvedInputPeer(resolved)
+		peer, err := resolvedPeer(resolved)
 		if err != nil {
-			return nil, fmt.Errorf("@%s: %w", value, err)
+			return tgclient.Peer{}, fmt.Errorf("@%s: %w", value, err)
 		}
 		return peer, nil
 	default: // chatRefID
 		id, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("invalid chat reference %q: expected a public @username or a numeric chat ID", ref)
+			return tgclient.Peer{}, fmt.Errorf("invalid chat reference %q: expected a public @username or a numeric chat ID", ref)
 		}
 		peer, err := peers.Resolve(ctx, id)
 		if err != nil {
-			return nil, err
+			return tgclient.Peer{}, err
 		}
-		return peer.Input, nil
+		return peer, nil
 	}
 }
 

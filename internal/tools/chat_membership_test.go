@@ -108,6 +108,7 @@ func TestLeaveChatRejectsInvite(t *testing.T) {
 type leaveChatInvoker struct {
 	channelID  int64
 	accessHash int64
+	megagroup  bool
 	leaveCalls int
 }
 
@@ -119,6 +120,7 @@ func (f *leaveChatInvoker) Invoke(_ context.Context, input bin.Encoder, output b
 		resolved.Chats = []tg.ChatClass{&tg.Channel{
 			ID:         f.channelID,
 			AccessHash: f.accessHash,
+			Megagroup:  f.megagroup,
 			Title:      "Test Channel",
 		}}
 		return nil
@@ -154,6 +156,19 @@ func TestLeaveChatConfirmBypassesElicitation(t *testing.T) {
 		assert.Equal(t, tgdata.ChatTypeChannel, out.Kind)
 		assert.Equal(t, int64(555), out.ChatID)
 		assert.Equal(t, 1, inv.leaveCalls, "confirm=true must reach channels.leaveChannel")
+	})
+
+	t.Run("a supergroup reports its own kind", func(t *testing.T) {
+		inv := &leaveChatInvoker{channelID: 556, accessHash: 998, megagroup: true}
+		h := NewLeaveChatHandler(tgclient.NewResolver(tg.NewClient(inv)))
+		errRes, out, err := h.handle(context.Background(), &mcp.CallToolRequest{}, LeaveChatInput{
+			Chat:    "@testgroup",
+			Confirm: true,
+		})
+		require.NoError(t, err)
+		require.Nil(t, errRes)
+		require.NotNil(t, out)
+		assert.Equal(t, tgdata.ChatTypeSupergroup, out.Kind, "LeaveChat must classify like JoinChat and ResolveUsername")
 	})
 
 	t.Run("confirm false without session cancels before the API", func(t *testing.T) {

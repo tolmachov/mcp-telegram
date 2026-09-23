@@ -56,10 +56,10 @@ func resolvePeerRef(ctx context.Context, peers *tgclient.Resolver, ref string) (
 	if ref == "" {
 		return nil, "empty chat reference", nil
 	}
-	peer, err := resolveChatRef(ctx, peers, ref)
+	resolved, err := resolveChatRef(ctx, peers, ref)
 	switch {
 	case err == nil:
-		return peer, "", nil
+		return resolved.Input, "", nil
 	case errors.Is(err, errInviteChatRef):
 		return nil, "is an invite link; join the chat first with JoinChat, then add it by @username or numeric ID", nil
 	case tgclient.IsSystemic(err):
