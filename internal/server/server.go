@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -62,14 +63,15 @@ func summarizeMisconfiguredMessage(err error) string {
 	return fmt.Sprintf("mcp-telegram is not configured: its summarisation settings are invalid (%v). Fix the setting it names — a flag or MCP_SUMMARIZE_* environment variable in this server's configuration, or an API key stored with `mcp-telegram config set` — then %s", err, reconnectHint)
 }
 
-// Options configures New. Every field is passed through from the resolved
-// CLI flags; New validates the combination and builds the summariser, whose
-// own misconfiguration Run reports instead (see Summarize).
+// Options configures New: the resolved CLI settings, the process's standard
+// streams and, for the http transport, the session store the caller builds.
+// New validates the combination and builds the summariser; a summarisation
+// misconfiguration is reported by Run instead (see Summarize).
 type Options struct {
 	Config       *tgclient.Config
 	Version      string
 	AllowedPaths []string // --allowed-paths; empty → the OS backup directory (see backupAllowedPaths)
-	// Summarize configures SummarizeChat; New builds the summarizer from it
+	// Summarize configures SummarizeChat; New builds the summariser from it
 	// and Run reports a misconfiguration as a blocked startup.
 	Summarize      summarize.Config
 	MediaMaxBytes  int
@@ -263,20 +265,7 @@ func (s *Server) serveAssembly(ctx context.Context, client telegramClient) error
 	if err != nil {
 		return err
 	}
-	var serveErr error
-	if asm.variants != nil {
-		// The variants proxy cannot forward async resources/list_changed
-		// notifications (they fire from the watcher goroutine on a background
-		// context with no front session to redirect to — a documented library
-		// limitation). Pinned resources are still exposed on every variant and
-		// refreshed by the poller, so clients see the updated set on their next
-		// resources/list; only proactive change-notifications are unavailable.
-		// Pin a single --variant to restore live notifications.
-		s.logger.Info("multi-variant mode: pinned-chat resources are exposed on every variant and refreshed by one poller, but live resources/list_changed notifications are not delivered through the variants proxy; pin a single --variant for live updates")
-		serveErr = asm.variants.Run(ctx, s.stdioTransport())
-	} else {
-		serveErr = asm.single.Run(ctx, s.stdioTransport())
-	}
+	serveErr := asm.run(ctx, s.stdioTransport())
 	if ctx.Err() != nil {
 		// The host cancelled ctx: shutdown, not a failure.
 		serveErr = nil
@@ -313,9 +302,10 @@ func (s *Server) floodWaitLogger() tgclient.FloodWaitCallback {
 
 // assembly is one complete set of MCP servers built around one Telegram
 // client, plus the pinned-chat watcher mirroring its resource set: either the
-// SEP-2053 variants proxy (variants == nil ⇔ pinned) or a single
-// pinned-variant server. The stdio path builds exactly one; the HTTP auth mode
-// builds one per authenticated user.
+// SEP-2053 variants proxy or a single pinned-variant server. The stdio path
+// builds exactly one; the HTTP auth mode builds one per authenticated user.
+// Callers serve it through run or httpHandler and never pick the form
+// themselves.
 type assembly struct {
 	variants *variants.Server // non-nil when exposing all variants
 	single   *mcp.Server      // non-nil when --variant pins one
@@ -325,6 +315,38 @@ type assembly struct {
 	stopWatch context.CancelFunc
 	watchDone <-chan struct{}
 	logger    *slog.Logger
+}
+
+// run serves the assembly on one connection over t until ctx ends or the
+// peer disconnects.
+func (a *assembly) run(ctx context.Context, t mcp.Transport) error {
+	if a.variants == nil {
+		if err := a.single.Run(ctx, t); err != nil {
+			return fmt.Errorf("pinned-variant server: %w", err)
+		}
+		return nil
+	}
+	// The variants proxy cannot forward async resources/list_changed
+	// notifications (they fire from the watcher goroutine on a background
+	// context with no front session to redirect to — a documented library
+	// limitation). Pinned resources are still exposed on every variant and
+	// refreshed by the poller, so clients see the updated set on their next
+	// resources/list; only proactive change-notifications are unavailable.
+	// Pin a single --variant to restore live notifications.
+	a.logger.Info("multi-variant mode: pinned-chat resources are exposed on every variant and refreshed by one poller, but live resources/list_changed notifications are not delivered through the variants proxy; pin a single --variant for live updates")
+	if err := a.variants.Run(ctx, t); err != nil {
+		return fmt.Errorf("variants proxy: %w", err)
+	}
+	return nil
+}
+
+// httpHandler serves the assembly over streamable HTTP.
+func (a *assembly) httpHandler() http.Handler {
+	if a.variants == nil {
+		srv := a.single
+		return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, streamableHTTPOptions())
+	}
+	return variants.NewStreamableHTTPHandler(a.variants, streamableHTTPOptions())
 }
 
 // telegramClient is the running Telegram client an assembly serves on;

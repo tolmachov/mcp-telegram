@@ -7,9 +7,7 @@ import (
 	"net/http"
 	"runtime/debug"
 
-	"github.com/modelcontextprotocol/experimental-ext-variants/go/sdk/variants"
 	"github.com/modelcontextprotocol/go-sdk/auth"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/authsrv"
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
@@ -125,17 +123,9 @@ func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 			}
 		}()
 
-		var handler http.Handler
-		if asm.variants != nil {
-			handler = variants.NewStreamableHTTPHandler(asm.variants, streamableHTTPOptions())
-		} else {
-			srv := asm.single
-			handler = mcp.NewStreamableHTTPHandler(func(_ *http.Request) *mcp.Server { return srv }, streamableHTTPOptions())
-		}
-
 		committed = true
 		return builtAssembly{
-			Handler: handler,
+			Handler: asm.httpHandler(),
 			// The assembly (watcher, variants proxy) goes first, while the
 			// client it runs on is still connected.
 			Closer: multiCloser{asm, closerFunc(func() error {
