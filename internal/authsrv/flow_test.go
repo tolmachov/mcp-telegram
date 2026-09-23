@@ -1181,10 +1181,8 @@ func TestRefreshStoreErrorIs503(t *testing.T) {
 			require.True(t, redeemed)
 			refresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
 				Subject: allowedUser.String(), ClientID: clientID,
-				Resource:  a.cfg.IssuerURL,
-				SessionID: sid, SessionKey: make([]byte, 32),
-				Family:   family,
-				IssuedAt: now.Unix(), LoginAt: now.Unix(),
+				grantClaims: grantClaims{Resource: a.cfg.IssuerURL, SessionID: sid, SessionKey: make([]byte, 32), Family: family},
+				IssuedAt:    now.Unix(), LoginAt: now.Unix(),
 			})
 			require.NoError(t, err)
 
@@ -1205,8 +1203,8 @@ func TestVerifierRejectsMalformedSessionID(t *testing.T) {
 	now := a.now()
 	token, err := sealBlob(a.sealer, accessBlob, accessClaims{
 		Subject: allowedUser.String(), Username: "durov", ClientID: "cid",
-		SessionID: "not-a-valid-session-id", SessionKey: []byte("k"),
-		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
+		grantClaims: grantClaims{SessionID: "not-a-valid-session-id", SessionKey: []byte("k")},
+		IssuedAt:    now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
 	})
 	require.NoError(t, err)
 	_, err = a.Verifier()(context.Background(), token, nil)
@@ -1250,7 +1248,7 @@ func TestRefreshRejectsMalformedSid(t *testing.T) {
 	now := a.now()
 	bad, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
 		Subject: allowedUser.String(), ClientID: clientID,
-		SessionID: "../../etc/passwd", IssuedAt: now.Unix(), LoginAt: now.Unix(),
+		grantClaims: grantClaims{SessionID: "../../etc/passwd"}, IssuedAt: now.Unix(), LoginAt: now.Unix(),
 	})
 	require.NoError(t, err)
 	_, oe, status := refreshGrant(t, ts, clientID, bad)
@@ -1266,7 +1264,7 @@ func TestRevokeRejectsMalformedSid(t *testing.T) {
 	a, ts := newTestServerWithInvalidator(t, testConfig(t), store, neverStartLogin, func(tgid.UserID, string) { called = true })
 	now := a.now()
 	bad, err := sealBlob(a.sealer, accessBlob, accessClaims{
-		Subject: allowedUser.String(), SessionID: "../evil",
+		Subject: allowedUser.String(), grantClaims: grantClaims{SessionID: "../evil"},
 		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
 	})
 	require.NoError(t, err)

@@ -99,7 +99,7 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 func (a *AuthServer) openRevocationTarget(token, hint string) (sub, sid, family, clientID string, ok bool) {
 	tryRefresh := func() bool {
 		rc, err := openBlob(a.sealer, refreshBlob, token, a.now())
-		if err != nil || !a.validGrant(rc.SessionID, rc.Family, rc.SessionKey, rc.Resource) {
+		if err != nil || !rc.valid(a.cfg.IssuerURL) {
 			return false
 		}
 		sub, sid, family, clientID = rc.Subject, rc.SessionID, rc.Family, rc.ClientID
@@ -107,7 +107,7 @@ func (a *AuthServer) openRevocationTarget(token, hint string) (sub, sid, family,
 	}
 	tryAccess := func() bool {
 		ac, err := openBlob(a.sealer, accessBlob, token, a.now())
-		if err != nil || !a.validGrant(ac.SessionID, ac.Family, ac.SessionKey, ac.Resource) {
+		if err != nil || !ac.valid(a.cfg.IssuerURL) {
 			return false
 		}
 		sub, sid, family, clientID = ac.Subject, ac.SessionID, ac.Family, ac.ClientID

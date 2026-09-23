@@ -67,12 +67,12 @@ func (a *AuthServer) tokenFromCode(w http.ResponseWriter, r *http.Request, form 
 		a.tokenError(w, http.StatusBadRequest, "invalid_target", "unknown resource")
 		return
 	}
-	if !a.validGrant(cc.SessionID, cc.JTI, cc.SessionKey, cc.Resource) {
-		a.logger.Warn("authorization code rejected: malformed session identity")
+	if !cc.valid(a.cfg.IssuerURL) {
+		a.logger.Warn("authorization code rejected: malformed grant identity or foreign resource")
 		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "invalid authorization code")
 		return
 	}
-	redeemed, err := sessionstore.RedeemCode(r.Context(), a.store, cc.JTI, cc.SessionID, now.Add(refreshTokenTTL))
+	redeemed, err := sessionstore.RedeemCode(r.Context(), a.store, cc.Family, cc.SessionID, now.Add(refreshTokenTTL))
 	if err != nil {
 		a.logger.Error("authorization code state write failed", "err", err)
 		a.tokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "authorization state unavailable, retry")
@@ -84,10 +84,8 @@ func (a *AuthServer) tokenFromCode(w http.ResponseWriter, r *http.Request, form 
 		return
 	}
 	a.mintTokens(w, mintInput{
-		Subject: cc.Subject, Username: cc.Username,
-		ClientID: cc.ClientID, Resource: cc.Resource,
-		SessionID: cc.SessionID, SessionKey: cc.SessionKey,
-		Family: cc.JTI, Generation: 0, LoginAt: now.Unix(),
+		Subject: cc.Subject, Username: cc.Username, ClientID: cc.ClientID,
+		grant: cc.grantClaims, Generation: 0, LoginAt: now.Unix(),
 	})
 }
 
@@ -108,8 +106,8 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 		return
 	}
 	userID, err := tgid.Parse(rc.Subject)
-	if err != nil || rc.Generation < 0 || !a.validGrant(rc.SessionID, rc.Family, rc.SessionKey, rc.Resource) {
-		a.logger.Warn("refresh rejected: malformed grant identity")
+	if err != nil || rc.Generation < 0 || !rc.valid(a.cfg.IssuerURL) {
+		a.logger.Warn("refresh rejected: malformed claims or foreign resource")
 		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "invalid refresh token")
 		return
 	}
@@ -157,35 +155,31 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 	}
 
 	a.mintTokens(w, mintInput{
-		Subject: rc.Subject, Username: rc.Username,
-		ClientID: rc.ClientID, Resource: rc.Resource,
-		SessionID: rc.SessionID, SessionKey: rc.SessionKey,
-		Family: rc.Family, Generation: rc.Generation + 1, LoginAt: rc.LoginAt,
+		Subject: rc.Subject, Username: rc.Username, ClientID: rc.ClientID,
+		grant: rc.grantClaims, Generation: rc.Generation + 1, LoginAt: rc.LoginAt,
 	})
 }
 
 type mintInput struct {
-	Subject, Username  string
-	ClientID, Resource string
-	SessionID          string
-	SessionKey         []byte
-	Family             string
-	Generation         int64
-	LoginAt            int64
+	Subject, Username, ClientID string
+	grant                       grantClaims
+	Generation                  int64
+	LoginAt                     int64
 }
 
 func (a *AuthServer) mintTokens(w http.ResponseWriter, in mintInput) {
 	now := a.now()
-	if in.LoginAt <= 0 || in.LoginAt > now.Unix() || in.Generation < 0 || !a.validGrant(in.SessionID, in.Family, in.SessionKey, in.Resource) {
+	if in.LoginAt <= 0 || in.LoginAt > now.Unix() || in.Generation < 0 || !in.grant.valid(a.cfg.IssuerURL) {
 		a.logger.Error("mint rejected: invalid grant state", "subject", in.Subject)
 		a.tokenError(w, http.StatusInternalServerError, "server_error", "internal error")
 		return
 	}
+	grant := in.grant
+	grant.Resource = normalizeResource(grant.Resource)
 	expiresAt := now.Add(accessTokenTTL)
 	accessToken, err := sealBlob(a.sealer, accessBlob, accessClaims{
 		Subject: in.Subject, Username: in.Username, ClientID: in.ClientID,
-		Resource: normalizeResource(in.Resource), SessionID: in.SessionID, SessionKey: in.SessionKey,
-		Family: in.Family, IssuedAt: now.Unix(), ExpiresAt: expiresAt.Unix(),
+		grantClaims: grant, IssuedAt: now.Unix(), ExpiresAt: expiresAt.Unix(),
 	})
 	if err != nil {
 		a.logger.Error("sealing access token failed", "err", err)
@@ -194,8 +188,7 @@ func (a *AuthServer) mintTokens(w http.ResponseWriter, in mintInput) {
 	}
 	refreshToken, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
 		Subject: in.Subject, Username: in.Username, ClientID: in.ClientID,
-		Resource: normalizeResource(in.Resource), SessionID: in.SessionID, SessionKey: in.SessionKey,
-		Family: in.Family, Generation: in.Generation, IssuedAt: now.Unix(), LoginAt: in.LoginAt,
+		grantClaims: grant, Generation: in.Generation, IssuedAt: now.Unix(), LoginAt: in.LoginAt,
 	})
 	if err != nil {
 		a.logger.Error("sealing refresh token failed", "err", err)
@@ -206,16 +199,6 @@ func (a *AuthServer) mintTokens(w http.ResponseWriter, in mintInput) {
 }
 
 func normalizeResource(resource string) string { return strings.TrimRight(resource, "/") }
-
-// validGrant reports whether a token's grant identity is well formed: the
-// session id and family are storage-safe, the session key has the minted
-// length, and the resource is this server. A failure means a forged, corrupt
-// or obsolete token; every token path checks it before the identity reaches
-// storage or a new token.
-func (a *AuthServer) validGrant(sid, family string, key []byte, resource string) bool {
-	return sessionstore.ValidSID(sid) && sessionstore.ValidSID(family) &&
-		len(key) == sessionKeyLen && normalizeResource(resource) == a.cfg.IssuerURL
-}
 
 func verifyPKCE(verifier, challenge string) bool {
 	if verifier == "" || challenge == "" {

@@ -55,7 +55,7 @@ func TestSealerOpensGoldenBlobs(t *testing.T) {
 	const access = "mcp_at_nyyIjJlooCsBp3QvMobM_0C5Vt8r4QfK1abHM7NMX58iSaVsMYOFbfUj_JDbRllwWC63kCahu_lNkNSiZdkQ-87p2_6gg0ibhOIUuSNj5poo9Rrk3HSKQp-koyRWiIyesPatjVTPcA"
 	ac, err := openBlob(s, accessBlob, access, time.Unix(1700000000, 0))
 	require.NoError(t, err)
-	assert.Equal(t, accessClaims{Subject: "123456", ClientID: "cid", Family: "fam", IssuedAt: 1700000000, ExpiresAt: 1700003600}, ac)
+	assert.Equal(t, accessClaims{Subject: "123456", ClientID: "cid", grantClaims: grantClaims{Family: "fam"}, IssuedAt: 1700000000, ExpiresAt: 1700003600}, ac)
 
 	const clientID = "mcp_cid_eyJydSI6WyJodHRwOi8vMTI3LjAuMC4xL2NiIl0sImlhdCI6MTcwMDAwMDAwMH0.etkRJef0si75Lq9N1H3Mhqibiw15aAGtTnRLWpTAQK8"
 	var cc clientIDClaims
@@ -203,7 +203,7 @@ func TestSealOpenProperty(t *testing.T) {
 			ClientID:      rapid.String().Draw(t, "cid"),
 			RedirectURI:   rapid.String().Draw(t, "ru"),
 			CodeChallenge: rapid.String().Draw(t, "cc"),
-			Resource:      rapid.String().Draw(t, "res"),
+			grantClaims:   grantClaims{Resource: rapid.String().Draw(t, "res")},
 			// Within the code TTL so openBlob's expiry enforcement passes.
 			IssuedAt: rapid.Int64Range(now.Add(-codeTTL/2).Unix(), now.Unix()).Draw(t, "iat"),
 		}

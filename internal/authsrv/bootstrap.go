@@ -375,22 +375,19 @@ func (a *AuthServer) finalizeLogin(ctx context.Context, w http.ResponseWriter, p
 	}()
 
 	now := a.now()
-	jti, err := randomHex(sessionIDLen)
+	family, err := randomHex(sessionIDLen)
 	if err != nil {
 		a.logger.Error("generating authorization code id failed", "err", err)
 		fail("Internal error. Start over from your MCP client.")
 		return
 	}
 	code, err := sealBlob(a.sealer, codeBlob, codeClaims{
-		JTI:           jti,
 		Subject:       user.ID.String(),
 		Username:      user.Username,
 		ClientID:      sc.ClientID,
 		RedirectURI:   sc.RedirectURI,
 		CodeChallenge: sc.CodeChallenge,
-		Resource:      sc.Resource,
-		SessionID:     sid,
-		SessionKey:    sessionKey,
+		grantClaims:   grantClaims{Resource: sc.Resource, SessionID: sid, SessionKey: sessionKey, Family: family},
 		IssuedAt:      now.Unix(),
 	})
 	if err != nil {

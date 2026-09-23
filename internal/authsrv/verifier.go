@@ -12,8 +12,9 @@ import (
 )
 
 // extraIdentityKey is the single TokenInfo.Extra key this package sets. The
-// identity travels as one UserIdentity value, so a value-type drift is a
-// compile error rather than a silently-zero type assertion.
+// identity travels as one UserIdentity value that only this package writes
+// and reads, so IdentityFromTokenInfo asserts exactly that type; any other
+// value under the key reads as no identity.
 const extraIdentityKey = "mcp-telegram/identity"
 
 // Verifier returns the auth.TokenVerifier for RequireBearerToken. It opens
@@ -47,8 +48,8 @@ func (a *AuthServer) Verifier() auth.TokenVerifier {
 			a.logger.Warn("access token rejected: user no longer allowed", "user_id", userID)
 			return nil, fmt.Errorf("%w: user not allowed", auth.ErrInvalidToken)
 		}
-		if !a.validGrant(c.SessionID, c.Family, c.SessionKey, c.Resource) {
-			a.logger.Warn("access token rejected: malformed grant identity", "user_id", userID)
+		if !c.valid(a.cfg.IssuerURL) {
+			a.logger.Warn("access token rejected: malformed grant identity or foreign resource", "user_id", userID)
 			return nil, fmt.Errorf("%w: not a valid access token", auth.ErrInvalidToken)
 		}
 		u := UserIdentity{ID: userID, Username: c.Username, SessionID: c.SessionID, SessionKey: c.SessionKey}
