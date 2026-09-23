@@ -142,3 +142,120 @@ func TestMarkAsReadLooksUpChannelTopsInOneCall(t *testing.T) {
 	assert.Equal(t, 3, out.Successful)
 	assert.Zero(t, inv.Remaining())
 }
+
+// basicGroupSteps answers the resolver's probes for id as a basic group.
+func basicGroupSteps(t *testing.T, id int64) []telegramfake.InvokeFunc {
+	t.Helper()
+	return []telegramfake.InvokeFunc{
+		notUserStep(t, id),
+		telegramfake.Typed(func(_ context.Context, _ *tg.ChannelsGetChannelsRequest, _ *tg.MessagesChatsBox) error {
+			return tgerr.New(400, "CHANNEL_INVALID")
+		}),
+		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetChatsRequest, out *tg.MessagesChatsBox) error {
+			out.Chats = &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Chat{ID: id}}}
+			return nil
+		}),
+	}
+}
+
+// TestMarkAsReadIsolatesBadChannel verifies one channel failing the shared
+// top-message lookup fails only itself: each channel then looks up its own,
+// and the result reports the mix.
+func TestMarkAsReadIsolatesBadChannel(t *testing.T) {
+	const goodID, badID = int64(91), int64(92)
+	inv := telegramfake.New(
+		notUserStep(t, goodID),
+		resolveChannelStep(t, goodID, 1),
+		notUserStep(t, badID),
+		resolveChannelStep(t, badID, 2),
+		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetPeerDialogsRequest, _ *tg.MessagesPeerDialogs) error {
+			require.Len(t, req.Peers, 2)
+			return tgerr.New(400, "CHANNEL_PRIVATE")
+		}),
+		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetPeerDialogsRequest, out *tg.MessagesPeerDialogs) error {
+			require.Len(t, req.Peers, 1)
+			out.Dialogs = []tg.DialogClass{&tg.Dialog{Peer: &tg.PeerChannel{ChannelID: goodID}, TopMessage: 5}}
+			return nil
+		}),
+		telegramfake.Typed(func(_ context.Context, req *tg.ChannelsReadHistoryRequest, out *tg.BoolBox) error {
+			assert.Equal(t, goodID, req.Channel.(*tg.InputChannel).ChannelID)
+			assert.Equal(t, 5, req.MaxID)
+			out.Bool = &tg.BoolTrue{}
+			return nil
+		}),
+		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetPeerDialogsRequest, _ *tg.MessagesPeerDialogs) error {
+			require.Len(t, req.Peers, 1)
+			return tgerr.New(400, "CHANNEL_PRIVATE")
+		}),
+	)
+	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+
+	errRes, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, MarkAsReadInput{ChatIDs: []int64{goodID, badID}})
+	require.NoError(t, err)
+	require.Nil(t, errRes)
+	require.NotNil(t, out)
+	assert.Equal(t, []int64{goodID}, out.SuccessIDs)
+	require.Len(t, out.Failures, 1)
+	assert.Equal(t, badID, out.Failures[0].ChatID)
+	assert.Contains(t, out.Failures[0].Error, "CHANNEL_PRIVATE")
+	assert.Equal(t, 2, out.TotalChats)
+	assert.Empty(t, out.SkippedIDs)
+	assert.Empty(t, out.Warning)
+	assert.Zero(t, inv.Remaining())
+}
+
+// TestMarkAsReadFloodWaitMidReadSkipsRest verifies a flood wait while reading
+// one chat stops the batch there, keeping the chats already read.
+func TestMarkAsReadFloodWaitMidReadSkipsRest(t *testing.T) {
+	flood := &tgerr.Error{Code: 420, Message: "FLOOD_WAIT_30", Type: "FLOOD_WAIT", Argument: 30}
+	var script []telegramfake.InvokeFunc
+	for _, id := range []int64{1, 2, 3} {
+		script = append(script, basicGroupSteps(t, id)...)
+	}
+	script = append(script,
+		telegramfake.Typed(func(_ context.Context, req *tg.MessagesReadHistoryRequest, _ *tg.MessagesAffectedMessages) error {
+			assert.Equal(t, &tg.InputPeerChat{ChatID: 1}, req.Peer)
+			return nil
+		}),
+		telegramfake.Typed(func(_ context.Context, req *tg.MessagesReadHistoryRequest, _ *tg.MessagesAffectedMessages) error {
+			assert.Equal(t, &tg.InputPeerChat{ChatID: 2}, req.Peer)
+			return flood
+		}),
+	)
+	inv := telegramfake.New(script...)
+	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+
+	errRes, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, MarkAsReadInput{ChatIDs: []int64{1, 2, 3}})
+	require.NoError(t, err)
+	require.Nil(t, errRes)
+	require.NotNil(t, out)
+	assert.Equal(t, []int64{1}, out.SuccessIDs)
+	require.Len(t, out.Failures, 1)
+	assert.Equal(t, int64(2), out.Failures[0].ChatID)
+	assert.Equal(t, []int64{3}, out.SkippedIDs)
+	assert.Contains(t, out.Warning, "30 seconds")
+	assert.Zero(t, inv.Remaining())
+}
+
+// TestMarkAsReadDeadSessionStopsBatch verifies a systemic failure of the
+// shared top-message lookup skips every remaining chat without calling
+// Telegram again.
+func TestMarkAsReadDeadSessionStopsBatch(t *testing.T) {
+	const channelID, groupID = int64(91), int64(93)
+	script := []telegramfake.InvokeFunc{notUserStep(t, channelID), resolveChannelStep(t, channelID, 1)}
+	script = append(script, basicGroupSteps(t, groupID)...)
+	script = append(script, telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetPeerDialogsRequest, _ *tg.MessagesPeerDialogs) error {
+		return tgerr.New(401, "AUTH_KEY_UNREGISTERED")
+	}))
+	inv := telegramfake.New(script...)
+	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+
+	errRes, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, MarkAsReadInput{ChatIDs: []int64{channelID, groupID}})
+	require.NoError(t, err)
+	require.Nil(t, errRes)
+	require.NotNil(t, out)
+	assert.Zero(t, out.TotalChats)
+	assert.Equal(t, []int64{channelID, groupID}, out.SkippedIDs)
+	assert.Contains(t, out.Warning, "no longer accepts this account's session")
+	assert.Len(t, inv.RequestTypes(), len(script), "no call follows the systemic failure")
+}

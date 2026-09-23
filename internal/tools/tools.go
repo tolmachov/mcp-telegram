@@ -459,9 +459,9 @@ func firstMessageInUpdates(updates tg.UpdatesClass, typeIDs ...uint32) (int, int
 // floodWaitMessage returns the deterministic retry-after guidance for a
 // Telegram FLOOD_WAIT — including the form the flood-wait middleware wraps
 // when the wait exceeds its configured max (tgerr.AsFloodWait unwraps the
-// chain) — or ok=false when err is not a flood wait. toolFailure renders it
-// for every tool; batch handlers (e.g. MarkAsRead) embed it in an aggregated
-// result instead.
+// chain) — or ok=false when err is not a flood wait. systemicText renders it
+// both for every tool's failure and for batch handlers (e.g. MarkAsRead) that
+// embed it in an aggregated result instead.
 //
 // FLOOD_WAIT here is an account-level limit (cumulative actions over a window,
 // not request rate), so a local rate limiter cannot prevent it — the only

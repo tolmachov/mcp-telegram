@@ -46,11 +46,12 @@ type MarkAsReadResult struct {
 	SuccessIDs []int64             `json:"success_ids,omitempty"`
 	Failures   []MarkAsReadFailure `json:"failures,omitempty"`
 	// TotalChats counts chats *attempted* (Successful + Failed), not chats
-	// requested. On the flood-wait early-stop path the batch ends before every
-	// input is tried, so the requested total is TotalChats + len(SkippedIDs).
+	// requested. When the batch stops early it ends before every input is
+	// tried, so the requested total is TotalChats + len(SkippedIDs).
 	TotalChats int `json:"total_chats"`
-	// SkippedIDs holds chats not attempted because the batch stopped early on a
-	// flood wait; Warning explains why. Both are empty on a normal run.
+	// SkippedIDs holds chats not attempted because the batch stopped early on
+	// a systemic failure (a flood wait, a dead session, a cancelled call);
+	// Warning explains why. Both are empty on a normal run.
 	SkippedIDs []int64 `json:"skipped_ids,omitempty"`
 	Warning    string  `json:"warning,omitempty"`
 }
@@ -86,26 +87,27 @@ func (h *MessageReadHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	// record adds one chat's outcome. Ordinary errors don't stop the batch —
 	// partial failures are surfaced via the result payload AND via a
 	// structured Warning log so MCP clients with a log panel can flag them. A
-	// flood wait is the one exception: it is account-level and cumulative, so
-	// going on would fire more requests into the flood window and deepen the
-	// limit. record then returns its retry-after guidance and stop=true.
-	record := func(chatID int64, err error) (warning string, stop bool) {
+	// systemic error is the exception (tgclient.IsSystemic): a flood wait is
+	// account-level and cumulative, so going on would deepen the limit, and a
+	// dead session or a cancelled call fails every chat alike. record then
+	// reports stop=true.
+	record := func(chatID int64, err error) (stop bool) {
 		results = append(results, markReadResult{chatID: chatID, success: err == nil, err: err})
 		if err == nil {
-			return "", false
+			return false
 		}
 		mcpLog(ctx, req.Session, logLevelWarning, "MarkAsRead", map[string]any{
 			"chat_id": chatID,
 			"error":   err.Error(),
 		})
-		return floodWaitMessage("MarkAsRead", err)
+		return tgclient.IsSystemic(err)
 	}
-	// stopped reports a batch cut short by a flood wait, with the chats still
-	// pending as skipped so the model waits instead of retry-spamming.
-	stopped := func(pending []int64, warning string) (*mcp.CallToolResult, *MarkAsReadResult, error) {
+	// stopped reports a batch cut short by the systemic err, with the chats
+	// still pending as skipped so the model waits instead of retry-spamming.
+	stopped := func(pending []int64, err error) (*mcp.CallToolResult, *MarkAsReadResult, error) {
 		out := h.buildResult(results)
 		out.SkippedIDs = append([]int64(nil), pending...)
-		out.Warning = warning
+		out.Warning = systemicText("MarkAsRead", err)
 		return nil, out, nil
 	}
 
@@ -115,8 +117,8 @@ func (h *MessageReadHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	for i, chatID := range in.ChatIDs {
 		peer, err := h.peers.Resolve(ctx, chatID)
 		if err != nil {
-			if warning, stop := record(chatID, err); stop {
-				return stopped(append(pending, in.ChatIDs[i+1:]...), warning)
+			if record(chatID, err) {
+				return stopped(append(pending, in.ChatIDs[i+1:]...), err)
 			}
 			continue
 		}
@@ -126,30 +128,20 @@ func (h *MessageReadHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		}
 	}
 
+	// Telegram fails the shared lookup as a whole for one bad channel, so
+	// unless the failure is systemic each channel then looks up its own top
+	// message and only the bad one fails.
 	tops, err := h.topMessages(ctx, channelIDs)
 	if err != nil {
-		// The one lookup failed for every channel alike; the other chats
-		// don't need it.
-		var rest []int64
-		warning, stop := "", false
-		for _, chatID := range pending {
-			if !slices.Contains(channelIDs, chatID) {
-				rest = append(rest, chatID)
-				continue
-			}
-			if w, s := record(chatID, err); s {
-				warning, stop = w, true
-			}
+		if tgclient.IsSystemic(err) {
+			return stopped(pending, err)
 		}
-		if stop {
-			return stopped(rest, warning)
-		}
-		pending = rest
+		tops = nil
 	}
 
 	for i, chatID := range pending {
-		if warning, stop := record(chatID, h.markChatAsRead(ctx, chatID, tops[chatID])); stop {
-			return stopped(pending[i+1:], warning)
+		if err := h.markChatAsRead(ctx, chatID, slices.Contains(channelIDs, chatID), tops); record(chatID, err) {
+			return stopped(pending[i+1:], err)
 		}
 	}
 	return h.finalResult(results)
@@ -190,10 +182,11 @@ func (h *MessageReadHandler) buildResult(results []markReadResult) *MarkAsReadRe
 // topMessages returns the top message ID of each channel in channelIDs from
 // one messages.getPeerDialogs call (maxMarkAsReadChats keeps the batch within
 // a single request). A channel missing from the answer — one this account has
-// no dialog with — gets none: it has no unread badge to clear.
+// no dialog with — gets none: it has no unread badge to clear. The map is
+// non-nil on success.
 func (h *MessageReadHandler) topMessages(ctx context.Context, channelIDs []int64) (map[int64]int, error) {
 	if len(channelIDs) == 0 {
-		return nil, nil
+		return map[int64]int{}, nil
 	}
 	return tgclient.WithPeers(ctx, h.peers, channelIDs, nil, nil, func(peers []tgclient.Peer) (map[int64]int, error) {
 		dialogPeers := make([]tg.InputDialogPeerClass, len(peers))
@@ -218,9 +211,17 @@ func (h *MessageReadHandler) topMessages(ctx context.Context, channelIDs []int64
 	})
 }
 
-// markChatAsRead marks a single chat as read; top is the channel's top
-// message ID and unused for other chats.
-func (h *MessageReadHandler) markChatAsRead(ctx context.Context, chatID int64, top int) error {
+// markChatAsRead marks a single chat as read. tops holds the channels' top
+// message IDs from the shared lookup, or is nil when that lookup failed, in
+// which case a channel looks up its own.
+func (h *MessageReadHandler) markChatAsRead(ctx context.Context, chatID int64, isChannel bool, tops map[int64]int) error {
+	if isChannel && tops == nil {
+		own, err := h.topMessages(ctx, []int64{chatID})
+		if err != nil {
+			return fmt.Errorf("marking chat as read: %w", err)
+		}
+		tops = own
+	}
 	_, err := tgclient.WithPeer(ctx, h.peers, chatID, nil, nil, func(p tgclient.Peer) (bool, error) {
 		channel, ok := p.Input.(*tg.InputPeerChannel)
 		if !ok {
@@ -229,6 +230,7 @@ func (h *MessageReadHandler) markChatAsRead(ctx context.Context, chatID int64, t
 			}
 			return true, nil
 		}
+		top := tops[chatID]
 		if top == 0 {
 			// Nothing to acknowledge, and Telegram rejects channels.readHistory
 			// with a zero MaxID.
