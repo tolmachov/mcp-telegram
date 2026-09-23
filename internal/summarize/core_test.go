@@ -63,8 +63,7 @@ func TestSummarizeWithProgressSuccessFailurePanicAndCancellation(t *testing.T) {
 
 	s := NewSummarizer(providerFunc(func(context.Context, Request) (string, error) {
 		return " summary ", nil
-	}), nil, 0)
-	assert.Equal(t, DefaultBatchTokens, s.batchTokens)
+	}), nil, 8000)
 	got, err := s.summarizeWithProgress(t.Context(), req, 1, 1, nil)
 	require.NoError(t, err)
 	assert.Equal(t, " summary ", got)

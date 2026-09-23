@@ -77,7 +77,7 @@ func (q qrLoginFlow) User() (authsrv.LoginUser, bool) {
 
 // startLogin is the StartLoginFunc injected into the auth server.
 func (s *Server) startLogin(ctx context.Context) (authsrv.LoginFlow, error) {
-	flow, err := tgclient.StartQRLogin(ctx, s.tgConfig)
+	flow, err := tgclient.StartQRLogin(ctx, s.opts.Config)
 	if err != nil {
 		return nil, fmt.Errorf("starting QR login: %w", err)
 	}
@@ -89,7 +89,7 @@ func (s *Server) startLogin(ctx context.Context) (authsrv.LoginFlow, error) {
 // a fresh MCP assembly on top of it.
 func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 	return func(ctx context.Context, user *authsrv.UserIdentity) (builtAssembly, error) {
-		running, err := tgclient.StartClient(ctx, s.tgConfig, s.sessionStore.Session(user.ID, user.SessionID, user.SessionKey), s.floodWaitLogger())
+		running, err := tgclient.StartClient(ctx, s.opts.Config, s.opts.SessionStore.Session(user.ID, user.SessionID, user.SessionKey), s.floodWaitLogger())
 		if err != nil {
 			switch {
 			case errors.Is(err, sessionstore.ErrCorruptSession):
@@ -105,7 +105,7 @@ func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 				// grants stop treating the user as logged in; the 401 this maps
 				// to sends that client back through the QR login. Other sessions
 				// of the same account are untouched.
-				if delErr := s.sessionStore.Delete(ctx, user.ID, user.SessionID); delErr != nil {
+				if delErr := s.opts.SessionStore.Delete(ctx, user.ID, user.SessionID); delErr != nil {
 					s.logger.Error("failed to delete dead session; refresh grants may loop until it is removed", "user", user.ID, "session", user.SessionID, "err", delErr)
 				}
 			}
@@ -150,7 +150,7 @@ func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 			}
 		}()
 		pinnedProvider := resources.NewPinnedChatsProvider(running.API(), asm.msgProvider, s.logger, asm.pinnedServers...)
-		pinnedDone := pinnedProvider.WatchInBackground(watchCtx, s.pinnedRefresh)
+		pinnedDone := pinnedProvider.WatchInBackground(watchCtx, s.opts.PinnedRefresh)
 		closers = append(closers, closerFunc(func() error {
 			cancelWatch()
 			select {
@@ -187,14 +187,14 @@ func (s *Server) runHTTPWithAuth(ctx context.Context) (retErr error) {
 		}
 	}()
 
-	wwwAuthenticate := fmt.Sprintf("Bearer resource_metadata=%q", s.authCfg.IssuerURL+authsrv.ProtectedResourceMetadataPath)
+	wwwAuthenticate := fmt.Sprintf("Bearer resource_metadata=%q", s.opts.Auth.IssuerURL+authsrv.ProtectedResourceMetadataPath)
 	pool := newUserPool(ctx, s.userAssemblyBuilder(), wwwAuthenticate, s.logger)
 	defer func() {
 		if closeErr := pool.Close(); closeErr != nil {
 			s.logger.Warn("failed to close user pool", "err", closeErr)
 		}
 	}()
-	as, err := authsrv.New(s.authCfg, s.logger, s.sessionStore, s.startLogin, pool.EvictSession)
+	as, err := authsrv.New(s.opts.Auth, s.logger, s.opts.SessionStore, s.startLogin, pool.EvictSession)
 	if err != nil {
 		return fmt.Errorf("building auth server: %w", err)
 	}
@@ -204,7 +204,7 @@ func (s *Server) runHTTPWithAuth(ctx context.Context) (retErr error) {
 	}
 	go pool.janitor(ctx)
 
-	s.logger.Info("starting with per-user Telegram authentication", "issuer", s.authCfg.IssuerURL)
-	mux := buildAuthMux(as, s.authCfg.IssuerURL, pool)
-	return s.serveHTTP(ctx, mux, s.httpAddr)
+	s.logger.Info("starting with per-user Telegram authentication", "issuer", s.opts.Auth.IssuerURL)
+	mux := buildAuthMux(as, s.opts.Auth.IssuerURL, pool)
+	return s.serveHTTP(ctx, mux, s.opts.HTTPAddr)
 }

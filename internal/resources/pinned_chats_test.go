@@ -102,7 +102,7 @@ func quietLogger() *slog.Logger {
 
 func newTestProvider(inv *pinnedInvoker, logger *slog.Logger, nServers int) (*PinnedChatsProvider, []*mcp.Server) {
 	api := tg.NewClient(inv)
-	msgProvider := messages.NewProviderWithRate(api, 0)
+	msgProvider := messages.NewProviderWithRate(api, 100_000)
 	servers := make([]*mcp.Server, nServers)
 	for i := range servers {
 		servers[i] = mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
@@ -266,7 +266,7 @@ func TestNewPinnedChatsProviderWarnsWithoutServers(t *testing.T) {
 	var buf syncBuffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	api := tg.NewClient(&pinnedInvoker{})
-	msgProvider := messages.NewProviderWithRate(api, 0)
+	msgProvider := messages.NewProviderWithRate(api, 100_000)
 
 	NewPinnedChatsProvider(api, msgProvider, logger) // no servers
 

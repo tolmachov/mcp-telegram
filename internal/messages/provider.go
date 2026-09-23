@@ -22,20 +22,9 @@ type Provider struct {
 	peers   *tgclient.PeerCache
 }
 
-// DefaultRateLimitRPS is the default per-provider request rate (requests per
-// second) for history-fetching calls. Kept conservative to avoid tripping
-// Telegram's flood-wait on bursty tools like BackupMessages. Override via
-// NewProviderWithRate when you need a different ceiling.
-const DefaultRateLimitRPS = 1
-
-// NewProviderWithRate creates a new message provider with an explicit
-// requests-per-second limit. Values ≤ 0 fall back to DefaultRateLimitRPS
-// so the limiter can never be constructed with a zero/negative rate (which
-// would block forever).
+// NewProviderWithRate creates a new message provider limited to rps
+// requests per second (the default lives on --tg-rate-limit-rps).
 func NewProviderWithRate(client *tg.Client, rps int) *Provider {
-	if rps <= 0 {
-		rps = DefaultRateLimitRPS
-	}
 	return &Provider{
 		client:  client,
 		limiter: rate.NewLimiter(rate.Limit(rps), 1),

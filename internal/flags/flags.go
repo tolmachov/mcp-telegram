@@ -3,13 +3,11 @@ package flags
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/urfave/cli/v3"
 
 	"github.com/tolmachov/mcp-telegram/internal/authsrv"
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
-	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // Environment variable name constants.
@@ -56,11 +54,41 @@ const (
 // has no BeforeListResources hook.
 const DefaultPinnedRefreshSeconds = 30
 
+// DefaultSummarizeBatchTokens is the default approximate number of tokens per
+// summarisation batch.
+const DefaultSummarizeBatchTokens = 8000
+
+// DefaultRateLimitRPS is the default request rate (requests per second) for
+// history-fetching calls. Kept conservative to avoid tripping Telegram's
+// flood-wait on bursty tools like BackupMessages.
+const DefaultRateLimitRPS = 1
+
+// DefaultFloodWaitMaxSeconds is the default ceiling for auto-waiting out a
+// Telegram FLOOD_WAIT. It MUST stay well below the MCP client's tool-call
+// timeout (Claude Desktop cancels at ~240s): auto-waiting longer is pointless
+// because the client cancels the call first, turning a recoverable rate limit
+// into a generic "no result received" timeout. So short, transient waits are
+// absorbed transparently, while anything longer fails fast: write tools render
+// it as an actionable retry-after message (see floodWaitResult) and read tools
+// surface the raw error, either beating the client's hang-until-timeout.
+const DefaultFloodWaitMaxSeconds = 60
+
 // DefaultMediaMaxBytes is the default cap on a single GetMedia download.
 // 50 MiB is large enough for any practical photo (Telegram's photo limit is
 // 10 MiB) and any reasonable thumbnail of a video, while being small enough
 // to keep base64-encoded responses inside MCP context-window economics.
 const DefaultMediaMaxBytes = 50 * 1024 * 1024
+
+// requirePositive rejects a zero or negative value for an int flag whose
+// consumer has no meaning for it.
+func requirePositive(name string) func(context.Context, *cli.Command, int) error {
+	return func(_ context.Context, _ *cli.Command, value int) error {
+		if value <= 0 {
+			return fmt.Errorf("--%s must be positive", name)
+		}
+		return nil
+	}
+}
 
 // APIIDFlag defines --api-id. It is intentionally NOT marked Required so that
 // `mcp-telegram run` can still start the MCP stdio transport when credentials
@@ -153,9 +181,10 @@ func AnthropicAPIKeyFlag() *cli.StringFlag {
 func SummarizeBatchTokensFlag() *cli.IntFlag {
 	return &cli.IntFlag{
 		Name:    SummarizeBatchTokens,
-		Value:   summarize.DefaultBatchTokens,
+		Value:   DefaultSummarizeBatchTokens,
 		Usage:   "Approximate number of tokens per batch for summarization",
 		Sources: cli.EnvVars("MCP_SUMMARIZE_BATCH_TOKENS"),
+		Action:  requirePositive(SummarizeBatchTokens),
 	}
 }
 
@@ -171,9 +200,10 @@ func MediaMaxBytesFlag() *cli.IntFlag {
 func TGRateLimitRPSFlag() *cli.IntFlag {
 	return &cli.IntFlag{
 		Name:    TGRateLimitRPS,
-		Value:   0, // 0 → use messages.DefaultRateLimitRPS at provider construction
-		Usage:   "Requests-per-second ceiling for history-fetching calls to Telegram. 0 uses the safe default. Raise with care: exceeding Telegram's FLOOD_WAIT thresholds will pause all tools.",
+		Value:   DefaultRateLimitRPS,
+		Usage:   "Requests-per-second ceiling for history-fetching calls to Telegram. Raise with care: exceeding Telegram's FLOOD_WAIT thresholds will pause all tools.",
 		Sources: cli.EnvVars("MCP_TELEGRAM_RATE_LIMIT_RPS"),
+		Action:  requirePositive(TGRateLimitRPS),
 	}
 }
 
@@ -191,9 +221,10 @@ func PinnedRefreshSecsFlag() *cli.IntFlag {
 func FloodWaitMaxSecsFlag() *cli.IntFlag {
 	return &cli.IntFlag{
 		Name:    FloodWaitMaxSecs,
-		Value:   int(tgclient.DefaultFloodWaitMaxWait / time.Second),
+		Value:   DefaultFloodWaitMaxSeconds,
 		Usage:   "Maximum seconds to wait out a Telegram FLOOD_WAIT before failing fast with a retry-after hint. Keep it below your MCP client's tool-call timeout (Claude Desktop cancels at ~240s) — waiting longer just makes the client time out instead. Raise only for headless/automation runs with no such timeout.",
 		Sources: cli.EnvVars("MCP_TELEGRAM_FLOOD_WAIT_MAX_SECONDS"),
+		Action:  requirePositive(FloodWaitMaxSecs),
 	}
 }
 
@@ -280,12 +311,6 @@ func AuthTrustedProxyHopsFlag() *cli.IntFlag {
 		Name:    AuthTrustedProxyHops,
 		Usage:   "Number of trusted reverse-proxy hops. Zero ignores forwarding headers.",
 		Sources: cli.EnvVars("MCP_AUTH_TRUSTED_PROXY_HOPS"),
-		Action: func(_ context.Context, _ *cli.Command, value int) error {
-			if value < 0 || value > 16 {
-				return fmt.Errorf("--%s must be between 0 and 16", AuthTrustedProxyHops)
-			}
-			return nil
-		},
 	}
 }
 

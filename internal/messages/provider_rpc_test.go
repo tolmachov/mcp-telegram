@@ -244,7 +244,7 @@ func TestSearchGlobalAndForumTopicsBuildTelegramRequests(t *testing.T) {
 }
 
 func TestProviderPublicValidation(t *testing.T) {
-	p := NewProviderWithRate(nil, DefaultRateLimitRPS)
+	p := NewProviderWithRate(nil, 1)
 	_, err := p.Search(t.Context(), 1, SearchOptions{})
 	assert.ErrorContains(t, err, "search query is required")
 	_, err = p.Search(t.Context(), 1, SearchOptions{
@@ -259,10 +259,6 @@ func TestProviderPublicValidation(t *testing.T) {
 	assert.ErrorContains(t, err, "date window is empty")
 	_, err = p.FetchReplies(t.Context(), 1, 0, FetchOptions{})
 	assert.ErrorContains(t, err, "must be positive")
-
-	// Non-positive configured rates are normalized rather than constructing a
-	// limiter that can never make progress.
-	assert.NotNil(t, NewProviderWithRate(nil, 0).limiter)
 }
 
 func TestFetchUnreadUsesDialogReadBoundary(t *testing.T) {

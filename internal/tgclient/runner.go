@@ -59,7 +59,7 @@ type Running struct {
 // The not-logged-in condition is reported as ErrSessionUnauthorized so
 // callers can distinguish "user must re-login" from transport failures.
 func StartClient(ctx context.Context, cfg *Config, storage session.Storage, onFloodWait FloodWaitCallback) (*Running, error) {
-	waiter := floodwait.NewWaiter().WithMaxWait(cfg.EffectiveFloodWaitMaxWait())
+	waiter := floodwait.NewWaiter().WithMaxWait(cfg.FloodWaitMaxWait)
 	if onFloodWait != nil {
 		waiter = waiter.WithCallback(func(ctx context.Context, wait floodwait.FloodWait) {
 			onFloodWait(ctx, wait.Duration)

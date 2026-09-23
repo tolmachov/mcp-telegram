@@ -168,17 +168,6 @@ func TestNewTransportValidation(t *testing.T) {
 		}
 	}
 
-	t.Run("empty defaults to stdio", func(t *testing.T) {
-		opts := base()
-		srv, err := New(opts)
-		if err != nil {
-			t.Fatalf("New: %v", err)
-		}
-		if srv.transport != TransportStdio {
-			t.Errorf("transport = %q, want %q", srv.transport, TransportStdio)
-		}
-	})
-
 	t.Run("http requires addr", func(t *testing.T) {
 		opts := base()
 		opts.Transport = TransportHTTP

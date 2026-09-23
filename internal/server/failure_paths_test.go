@@ -60,8 +60,8 @@ func TestAssemblyStartupPreservesUnavailableSessions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &assemblyLoadFailure{Store: sessionstoretest.NewMemory(), loadErr: tc.loadErr, deleteErr: tc.deleteErr}
 			s := testServer(t)
-			s.tgConfig = &tgclient.Config{APIID: 1, APIHash: "test"}
-			s.sessionStore = store
+			s.opts.Config = &tgclient.Config{APIID: 1, APIHash: "test"}
+			s.opts.SessionStore = store
 			got, err := s.userAssemblyBuilder()(t.Context(), &authsrv.UserIdentity{ID: 42, SessionID: "target"})
 			require.ErrorIs(t, err, tc.loadErr)
 			assert.Nil(t, got.Handler)
@@ -96,8 +96,8 @@ func TestAssemblyStartupClassifiesTelegramErrors(t *testing.T) {
 			// the sentinel-only tests, these errors have gotd's native types.
 			store := &assemblyLoadFailure{Store: sessionstoretest.NewMemory(), loadErr: fmt.Errorf("startup: %w", tc.err)}
 			s := testServer(t)
-			s.tgConfig = &tgclient.Config{APIID: 1, APIHash: "test"}
-			s.sessionStore = store
+			s.opts.Config = &tgclient.Config{APIID: 1, APIHash: "test"}
+			s.opts.SessionStore = store
 			pool := newUserPool(t.Context(), s.userAssemblyBuilder(), "Bearer", s.logger)
 			t.Cleanup(func() { _ = pool.Close() })
 			rec := httptest.NewRecorder()

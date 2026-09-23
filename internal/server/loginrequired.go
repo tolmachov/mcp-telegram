@@ -127,7 +127,7 @@ type LoginRequiredStatus struct {
 // diagnosis in front of both the user (server/tool list) and the model
 // (instructions), which is the only channel a stdio server actually has.
 func (s *Server) runLoginRequired(ctx context.Context, reason string) error {
-	srv := mcp.NewServer(&mcp.Implementation{Name: "mcp-telegram", Version: s.version}, &mcp.ServerOptions{
+	srv := mcp.NewServer(&mcp.Implementation{Name: "mcp-telegram", Version: s.opts.Version}, &mcp.ServerOptions{
 		Instructions: loginRequiredInstructions(reason),
 		Logger:       s.logger,
 	})
@@ -162,7 +162,7 @@ func (s *Server) loginRequiredHandler(reason string) func(context.Context, *mcp.
 		status := &LoginRequiredStatus{}
 
 		switch {
-		case s.tgConfig.APIID == 0 || s.tgConfig.APIHash == "":
+		case s.opts.Config.APIID == 0 || s.opts.Config.APIHash == "":
 			// tgConfig is frozen at process start, so this verdict cannot
 			// change while we run — say so, or the model will loop on a tool
 			// that keeps handing back the same answer after the user has
@@ -247,7 +247,7 @@ func (s *Server) authProbe(ctx context.Context) (account string, authorized bool
 	s.probeMu.Lock()
 	defer s.probeMu.Unlock()
 
-	client, waiter, err := tgclient.CreateClient(s.tgConfig, s.floodWaitLogger())
+	client, waiter, err := tgclient.CreateClient(s.opts.Config, s.floodWaitLogger())
 	if err != nil {
 		return "", false, fmt.Errorf("constructing Telegram client: %w", err)
 	}

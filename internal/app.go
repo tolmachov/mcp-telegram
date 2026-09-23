@@ -25,11 +25,15 @@ var Version = "dev"
 
 const serviceName = "mcp-telegram"
 
-// requireCredentials builds a Telegram Config from the shared api-id/api-hash
-// flags and fails if either is unset. login and logout both call it: unlike
-// `run`, they are interactive and must report missing credentials directly
-// instead of deferring to a JSON-RPC init error.
-func requireCredentials(cmd *cli.Command) (*tgclient.Config, error) {
+// errMissingCredentials is what login and logout report when the API
+// credentials are unset. Unlike `run`, they are interactive and must report it
+// directly instead of deferring to the MCP peer (see Server.Run).
+var errMissingCredentials = fmt.Errorf("%s and %s are required (set via env, flags, or 'config set')", flags.EnvTelegramAPIID, flags.EnvTelegramAPIHash)
+
+// resolveCredentials builds the Telegram client Config for cmd: the API ID and
+// hash from their flags or the secure config store, and the flood-wait ceiling
+// from its flag. Unset credentials are left zero for the caller to judge.
+func resolveCredentials(cmd *cli.Command) (*tgclient.Config, error) {
 	resolver, err := config.NewResolver(cmd)
 	if err != nil {
 		return nil, err
@@ -42,14 +46,11 @@ func requireCredentials(cmd *cli.Command) (*tgclient.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg := &tgclient.Config{
-		APIID:   apiID,
-		APIHash: apiHash,
-	}
-	if cfg.APIID == 0 || cfg.APIHash == "" {
-		return nil, fmt.Errorf("%s and %s are required (set via env, flags, or 'config set')", flags.EnvTelegramAPIID, flags.EnvTelegramAPIHash)
-	}
-	return cfg, nil
+	return &tgclient.Config{
+		APIID:            apiID,
+		APIHash:          apiHash,
+		FloodWaitMaxWait: time.Duration(cmd.Int(flags.FloodWaitMaxSecs)) * time.Second,
+	}, nil
 }
 
 // buildAuthOptions assembles the mandatory OAuth configuration for HTTP.
@@ -149,15 +150,11 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					// process here would just look like "Server disconnected".
 					// login/logout still pre-flight-validate because they are
 					// interactive commands without an MCP peer to report to.
+					cfg, err := resolveCredentials(cmd)
+					if err != nil {
+						return err
+					}
 					resolver, err := config.NewResolver(cmd)
-					if err != nil {
-						return err
-					}
-					apiID, err := resolver.Int(flags.APIID, flags.EnvTelegramAPIID)
-					if err != nil {
-						return err
-					}
-					apiHash, err := resolver.String(flags.APIHash, flags.EnvTelegramAPIHash)
 					if err != nil {
 						return err
 					}
@@ -174,11 +171,6 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 						if err != nil {
 							return err
 						}
-					}
-					cfg := &tgclient.Config{
-						APIID:            apiID,
-						APIHash:          apiHash,
-						FloodWaitMaxWait: time.Duration(cmd.Int(flags.FloodWaitMaxSecs)) * time.Second,
 					}
 					transport := cmd.String(flags.Transport)
 					variant := cmd.String(flags.Variant)
@@ -254,14 +246,16 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					flags.APIIDFlag(),
 					flags.APIHashFlag(),
 					flags.PhoneFlag(),
+					flags.FloodWaitMaxSecsFlag(),
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
-					// Phone is enforced by PhoneFlag(Required); credentials are
-					// pre-flight-validated here because login is interactive and
-					// has no MCP peer to report an init error to.
-					cfg, err := requireCredentials(cmd)
+					// Phone is enforced by PhoneFlag(Required).
+					cfg, err := resolveCredentials(cmd)
 					if err != nil {
 						return err
+					}
+					if cfg.APIID == 0 || cfg.APIHash == "" {
+						return errMissingCredentials
 					}
 					return tgclient.Login(ctx, cfg, cmd.String(flags.Phone), cmd.Root().Reader, cmd.Root().Writer)
 				},
@@ -272,11 +266,15 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 				Flags: []cli.Flag{
 					flags.APIIDFlag(),
 					flags.APIHashFlag(),
+					flags.FloodWaitMaxSecsFlag(),
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
-					cfg, err := requireCredentials(cmd)
+					cfg, err := resolveCredentials(cmd)
 					if err != nil {
 						return err
+					}
+					if cfg.APIID == 0 || cfg.APIHash == "" {
+						return errMissingCredentials
 					}
 					return tgclient.Logout(ctx, cfg, cmd.Root().Writer)
 				},

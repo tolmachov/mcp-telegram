@@ -115,11 +115,12 @@ func TestRunHTTPWithAuthWiring(t *testing.T) {
 func TestNewAuthValidation(t *testing.T) {
 	base := func() Options {
 		return Options{
-			Config: &tgclient.Config{APIID: 1, APIHash: "hash"},
-			Auth:   &authsrv.Config{},
-			Stdin:  strings.NewReader(""),
-			Stdout: io.Discard,
-			ErrOut: io.Discard,
+			Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
+			Auth:      &authsrv.Config{},
+			Stdin:     strings.NewReader(""),
+			Stdout:    io.Discard,
+			ErrOut:    io.Discard,
+			Transport: TransportStdio,
 		}
 	}
 

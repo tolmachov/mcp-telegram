@@ -292,7 +292,7 @@ func TestProcessGlobalHistoryNotModified(t *testing.T) {
 // is after MaxDate without making any Telegram API call (nil client is safe
 // because the guard fires before ResolvePeer).
 func TestSearchDateInversion(t *testing.T) {
-	p := NewProviderWithRate(nil, DefaultRateLimitRPS)
+	p := NewProviderWithRate(nil, 1)
 	later := time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC)
 	earlier := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 
@@ -308,7 +308,7 @@ func TestSearchDateInversion(t *testing.T) {
 
 // TestSearchGlobalDateInversion verifies the same guard in SearchGlobal.
 func TestSearchGlobalDateInversion(t *testing.T) {
-	p := NewProviderWithRate(nil, DefaultRateLimitRPS)
+	p := NewProviderWithRate(nil, 1)
 	later := time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC)
 	earlier := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 

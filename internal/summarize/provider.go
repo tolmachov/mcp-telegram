@@ -96,9 +96,6 @@ func redactedPresence(s string) string {
 	return "<redacted>"
 }
 
-// DefaultBatchTokens is the default number of tokens per batch.
-const DefaultBatchTokens = 8000
-
 // errBodySnippetMax bounds how many bytes of an HTTP error response body are
 // included in returned errors. Provider APIs sometimes return large HTML
 // error pages (proxy 5xx, nginx defaults) — without a cap those would bloat

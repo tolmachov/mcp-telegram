@@ -65,9 +65,6 @@ type Result struct {
 
 // NewSummarizer creates a new Summarizer.
 func NewSummarizer(provider Provider, msgProvider *messages.Provider, batchTokens int) *Summarizer {
-	if batchTokens <= 0 {
-		batchTokens = DefaultBatchTokens
-	}
 	return &Summarizer{
 		provider:    provider,
 		msgProvider: msgProvider,

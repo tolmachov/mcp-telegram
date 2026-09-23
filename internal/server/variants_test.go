@@ -76,8 +76,8 @@ func listToolNames(t *testing.T, srv *mcp.Server) map[string]string {
 func buildTestHandlers(t *testing.T) (full, research []tools.Handler) {
 	t.Helper()
 	api := tg.NewClient(noopInvoker{})
-	s := &Server{summarizeCfg: summarize.Config{}, mediaMaxBytes: 1024}
-	msgProvider := messages.NewProviderWithRate(api, 0)
+	s := &Server{opts: Options{SummarizeCfg: summarize.Config{BatchTokens: 8000}, MediaMaxBytes: 1024}}
+	msgProvider := messages.NewProviderWithRate(api, 100_000)
 	chatsCache := tools.NewChatsCache(api)
 	return s.buildHandlers(api, msgProvider, chatsCache)
 }
@@ -166,14 +166,14 @@ func TestBuildVariantsServerMetadata(t *testing.T) {
 
 func TestNewRejectsInvalidVariant(t *testing.T) {
 	cfg := &tgclient.Config{APIID: 1, APIHash: "x"}
-	_, err := New(Options{Config: cfg, Variant: "bogus"})
+	_, err := New(Options{Config: cfg, Variant: "bogus", Transport: TransportStdio, ErrOut: io.Discard})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown variant")
 	// The error must enumerate the accepted values (derived from variantDefs).
 	assert.Contains(t, err.Error(), "full, compact, research")
 
 	for _, v := range []string{"", "full", "compact", "research"} {
-		_, err := New(Options{Config: cfg, Variant: v})
+		_, err := New(Options{Config: cfg, Variant: v, Transport: TransportStdio, ErrOut: io.Discard})
 		require.NoErrorf(t, err, "variant %q should be accepted", v)
 	}
 }

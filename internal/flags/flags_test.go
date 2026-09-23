@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/urfave/cli/v3"
 )
 
 func TestAllFlagConstructors(t *testing.T) {
@@ -46,10 +47,10 @@ func TestFlagValidationActions(t *testing.T) {
 	assert.NoError(t, users.Action(ctx, nil, []string{"123"}))
 	assert.Error(t, users.Action(ctx, nil, []string{"*", "123"}))
 
-	hops := AuthTrustedProxyHopsFlag()
-	require.NotNil(t, hops.Action)
-	assert.NoError(t, hops.Action(ctx, nil, 0))
-	assert.NoError(t, hops.Action(ctx, nil, 16))
-	assert.Error(t, hops.Action(ctx, nil, -1))
-	assert.Error(t, hops.Action(ctx, nil, 17))
+	for _, flag := range []*cli.IntFlag{SummarizeBatchTokensFlag(), TGRateLimitRPSFlag(), FloodWaitMaxSecsFlag()} {
+		require.NotNil(t, flag.Action, flag.Name)
+		assert.NoError(t, flag.Action(ctx, nil, flag.Value), flag.Name)
+		assert.Error(t, flag.Action(ctx, nil, 0), flag.Name)
+		assert.Error(t, flag.Action(ctx, nil, -1), flag.Name)
+	}
 }

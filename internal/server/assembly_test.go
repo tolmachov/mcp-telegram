@@ -82,21 +82,22 @@ func TestStreamableHTTPOptionsCarrySessionTimeout(t *testing.T) {
 
 func TestServerAuxiliaryLifecycleBranches(t *testing.T) {
 	srv, err := New(Options{
-		Config:  &tgclient.Config{APIID: 1, APIHash: "hash", FloodWaitMaxWait: 2 * time.Second},
-		Version: "test",
-		Stdin:   strings.NewReader(""),
-		Stdout:  io.Discard,
-		ErrOut:  io.Discard,
+		Config:    &tgclient.Config{APIID: 1, APIHash: "hash", FloodWaitMaxWait: 2 * time.Second},
+		Version:   "test",
+		Stdin:     strings.NewReader(""),
+		Stdout:    io.Discard,
+		ErrOut:    io.Discard,
+		Transport: TransportStdio,
 	})
 	require.NoError(t, err)
 	logFloodWait := srv.floodWaitLogger()
 	logFloodWait(t.Context(), time.Second)
 	logFloodWait(t.Context(), 3*time.Second)
 
-	_, err = (&Server{tgConfig: &tgclient.Config{}}).startLogin(t.Context())
+	_, err = (&Server{opts: Options{Config: &tgclient.Config{}}}).startLogin(t.Context())
 	require.Error(t, err)
 
-	srv.variant = "unknown"
+	srv.opts.Variant = "unknown"
 	_, err = srv.buildAssembly(disconnectedTelegramClient())
 	require.ErrorContains(t, err, "variant")
 
@@ -119,7 +120,7 @@ func TestLoginRequiredSmallHelpers(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	assert.ErrorIs(t, cause(ctx), context.Canceled)
-	blocked := &Server{transport: TransportHTTP}
+	blocked := &Server{opts: Options{Transport: TransportHTTP}}
 	assert.ErrorContains(t, blocked.startBlocked(t.Context(), "blocked reason"), "blocked reason")
 }
 

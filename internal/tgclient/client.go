@@ -17,25 +17,15 @@ import (
 	"golang.org/x/term"
 )
 
-// DefaultFloodWaitMaxWait is the default ceiling for auto-waiting out a
-// Telegram FLOOD_WAIT. It MUST stay well below the MCP client's tool-call
-// timeout (Claude Desktop cancels at ~240s): auto-waiting longer is pointless
-// because the client cancels the call first, turning a recoverable rate limit
-// into a generic "no result received" timeout. So short, transient waits are
-// absorbed transparently here, while anything longer fails fast: write tools
-// render it as an actionable retry-after message (see floodWaitResult) and read
-// tools surface the raw error, either beating the client's hang-until-timeout.
-const DefaultFloodWaitMaxWait = 60 * time.Second
-
 // Config holds Telegram API credentials and client tuning.
 type Config struct {
 	APIID   int
 	APIHash string
 	// FloodWaitMaxWait caps how long the flood-wait middleware will sleep on a
-	// single FLOOD_WAIT before giving up and returning the error. Zero uses
-	// DefaultFloodWaitMaxWait. Raising it lets the client wait out longer
-	// account-level limits at the cost of blocking the in-flight call; lowering
-	// it fails faster.
+	// single FLOOD_WAIT before giving up and returning the error; the default
+	// lives on --flood-wait-max-seconds. Raising it lets the client wait out
+	// longer account-level limits at the cost of blocking the in-flight call;
+	// lowering it fails faster.
 	FloodWaitMaxWait time.Duration
 }
 
@@ -44,18 +34,6 @@ func (c Config) String() string {
 }
 
 func (c Config) GoString() string { return c.String() }
-
-// EffectiveFloodWaitMaxWait resolves the configured flood-wait ceiling,
-// substituting DefaultFloodWaitMaxWait for a zero/negative value. It is the
-// single source of truth for that fallback: both the middleware (CreateClient)
-// and the log that explains the absorbed-vs-surfaced decision (server.Run) call
-// it, so the threshold they act on can never drift apart.
-func (c *Config) EffectiveFloodWaitMaxWait() time.Duration {
-	if c.FloodWaitMaxWait <= 0 {
-		return DefaultFloodWaitMaxWait
-	}
-	return c.FloodWaitMaxWait
-}
 
 // userAuthenticator implements auth.UserAuthenticator. Every line-based read
 // goes through the one shared lines reader: a fresh bufio.Reader per prompt
@@ -131,7 +109,7 @@ func CreateClient(cfg *Config, onFloodWait FloodWaitCallback) (*telegram.Client,
 	if err != nil {
 		return nil, nil, err
 	}
-	waiter := floodwait.NewWaiter().WithMaxWait(cfg.EffectiveFloodWaitMaxWait())
+	waiter := floodwait.NewWaiter().WithMaxWait(cfg.FloodWaitMaxWait)
 	if onFloodWait != nil {
 		waiter = waiter.WithCallback(func(ctx context.Context, wait floodwait.FloodWait) {
 			onFloodWait(ctx, wait.Duration)

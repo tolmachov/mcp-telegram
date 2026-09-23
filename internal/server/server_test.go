@@ -23,17 +23,6 @@ func TestNewRequiresConfig(t *testing.T) {
 	assert.Contains(t, err.Error(), "Config is required")
 }
 
-func TestNewAppliesDefaultStdio(t *testing.T) {
-	srv, err := New(Options{
-		Config:  &tgclient.Config{APIID: 1, APIHash: "hash"},
-		Version: "test",
-	})
-	require.NoError(t, err)
-	assert.NotNil(t, srv.stdin)
-	assert.NotNil(t, srv.stdout)
-	assert.NotNil(t, srv.errOut)
-}
-
 // connectViaRun drives the full Server.Run entry point, so the tests that use
 // it also pin that Run routes an unusable config into login-required mode.
 // Only safe with a config Run cannot try to connect with — anything else
@@ -65,11 +54,12 @@ func connectServer(t *testing.T, cfg *tgclient.Config, tweak func(*Server), star
 	serverR, clientW := io.Pipe() // client → server
 
 	srv, err := New(Options{
-		Config:  cfg,
-		Version: "test",
-		Stdin:   serverR,
-		Stdout:  serverW,
-		ErrOut:  &bytes.Buffer{},
+		Config:    cfg,
+		Version:   "test",
+		Stdin:     serverR,
+		Stdout:    serverW,
+		ErrOut:    &bytes.Buffer{},
+		Transport: TransportStdio,
 	})
 	require.NoError(t, err)
 	if tweak != nil {
@@ -338,11 +328,12 @@ func TestRunLoginRequiredExitsCleanlyOnContextCancel(t *testing.T) {
 func newPipeServer(t *testing.T, stdin io.Reader) *Server {
 	t.Helper()
 	srv, err := New(Options{
-		Config:  &tgclient.Config{},
-		Version: "test",
-		Stdin:   stdin,
-		Stdout:  &nopWriteCloser{Writer: io.Discard},
-		ErrOut:  &bytes.Buffer{},
+		Config:    &tgclient.Config{},
+		Version:   "test",
+		Stdin:     stdin,
+		Stdout:    &nopWriteCloser{Writer: io.Discard},
+		ErrOut:    &bytes.Buffer{},
+		Transport: TransportStdio,
 	})
 	require.NoError(t, err)
 	return srv
@@ -447,11 +438,12 @@ func TestFinishRunServesLoginRequiredOverStdio(t *testing.T) {
 	serverR, clientW := io.Pipe()
 
 	srv, err := New(Options{
-		Config:  &tgclient.Config{APIID: 1, APIHash: "hash"},
-		Version: "test",
-		Stdin:   serverR,
-		Stdout:  serverW,
-		ErrOut:  &bytes.Buffer{},
+		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
+		Version:   "test",
+		Stdin:     serverR,
+		Stdout:    serverW,
+		ErrOut:    &bytes.Buffer{},
+		Transport: TransportStdio,
 	})
 	require.NoError(t, err)
 	srv.authProbeFn = staticProbe("", false, nil)

@@ -41,8 +41,8 @@ func (nopWriteCloser) Close() error { return nil }
 // injected stdin/stdout (see the New doc comment for why they are injectable).
 func (s *Server) stdioTransport() *mcp.IOTransport {
 	return &mcp.IOTransport{
-		Reader: io.NopCloser(s.stdin),
-		Writer: nopWriteCloser{s.stdout},
+		Reader: io.NopCloser(s.opts.Stdin),
+		Writer: nopWriteCloser{s.opts.Stdout},
 	}
 }
 
@@ -58,22 +58,21 @@ const missingCredentialsMessage = "mcp-telegram is not configured: MCP_TELEGRAM_
 
 const notLoggedInMessage = "mcp-telegram is not logged in to Telegram — the stored session is missing, expired, or was revoked from Telegram's Devices/Active sessions list. Run `mcp-telegram login --phone <+countrycode…>` in a terminal to authenticate, then " + reconnectHint
 
-// Options configures New. Only Config is required; Version is recommended
-// (propagated to mcp.Implementation.Version). Stdin/Stdout/ErrOut default
-// to os.* when nil, mirroring the official SDK's StdioTransport.
+// Options configures New. Every field is passed through from the resolved
+// CLI flags; New only validates the combination.
 type Options struct {
 	Config         *tgclient.Config
 	Version        string
 	AllowedPaths   []string
 	SummarizeCfg   summarize.Config
 	MediaMaxBytes  int
-	TGRateLimitRPS int           // 0 → use messages.DefaultRateLimitRPS
+	TGRateLimitRPS int
 	PinnedRefresh  time.Duration // 0 → disable pinned-chat background watcher
 	Variant        string        // "" → expose all SEP-2053 variants; else pin one (full|compact|research)
-	Transport      string        // "" or "stdio" → stdio; "http" → streamable HTTP on HTTPAddr
+	Transport      string        // "stdio", or "http" → streamable HTTP on HTTPAddr
 	HTTPAddr       string        // listen address for Transport == "http" (e.g. ":8080")
 	LogFormat      string        // "json" | "text"; "" → json for http, text for stdio
-	LogLevel       string        // "debug" | "info" | "warn" | "error"; "" → info
+	LogLevel       string        // "debug" | "info" | "warn" | "error"
 	// Auth enables the embedded OAuth authorization server with per-user
 	// Telegram sessions. It and SessionStore (which holds those sessions) are
 	// required with the http transport and rejected with stdio.
@@ -85,22 +84,8 @@ type Options struct {
 }
 
 type Server struct {
-	logger         *slog.Logger
-	version        string
-	tgConfig       *tgclient.Config
-	allowedPaths   []string
-	summarizeCfg   summarize.Config
-	mediaMaxBytes  int
-	tgRateLimitRPS int
-	pinnedRefresh  time.Duration
-	variant        string
-	transport      string
-	httpAddr       string
-	authCfg        *authsrv.Config
-	sessionStore   sessionstore.Store
-	stdin          io.Reader
-	stdout         io.Writer
-	errOut         io.Writer
+	logger *slog.Logger
+	opts   Options
 
 	// authProbeFn is the live authorization re-check the login-required tool
 	// performs, injectable so the tool's states can be exercised without a
@@ -127,8 +112,7 @@ func New(opts Options) (*Server, error) {
 		return nil, fmt.Errorf("server.New: unknown variant %q; expected one of: %s (or empty for all)", opts.Variant, strings.Join(variantIDs(), ", "))
 	}
 	switch opts.Transport {
-	case "", TransportStdio:
-		opts.Transport = TransportStdio
+	case TransportStdio:
 	case TransportHTTP:
 		if opts.HTTPAddr == "" {
 			return nil, fmt.Errorf("server.New: Options.HTTPAddr is required for the http transport")
@@ -141,15 +125,6 @@ func New(opts Options) (*Server, error) {
 	}
 	if opts.Auth != nil && opts.Transport != TransportHTTP {
 		return nil, fmt.Errorf("server.New: Options.Auth requires the http transport")
-	}
-	if opts.Stdin == nil {
-		opts.Stdin = os.Stdin
-	}
-	if opts.Stdout == nil {
-		opts.Stdout = os.Stdout
-	}
-	if opts.ErrOut == nil {
-		opts.ErrOut = os.Stderr
 	}
 	level, err := logging.ParseLevel(opts.LogLevel)
 	if err != nil {
@@ -167,24 +142,7 @@ func New(opts Options) (*Server, error) {
 	logger := slog.New(logging.NewHandler(opts.ErrOut, logFormat, level, "mcp-telegram", opts.Version)).
 		With("component", "mcp-telegram")
 
-	srv := &Server{
-		logger:         logger,
-		version:        opts.Version,
-		tgConfig:       opts.Config,
-		allowedPaths:   opts.AllowedPaths,
-		summarizeCfg:   opts.SummarizeCfg,
-		mediaMaxBytes:  opts.MediaMaxBytes,
-		tgRateLimitRPS: opts.TGRateLimitRPS,
-		pinnedRefresh:  opts.PinnedRefresh,
-		variant:        opts.Variant,
-		transport:      opts.Transport,
-		httpAddr:       opts.HTTPAddr,
-		authCfg:        opts.Auth,
-		sessionStore:   opts.SessionStore,
-		stdin:          opts.Stdin,
-		stdout:         opts.Stdout,
-		errOut:         opts.ErrOut,
-	}
+	srv := &Server{logger: logger, opts: opts}
 	srv.authProbeFn = srv.authProbe
 	return srv, nil
 }
@@ -201,18 +159,18 @@ func New(opts Options) (*Server, error) {
 // per-user clients are connected lazily by the pool; with no MCP peer to tell,
 // it fails the process.
 func (s *Server) Run(ctx context.Context) error {
-	if s.tgConfig.APIID == 0 || s.tgConfig.APIHash == "" {
+	if s.opts.Config.APIID == 0 || s.opts.Config.APIHash == "" {
 		s.logger.Warn("no Telegram access", "reason", "missing Telegram API credentials")
 		return s.startBlocked(ctx, missingCredentialsMessage)
 	}
 
 	// HTTP has no ambient single-account client: each user's client is
 	// connected lazily by the pool on their stored session.
-	if s.transport == TransportHTTP {
+	if s.opts.Transport == TransportHTTP {
 		return s.runHTTPWithAuth(ctx)
 	}
 
-	client, waiter, err := tgclient.CreateClient(s.tgConfig, s.floodWaitLogger())
+	client, waiter, err := tgclient.CreateClient(s.opts.Config, s.floodWaitLogger())
 	if err != nil {
 		msg := fmt.Sprintf("mcp-telegram: failed to construct Telegram client: %v. Verify MCP_TELEGRAM_API_ID/MCP_TELEGRAM_API_HASH and the session file; `mcp-telegram logout` followed by `mcp-telegram login` often recovers a corrupt session.", err)
 		s.logger.Error("no Telegram access", "reason", "telegram client construction failed", "err", err)
@@ -295,7 +253,7 @@ func (s *Server) finishRun(ctx context.Context, err error, served bool) error {
 // retry-after error (via floodWaitResult); read tools surface the raw
 // wrapped error.
 func (s *Server) floodWaitLogger() tgclient.FloodWaitCallback {
-	floodMaxWait := s.tgConfig.EffectiveFloodWaitMaxWait()
+	floodMaxWait := s.opts.Config.FloodWaitMaxWait
 	return func(_ context.Context, d time.Duration) {
 		if d > floodMaxWait {
 			s.logger.Warn("telegram flood-wait exceeds max; failing fast",
@@ -330,7 +288,7 @@ type assembly struct {
 // buildAssembly constructs handlers, resources, prompts, and the MCP
 // server(s) for one Telegram client.
 func (s *Server) buildAssembly(client *telegram.Client) (*assembly, error) {
-	impl := &mcp.Implementation{Name: "mcp-telegram", Version: s.version}
+	impl := &mcp.Implementation{Name: "mcp-telegram", Version: s.opts.Version}
 	serverOpts := &mcp.ServerOptions{
 		Instructions: happyInstructions,
 		Logger:       s.logger,
@@ -339,11 +297,11 @@ func (s *Server) buildAssembly(client *telegram.Client) (*assembly, error) {
 		CompletionHandler: completion.Handler(client.API()),
 	}
 
-	// The RPS ceiling is configurable (0 → messages.DefaultRateLimitRPS) so
+	// The RPS ceiling is configurable (--tg-rate-limit-rps) so
 	// operators can loosen it when tools bottleneck on the shared limiter.
 	// Raising it too high will trip Telegram's FLOOD_WAIT which the tgclient
 	// waiter wrapper reports via onFloodWait.
-	msgProvider := messages.NewProviderWithRate(client.API(), s.tgRateLimitRPS)
+	msgProvider := messages.NewProviderWithRate(client.API(), s.opts.TGRateLimitRPS)
 
 	// One chat-list snapshot shared by GetChats and SearchChats so a search
 	// reuses an already-loaded listing instead of re-paginating every dialog.
@@ -362,16 +320,16 @@ func (s *Server) buildAssembly(client *telegram.Client) (*assembly, error) {
 		prompts.Register(srv)
 	}
 
-	if s.variant == "" {
+	if s.opts.Variant == "" {
 		vs, inners := buildVariantsServer(impl, serverOpts, fullHandlers, researchHandlers, wire, s.logger)
 		return &assembly{variants: vs, pinnedServers: inners, msgProvider: msgProvider}, nil
 	}
-	d, ok := defForVariant(s.variant)
+	d, ok := defForVariant(s.opts.Variant)
 	if !ok {
 		// Unreachable: New rejects unknown non-empty variants, and Server is
 		// only constructible through New. Fail loudly rather than silently
 		// falling back to the zero-value mode if that invariant is ever broken.
-		return nil, fmt.Errorf("buildAssembly: variant %q not found in table (should have been rejected by New)", s.variant)
+		return nil, fmt.Errorf("buildAssembly: variant %q not found in table (should have been rejected by New)", s.opts.Variant)
 	}
 	srv := newInnerForMode(impl, serverOpts, fullHandlers, researchHandlers, d.mode, wire, s.logger)
 	return &assembly{single: srv, pinnedServers: []*mcp.Server{srv}, msgProvider: msgProvider}, nil
@@ -415,7 +373,7 @@ func (s *Server) runHappy(ctx context.Context, client *telegram.Client) error {
 	// hit the 5s abandon timeout below.
 	watchCtx, cancelWatch := context.WithCancel(ctx)
 	pinnedProvider := resources.NewPinnedChatsProvider(client.API(), msgProvider, s.logger, pinnedServers...)
-	pinnedDone := pinnedProvider.WatchInBackground(watchCtx, s.pinnedRefresh)
+	pinnedDone := pinnedProvider.WatchInBackground(watchCtx, s.opts.PinnedRefresh)
 
 	runErr := run()
 	cancelWatch()
@@ -430,7 +388,7 @@ func (s *Server) runHappy(ctx context.Context, client *telegram.Client) error {
 	select {
 	case <-pinnedDone:
 	case <-time.After(5 * time.Second):
-		s.logger.Error("pinned-chat watcher did not exit in 5s; abandoning", "pinned_refresh", s.pinnedRefresh)
+		s.logger.Error("pinned-chat watcher did not exit in 5s; abandoning", "pinned_refresh", s.opts.PinnedRefresh)
 	}
 	if runErr != nil {
 		return fmt.Errorf("running MCP server: %w", runErr)
@@ -461,8 +419,8 @@ func (s *Server) buildHandlers(api *tg.Client, msgProvider *messages.Provider, c
 		tools.NewGetForumTopicsHandler(msgProvider),
 		tools.NewUsernameResolveHandler(api),
 		tools.NewMessageLinkResolveHandler(api),
-		tools.NewChatSummarizeHandler(msgProvider, s.summarizeCfg),
-		tools.NewMediaGetHandler(api, s.mediaMaxBytes),
+		tools.NewChatSummarizeHandler(msgProvider, s.opts.SummarizeCfg),
+		tools.NewMediaGetHandler(api, s.opts.MediaMaxBytes),
 		tools.NewGetFoldersHandler(api),
 	}
 	mutating := []tools.Handler{
@@ -482,8 +440,8 @@ func (s *Server) buildHandlers(api *tg.Client, msgProvider *messages.Provider, c
 	}
 	full = make([]tools.Handler, 0, len(research)+len(mutating)+1)
 	full = append(full, research...)
-	if s.transport != TransportHTTP {
-		full = append(full, tools.NewMessageBackupHandler(api, msgProvider, s.allowedPaths))
+	if s.opts.Transport != TransportHTTP {
+		full = append(full, tools.NewMessageBackupHandler(api, msgProvider, s.opts.AllowedPaths))
 	}
 	full = append(full, mutating...)
 	return full, research
@@ -505,7 +463,7 @@ func (s *Server) buildHandlers(api *tg.Client, msgProvider *messages.Provider, c
 // and exit — which is also what makes `mcp-telegram run` usable as a manual
 // smoke test.
 func (s *Server) startBlocked(ctx context.Context, message string) error {
-	if s.transport == TransportHTTP || isTTY(s.stdin) {
+	if s.opts.Transport == TransportHTTP || isTTY(s.opts.Stdin) {
 		return errors.New(message)
 	}
 	return s.runLoginRequired(ctx, message)

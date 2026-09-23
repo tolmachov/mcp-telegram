@@ -156,7 +156,7 @@ func TestExtractReplies(t *testing.T) {
 }
 
 func TestExtractMessagesPopulatesReplies(t *testing.T) {
-	p := NewProviderWithRate(nil, DefaultRateLimitRPS)
+	p := NewProviderWithRate(nil, 1)
 
 	withReplies := &tg.Message{ID: 1, Message: "post"}
 	replies := tg.MessageReplies{Comments: true, Replies: 7}
