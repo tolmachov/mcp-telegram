@@ -129,13 +129,17 @@ type Store interface {
 	// live refresh token could reference the session.
 	DeleteRevoked(ctx context.Context, userID tgid.UserID, sid string) error
 
-	// LoadGrant returns family's refresh-grant record and an opaque non-zero
-	// version for StoreGrant; version 0 means no record exists.
-	LoadGrant(ctx context.Context, family string) (grant GrantRecord, version int64, err error)
-	// StoreGrant writes family's record only if the stored version still equals
-	// version (0: only if none exists), and returns ErrGrantConflict otherwise.
-	// The grant policy lives in RedeemCode, RotateGrant and RevokeGrant.
-	StoreGrant(ctx context.Context, family string, grant GrantRecord, version int64) error
+	// RedeemCode atomically creates generation zero of family's refresh grant,
+	// expiring at expiresAt. The family is the authorization code's random id,
+	// so false means the code was already redeemed.
+	RedeemCode(ctx context.Context, family string, expiresAt time.Time) (bool, error)
+	// RotateGrant performs generation expected -> expected+1 at now.
+	// Presenting any other generation (or a revoked family) revokes the family
+	// and returns GrantReplay.
+	RotateGrant(ctx context.Context, family string, expected int64, now time.Time) (GrantRotation, error)
+	// RevokeGrant marks family revoked so none of its refresh tokens rotate
+	// again. A missing family is already dead.
+	RevokeGrant(ctx context.Context, family string) error
 	// SweepAuthState deletes grant records that are expired at now.
 	SweepAuthState(ctx context.Context, now time.Time) error
 
@@ -145,9 +149,13 @@ type Store interface {
 }
 
 // backend is a storage backend (FS, GCS, the test memory store): it keeps
-// ciphertext blobs under ids Encrypted has already validated. The methods
-// mean what they mean on Store; Session takes no key because a backend never
-// decrypts.
+// ciphertext blobs under ids Encrypted has already validated. The session
+// methods mean what they mean on Store; Session takes no key because a backend
+// never decrypts. For grants a backend offers only the compare-and-swap the
+// Store's grant rules are built on: LoadGrant returns family's record and an
+// opaque non-zero version (0: no record), and StoreGrant writes a record only
+// if the stored version still equals version (0: only if none exists),
+// returning ErrGrantConflict otherwise.
 type backend interface {
 	Session(userID tgid.UserID, sid string) session.Storage
 	Exists(ctx context.Context, userID tgid.UserID, sid string) (bool, error)
@@ -216,29 +224,30 @@ func (g GrantRecord) rotate(expected int64) (GrantRecord, GrantRotation) {
 	return g, GrantRotated
 }
 
-// ErrGrantConflict is returned by StoreGrant when the record changed since it
-// was loaded (or already exists, for a create).
+// ErrGrantConflict is returned by a backend's StoreGrant when the record
+// changed since it was loaded (or already exists, for a create).
 var ErrGrantConflict = errors.New("sessionstore: grant changed concurrently")
 
 // grantCASAttempts bounds the load/compare-and-swap retries of one grant update.
 const grantCASAttempts = 4
 
-// RedeemCode atomically creates generation zero for a new OAuth grant. The
-// family is the authorization code's random jti, so an existing record means
-// the code was already redeemed and false is returned.
-func RedeemCode(ctx context.Context, s Store, family string, expiresAt time.Time) (bool, error) {
-	created, err := writeGrant(ctx, s, family, GrantRecord{ExpiresAt: expiresAt}, 0)
+func (s *encryptedStore) RedeemCode(ctx context.Context, family string, expiresAt time.Time) (bool, error) {
+	if !ValidSID(family) {
+		return false, ErrInvalidSID
+	}
+	created, err := writeGrant(ctx, s.inner, family, GrantRecord{ExpiresAt: expiresAt}, 0)
 	if err != nil {
 		return false, fmt.Errorf("creating grant: %w", err)
 	}
 	return created, nil
 }
 
-// RotateGrant performs generation N -> N+1 at now. Presenting any stale
-// generation revokes the family and returns GrantReplay.
-func RotateGrant(ctx context.Context, s Store, family string, expected int64, now time.Time) (GrantRotation, error) {
+func (s *encryptedStore) RotateGrant(ctx context.Context, family string, expected int64, now time.Time) (GrantRotation, error) {
+	if !ValidSID(family) {
+		return GrantMissing, ErrInvalidSID
+	}
 	var result GrantRotation
-	err := updateGrant(ctx, s, family, func(g GrantRecord) (GrantRecord, bool) {
+	err := updateGrant(ctx, s.inner, family, func(g GrantRecord) (GrantRecord, bool) {
 		if g.Expired(now) {
 			result = GrantMissing
 			return g, false
@@ -250,22 +259,26 @@ func RotateGrant(ctx context.Context, s Store, family string, expected int64, no
 		return GrantMissing, nil
 	}
 	if err != nil {
-		return GrantMissing, err
+		return GrantMissing, fmt.Errorf("rotating grant: %w", err)
 	}
 	return result, nil
 }
 
-// RevokeGrant marks family revoked so none of its refresh tokens rotate again.
-// A missing family is already dead.
-func RevokeGrant(ctx context.Context, s Store, family string) error {
-	err := updateGrant(ctx, s, family, func(g GrantRecord) (GrantRecord, bool) {
+func (s *encryptedStore) RevokeGrant(ctx context.Context, family string) error {
+	if !ValidSID(family) {
+		return ErrInvalidSID
+	}
+	err := updateGrant(ctx, s.inner, family, func(g GrantRecord) (GrantRecord, bool) {
 		g.Revoked = true
 		return g, true
 	})
 	if errors.Is(err, errGrantAbsent) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return fmt.Errorf("revoking grant: %w", err)
+	}
+	return nil
 }
 
 var errGrantAbsent = errors.New("sessionstore: grant not found")
@@ -275,9 +288,9 @@ var errGrantAbsent = errors.New("sessionstore: grant not found")
 // there first, in which case it retries on the fresh record. change reports
 // whether anything should be written; its last call is the one whose record
 // was stored.
-func updateGrant(ctx context.Context, s Store, family string, change func(GrantRecord) (GrantRecord, bool)) error {
+func updateGrant(ctx context.Context, b backend, family string, change func(GrantRecord) (GrantRecord, bool)) error {
 	for range grantCASAttempts {
-		grant, version, err := s.LoadGrant(ctx, family)
+		grant, version, err := b.LoadGrant(ctx, family)
 		if err != nil {
 			return fmt.Errorf("loading grant: %w", err)
 		}
@@ -288,7 +301,7 @@ func updateGrant(ctx context.Context, s Store, family string, change func(GrantR
 		if !write {
 			return nil
 		}
-		stored, err := writeGrant(ctx, s, family, next, version)
+		stored, err := writeGrant(ctx, b, family, next, version)
 		if err != nil {
 			return err
 		}
@@ -306,13 +319,13 @@ func updateGrant(ctx context.Context, s Store, family string, change func(GrantR
 // 412, a transport error can follow a committed upload), and finding its own
 // WriteID in the store is what tells that apart from a lost race. When the
 // re-read fails too, the outcome is unknown and the error carries both.
-func writeGrant(ctx context.Context, s Store, family string, grant GrantRecord, version int64) (bool, error) {
+func writeGrant(ctx context.Context, b backend, family string, grant GrantRecord, version int64) (bool, error) {
 	grant.WriteID = rand.Text()
-	err := s.StoreGrant(ctx, family, grant, version)
+	err := b.StoreGrant(ctx, family, grant, version)
 	if err == nil {
 		return true, nil
 	}
-	stored, _, loadErr := s.LoadGrant(ctx, family)
+	stored, _, loadErr := b.LoadGrant(ctx, family)
 	if loadErr != nil {
 		return false, fmt.Errorf("storing grant: outcome unknown, as re-reading it failed too: %w", errors.Join(err, loadErr))
 	}

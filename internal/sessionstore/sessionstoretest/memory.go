@@ -21,13 +21,25 @@ import (
 
 // New returns an empty in-memory store whose blobs are stamped by the wall
 // clock.
-func New(t testing.TB) sessionstore.Store { return NewWithClock(t, time.Now) }
+func New(t testing.TB) sessionstore.Store { return newStore(t, time.Now, nil) }
 
 // NewWithClock returns an empty in-memory store whose blob and tombstone write
 // times (the storage mtime other backends take from the filesystem or bucket)
 // come from now, so List and sweep behaviour can be made deterministic. Grant
 // expiry uses the time the caller passes in, as on every backend.
 func NewWithClock(t testing.TB, now func() time.Time) sessionstore.Store {
+	return newStore(t, now, nil)
+}
+
+// NewWithGrantWriteHook returns an empty in-memory store that calls hook
+// before every backend grant write. A non-nil error from hook fails that
+// write without it landing, the way an unreachable backend does, so tests can
+// fault the grant rules without reaching past them.
+func NewWithGrantWriteHook(t testing.TB, hook func() error) sessionstore.Store {
+	return newStore(t, time.Now, hook)
+}
+
+func newStore(t testing.TB, now func() time.Time, grantWriteHook func() error) sessionstore.Store {
 	t.Helper()
 	master := make([]byte, keyring.MasterKeyLen)
 	_, _ = rand.Read(master) // crypto/rand.Read never returns an error
@@ -35,7 +47,10 @@ func NewWithClock(t testing.TB, now func() time.Time) sessionstore.Store {
 	if err != nil {
 		t.Fatalf("sessionstoretest: building key ring: %v", err)
 	}
-	m := &memory{now: now, blobs: map[memKey]memBlob{}, revoked: map[memKey]time.Time{}, grants: map[string]memGrant{}}
+	m := &memory{
+		now: now, grantWriteHook: grantWriteHook,
+		blobs: map[memKey]memBlob{}, revoked: map[memKey]time.Time{}, grants: map[string]memGrant{},
+	}
 	return sessionstore.Encrypted(m, sessionstore.NewCipher(ring, "https://sessionstoretest.invalid"))
 }
 
@@ -61,6 +76,9 @@ type memGrant struct {
 // memory is the in-process storage backend behind New.
 type memory struct {
 	now func() time.Time
+	// grantWriteHook, when set, runs before every StoreGrant and fails it
+	// with its error.
+	grantWriteHook func() error
 
 	mu      sync.Mutex
 	blobs   map[memKey]memBlob
@@ -137,6 +155,11 @@ func (m *memory) LoadGrant(_ context.Context, family string) (sessionstore.Grant
 }
 
 func (m *memory) StoreGrant(_ context.Context, family string, grant sessionstore.GrantRecord, version int64) error {
+	if m.grantWriteHook != nil {
+		if err := m.grantWriteHook(); err != nil {
+			return err
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	current := m.grants[family]

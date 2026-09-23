@@ -1176,7 +1176,7 @@ func TestRefreshStoreErrorIs503(t *testing.T) {
 			a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
 			clientID := registerClient(t, ts, testRedirectURI)
 			now := a.now()
-			redeemed, err := sessionstore.RedeemCode(context.Background(), store, family, now.Add(time.Hour))
+			redeemed, err := store.RedeemCode(context.Background(), family, now.Add(time.Hour))
 			require.NoError(t, err)
 			require.True(t, redeemed)
 			refresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
@@ -1340,21 +1340,15 @@ func TestRefreshCarriesSessionIdentity(t *testing.T) {
 	}
 }
 
-type unavailableGrantStore struct {
-	sessionstore.Store
-	fail atomic.Bool
-}
-
-func (s *unavailableGrantStore) StoreGrant(ctx context.Context, family string, grant sessionstore.GrantRecord, version int64) error {
-	if s.fail.Load() {
-		return errors.New("grant storage unavailable")
-	}
-	return s.Store.StoreGrant(ctx, family, grant, version)
-}
-
 func TestGrantStorageFailureAllowsRetryWithoutLosingSession(t *testing.T) {
-	store := &unavailableGrantStore{Store: sessionstoretest.New(t)}
-	store.fail.Store(true)
+	var fail atomic.Bool
+	store := sessionstoretest.NewWithGrantWriteHook(t, func() error {
+		if fail.Load() {
+			return errors.New("grant storage unavailable")
+		}
+		return nil
+	})
+	fail.Store(true)
 	flow := newFakeFlow()
 	a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
 	clientID := registerClient(t, ts, testRedirectURI)
@@ -1364,12 +1358,12 @@ func TestGrantStorageFailureAllowsRetryWithoutLosingSession(t *testing.T) {
 	_, oauthErr, status := redeemCode(t, ts, clientID, testRedirectURI, code, verifier)
 	require.Equal(t, http.StatusServiceUnavailable, status)
 	assert.Equal(t, "temporarily_unavailable", oauthErr.Error)
-	store.fail.Store(false)
+	fail.Store(false)
 	tokens, _, status := redeemCode(t, ts, clientID, testRedirectURI, code, verifier)
 	require.Equal(t, http.StatusOK, status, "failed storage write must not consume the code")
 	cc, err := openBlob(a.sealer, codeBlob, code, a.now())
 	require.NoError(t, err)
-	store.fail.Store(true)
+	fail.Store(true)
 	response, err := http.PostForm(ts.URL+"/revoke", url.Values{"token": {tokens.RefreshToken}})
 	require.NoError(t, err)
 	require.NoError(t, response.Body.Close())
@@ -1378,7 +1372,7 @@ func TestGrantStorageFailureAllowsRetryWithoutLosingSession(t *testing.T) {
 	exists, err := store.Exists(t.Context(), allowedUser, cc.SessionID)
 	require.NoError(t, err)
 	assert.True(t, exists, "failed revocation must retain the session for retry")
-	store.fail.Store(false)
+	fail.Store(false)
 	require.Equal(t, http.StatusOK, revokeToken(t, ts, url.Values{"token": {tokens.RefreshToken}}))
 	exists, err = store.Exists(t.Context(), allowedUser, cc.SessionID)
 	require.NoError(t, err)

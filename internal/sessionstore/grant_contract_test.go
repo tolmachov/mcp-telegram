@@ -23,7 +23,7 @@ func TestGCSGrantCorruptionFailsWithoutOverwrite(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 
-	_, err = RotateGrant(ctx, Encrypted(store, newCipher(t, testIssuer, newKey(t))), testGrantFamily, 0, time.Now())
+	_, err = Encrypted(store, newCipher(t, testIssuer, newKey(t))).RotateGrant(ctx, testGrantFamily, 0, time.Now())
 	require.ErrorContains(t, err, "parsing grant")
 	r, err := object.NewReader(ctx)
 	require.NoError(t, err)
@@ -55,6 +55,63 @@ func TestGrantLoadsPersistedRecord(t *testing.T) {
 	}
 }
 
+// TestGrantBackendCASContract pins the compare-and-swap every backend's
+// StoreGrant must keep, step by step and without concurrency.
+func TestGrantBackendCASContract(t *testing.T) {
+	for name, b := range backends(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			first := GrantRecord{ExpiresAt: time.Now().Add(time.Hour).UTC()}
+			require.NoError(t, b.StoreGrant(ctx, testGrantFamily, first, 0))
+			require.ErrorIs(t, b.StoreGrant(ctx, testGrantFamily, first, 0), ErrGrantConflict,
+				"version 0 creates only when no record exists")
+
+			got, version, err := b.LoadGrant(ctx, testGrantFamily)
+			require.NoError(t, err)
+			require.NotZero(t, version)
+			assert.Equal(t, first, got)
+
+			second := first
+			second.Generation = 1
+			require.NoError(t, b.StoreGrant(ctx, testGrantFamily, second, version))
+			third := second
+			third.Generation = 2
+			require.ErrorIs(t, b.StoreGrant(ctx, testGrantFamily, third, version), ErrGrantConflict,
+				"a version that was already written over is stale")
+
+			got, _, err = b.LoadGrant(ctx, testGrantFamily)
+			require.NoError(t, err)
+			assert.Equal(t, second, got)
+		})
+	}
+}
+
+// TestGrantWritesStampRecord pins the record the grant rules leave behind: the
+// advanced generation, the expiry set at redemption and a WriteID.
+func TestGrantWritesStampRecord(t *testing.T) {
+	for name, b := range backends(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			store := Encrypted(b, newCipher(t, testIssuer, newKey(t)))
+			now := time.Now()
+			expiresAt := now.Add(time.Hour).UTC()
+			created, err := store.RedeemCode(ctx, testGrantFamily, expiresAt)
+			require.NoError(t, err)
+			require.True(t, created)
+			for gen := range int64(3) {
+				result, err := store.RotateGrant(ctx, testGrantFamily, gen, now)
+				require.NoError(t, err)
+				require.Equal(t, GrantRotated, result, "generation %d", gen)
+			}
+
+			grant, _, err := b.LoadGrant(ctx, testGrantFamily)
+			require.NoError(t, err)
+			assert.NotEmpty(t, grant.WriteID, "every grant write stamps its record")
+			assert.Equal(t, GrantRecord{Generation: 3, ExpiresAt: expiresAt, WriteID: grant.WriteID}, grant)
+		})
+	}
+}
+
 // TestGrantRotationZeroIsRefusal pins that an outcome nobody set cannot pass
 // the token endpoint's success check.
 func TestGrantRotationZeroIsRefusal(t *testing.T) {
@@ -64,13 +121,13 @@ func TestGrantRotationZeroIsRefusal(t *testing.T) {
 
 // alwaysConflicting loses every grant write to a concurrent writer.
 type alwaysConflicting struct {
-	Store
+	backend
 	loads, stores int
 }
 
 func (s *alwaysConflicting) LoadGrant(ctx context.Context, family string) (GrantRecord, int64, error) {
 	s.loads++
-	return s.Store.LoadGrant(ctx, family)
+	return s.backend.LoadGrant(ctx, family)
 }
 
 func (s *alwaysConflicting) StoreGrant(context.Context, string, GrantRecord, int64) error {
@@ -84,22 +141,23 @@ func (s *alwaysConflicting) StoreGrant(context.Context, string, GrantRecord, int
 // landed after all.
 func TestUpdateGrantGivesUp(t *testing.T) {
 	ctx := t.Context()
-	inner := Encrypted(newTestFS(t), newCipher(t, testIssuer, newKey(t)))
-	created, err := RedeemCode(ctx, inner, testGrantFamily, time.Now().Add(time.Hour))
+	fs := newTestFS(t)
+	cipher := newCipher(t, testIssuer, newKey(t))
+	created, err := Encrypted(fs, cipher).RedeemCode(ctx, testGrantFamily, time.Now().Add(time.Hour))
 	require.NoError(t, err)
 	require.True(t, created)
 
-	store := &alwaysConflicting{Store: inner}
-	_, err = RotateGrant(ctx, store, testGrantFamily, 0, time.Now())
+	b := &alwaysConflicting{backend: fs}
+	_, err = Encrypted(b, cipher).RotateGrant(ctx, testGrantFamily, 0, time.Now())
 	require.ErrorIs(t, err, ErrGrantConflict)
-	assert.Equal(t, 8, store.loads)
-	assert.Equal(t, 4, store.stores)
+	assert.Equal(t, 8, b.loads)
+	assert.Equal(t, 4, b.stores)
 }
 
 // unreadableAfterWrite fails a grant write, and every read after it, with
 // its own errors.
 type unreadableAfterWrite struct {
-	Store
+	backend
 	storeErr, loadErr error
 	wrote             bool
 }
@@ -108,7 +166,7 @@ func (s *unreadableAfterWrite) LoadGrant(ctx context.Context, family string) (Gr
 	if s.wrote {
 		return GrantRecord{}, 0, s.loadErr
 	}
-	return s.Store.LoadGrant(ctx, family)
+	return s.backend.LoadGrant(ctx, family)
 }
 
 func (s *unreadableAfterWrite) StoreGrant(context.Context, string, GrantRecord, int64) error {
@@ -121,16 +179,122 @@ func (s *unreadableAfterWrite) StoreGrant(context.Context, string, GrantRecord, 
 // than only the write's, or a lost race to retry.
 func TestWriteGrantReportsAnUnknownOutcome(t *testing.T) {
 	ctx := t.Context()
-	inner := Encrypted(newTestFS(t), newCipher(t, testIssuer, newKey(t)))
-	created, err := RedeemCode(ctx, inner, testGrantFamily, time.Now().Add(time.Hour))
+	fs := newTestFS(t)
+	cipher := newCipher(t, testIssuer, newKey(t))
+	created, err := Encrypted(fs, cipher).RedeemCode(ctx, testGrantFamily, time.Now().Add(time.Hour))
 	require.NoError(t, err)
 	require.True(t, created)
 
 	for _, storeErr := range []error{ErrGrantConflict, errors.New("connection reset by peer")} {
-		store := &unreadableAfterWrite{Store: inner, storeErr: storeErr, loadErr: errors.New("bucket unavailable")}
-		_, err := RotateGrant(ctx, store, testGrantFamily, 0, time.Now())
+		b := &unreadableAfterWrite{backend: fs, storeErr: storeErr, loadErr: errors.New("bucket unavailable")}
+		_, err := Encrypted(b, cipher).RotateGrant(ctx, testGrantFamily, 0, time.Now())
 		require.ErrorIs(t, err, storeErr)
-		require.ErrorIs(t, err, store.loadErr)
+		require.ErrorIs(t, err, b.loadErr)
 		assert.ErrorContains(t, err, "outcome unknown")
+	}
+}
+
+// notLanded fails every grant write with err before it reaches storage.
+type notLanded struct {
+	backend
+	err    error
+	stores int
+}
+
+func (s *notLanded) StoreGrant(context.Context, string, GrantRecord, int64) error {
+	s.stores++
+	return s.err
+}
+
+// TestGrantWriteThatDidNotLandFails pins that a grant write failing with a
+// transport error, whose re-read finds no record or another write's, reports
+// that error once — not a lost race, which RedeemCode would turn into "code
+// already redeemed" and RotateGrant into a retry that could revoke the family.
+func TestGrantWriteThatDidNotLandFails(t *testing.T) {
+	for name, b := range backends(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			now := time.Now()
+			cipher := newCipher(t, testIssuer, newKey(t))
+			store := Encrypted(b, cipher)
+
+			redeem := &notLanded{backend: b, err: errors.New("connection reset by peer")}
+			created, err := Encrypted(redeem, cipher).RedeemCode(ctx, testGrantFamily, now.Add(time.Hour))
+			require.ErrorIs(t, err, redeem.err)
+			assert.False(t, created)
+			assert.Equal(t, 1, redeem.stores, "a failed write must not be retried")
+
+			created, err = store.RedeemCode(ctx, testGrantFamily, now.Add(time.Hour))
+			require.NoError(t, err)
+			require.True(t, created, "the failed redemption must not consume the code")
+
+			rotate := &notLanded{backend: b, err: errors.New("connection reset by peer")}
+			result, err := Encrypted(rotate, cipher).RotateGrant(ctx, testGrantFamily, 0, now)
+			require.ErrorIs(t, err, rotate.err)
+			assert.Equal(t, GrantMissing, result)
+			assert.Equal(t, 1, rotate.stores, "a failed write must not be retried")
+
+			result, err = store.RotateGrant(ctx, testGrantFamily, 0, now)
+			require.NoError(t, err)
+			assert.Equal(t, GrantRotated, result, "the failed rotation must leave the family as it was")
+		})
+	}
+}
+
+// lostResponse lands the first grant write it is given, then reports that
+// write as failed with err, the way a write whose response never arrived does.
+type lostResponse struct {
+	backend
+	err  error
+	lost bool
+}
+
+func (s *lostResponse) StoreGrant(ctx context.Context, family string, grant GrantRecord, version int64) error {
+	if err := s.backend.StoreGrant(ctx, family, grant, version); err != nil {
+		return err
+	}
+	if s.lost {
+		return nil
+	}
+	s.lost = true
+	return s.err
+}
+
+// TestGrantWriteSurvivesLostResponse pins that a grant write which landed but
+// reported failure — a GCS retry answered 412 after the first attempt
+// committed, or a transport error after the commit — counts as done, instead
+// of reading the advanced record as someone else's and revoking the family.
+func TestGrantWriteSurvivesLostResponse(t *testing.T) {
+	failures := map[string]error{
+		"conflict":  ErrGrantConflict,
+		"transport": errors.New("connection reset by peer"),
+	}
+	for failure, failErr := range failures {
+		for name, b := range backends(t) {
+			t.Run(failure+"/"+name, func(t *testing.T) {
+				ctx := t.Context()
+				now := time.Now()
+				cipher := newCipher(t, testIssuer, newKey(t))
+				store := Encrypted(b, cipher)
+				lost := func() Store { return Encrypted(&lostResponse{backend: b, err: failErr}, cipher) }
+
+				created, err := lost().RedeemCode(ctx, testGrantFamily, now.Add(time.Hour))
+				require.NoError(t, err)
+				assert.True(t, created, "the code's own landed write is a redemption, not a reuse")
+
+				result, err := lost().RotateGrant(ctx, testGrantFamily, 0, now)
+				require.NoError(t, err)
+				assert.Equal(t, GrantRotated, result, "the rotation's own landed write is not a replay")
+
+				result, err = store.RotateGrant(ctx, testGrantFamily, 1, now)
+				require.NoError(t, err)
+				assert.Equal(t, GrantRotated, result, "the family must survive the lost response")
+
+				require.NoError(t, lost().RevokeGrant(ctx, testGrantFamily))
+				result, err = store.RotateGrant(ctx, testGrantFamily, 2, now)
+				require.NoError(t, err)
+				assert.Equal(t, GrantReplay, result, "a revocation whose response was lost still revokes")
+			})
+		}
 	}
 }

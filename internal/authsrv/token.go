@@ -72,7 +72,7 @@ func (a *AuthServer) tokenFromCode(w http.ResponseWriter, r *http.Request, form 
 		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "invalid authorization code")
 		return
 	}
-	redeemed, err := sessionstore.RedeemCode(r.Context(), a.store, cc.Family, now.Add(refreshTokenTTL))
+	redeemed, err := a.store.RedeemCode(r.Context(), cc.Family, now.Add(refreshTokenTTL))
 	if err != nil {
 		a.logger.Error("authorization code state write failed", "err", err)
 		a.tokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "authorization state unavailable, retry")
@@ -136,7 +136,7 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 		return
 	}
 
-	rotation, err := sessionstore.RotateGrant(r.Context(), a.store, rc.Family, rc.Generation, now)
+	rotation, err := a.store.RotateGrant(r.Context(), rc.Family, rc.Generation, now)
 	if err != nil {
 		a.logger.Error("grant rotation failed", "user_id", userID, "err", err)
 		a.tokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "authorization state unavailable, retry")

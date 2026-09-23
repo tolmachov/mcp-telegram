@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -46,37 +45,6 @@ func stores(t *testing.T) map[string]sessionstore.Store {
 	}
 }
 
-// TestGrantStoreCASContract pins the compare-and-swap every backend's
-// StoreGrant must keep, step by step and without concurrency.
-func TestGrantStoreCASContract(t *testing.T) {
-	for name, store := range stores(t) {
-		t.Run(name, func(t *testing.T) {
-			ctx := t.Context()
-			first := sessionstore.GrantRecord{ExpiresAt: time.Now().Add(time.Hour).UTC()}
-			require.NoError(t, store.StoreGrant(ctx, testGrantFamily, first, 0))
-			require.ErrorIs(t, store.StoreGrant(ctx, testGrantFamily, first, 0), sessionstore.ErrGrantConflict,
-				"version 0 creates only when no record exists")
-
-			got, version, err := store.LoadGrant(ctx, testGrantFamily)
-			require.NoError(t, err)
-			require.NotZero(t, version)
-			assert.Equal(t, first, got)
-
-			second := first
-			second.Generation = 1
-			require.NoError(t, store.StoreGrant(ctx, testGrantFamily, second, version))
-			third := second
-			third.Generation = 2
-			require.ErrorIs(t, store.StoreGrant(ctx, testGrantFamily, third, version), sessionstore.ErrGrantConflict,
-				"a version that was already written over is stale")
-
-			got, _, err = store.LoadGrant(ctx, testGrantFamily)
-			require.NoError(t, err)
-			assert.Equal(t, second, got)
-		})
-	}
-}
-
 func TestGrantStoreContract(t *testing.T) {
 	for name, store := range stores(t) {
 		t.Run(name, func(t *testing.T) {
@@ -84,11 +52,11 @@ func TestGrantStoreContract(t *testing.T) {
 			now := time.Now()
 			expiresAt := now.Add(time.Hour)
 
-			created, err := sessionstore.RedeemCode(ctx, store, testGrantFamily, expiresAt)
+			created, err := store.RedeemCode(ctx, testGrantFamily, expiresAt)
 			require.NoError(t, err)
 			require.True(t, created)
 
-			created, err = sessionstore.RedeemCode(ctx, store, testGrantFamily, expiresAt)
+			created, err = store.RedeemCode(ctx, testGrantFamily, expiresAt)
 			require.NoError(t, err)
 			assert.False(t, created, "authorization code redemption must be single-use")
 
@@ -99,7 +67,7 @@ func TestGrantStoreContract(t *testing.T) {
 			for range 2 {
 				go func() {
 					start.Wait()
-					result, rotateErr := sessionstore.RotateGrant(context.Background(), store, testGrantFamily, 0, now)
+					result, rotateErr := store.RotateGrant(context.Background(), testGrantFamily, 0, now)
 					results <- result
 					errs <- rotateErr
 				}()
@@ -114,7 +82,7 @@ func TestGrantStoreContract(t *testing.T) {
 			assert.Equal(t, 1, seen[sessionstore.GrantRotated])
 			assert.Equal(t, 1, seen[sessionstore.GrantReplay])
 
-			result, err := sessionstore.RotateGrant(ctx, store, testGrantFamily, 1, now)
+			result, err := store.RotateGrant(ctx, testGrantFamily, 1, now)
 			require.NoError(t, err)
 			assert.Equal(t, sessionstore.GrantReplay, result, "a replay must revoke the entire family")
 		})
@@ -126,87 +94,25 @@ func TestGrantStoreRotateAndRevokeContract(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
 			now := time.Now()
-			created, err := sessionstore.RedeemCode(ctx, store, testGrantFamily, now.Add(time.Hour))
+			created, err := store.RedeemCode(ctx, testGrantFamily, now.Add(time.Hour))
 			require.NoError(t, err)
 			require.True(t, created)
 
 			for gen := range int64(3) {
-				result, err := sessionstore.RotateGrant(ctx, store, testGrantFamily, gen, now)
+				result, err := store.RotateGrant(ctx, testGrantFamily, gen, now)
 				require.NoError(t, err)
 				require.Equal(t, sessionstore.GrantRotated, result, "generation %d", gen)
 			}
-			grant, version, err := store.LoadGrant(ctx, testGrantFamily)
-			require.NoError(t, err)
-			assert.NotZero(t, version)
-			assert.NotEmpty(t, grant.WriteID, "every grant write stamps its record")
-			assert.Equal(t, sessionstore.GrantRecord{Generation: 3, ExpiresAt: grant.ExpiresAt, WriteID: grant.WriteID}, grant)
-
-			require.NoError(t, sessionstore.RevokeGrant(ctx, store, testGrantFamily))
-			result, err := sessionstore.RotateGrant(ctx, store, testGrantFamily, 3, now)
+			require.NoError(t, store.RevokeGrant(ctx, testGrantFamily))
+			result, err := store.RotateGrant(ctx, testGrantFamily, 3, now)
 			require.NoError(t, err)
 			assert.Equal(t, sessionstore.GrantReplay, result, "a revoked family must not rotate")
 
-			require.NoError(t, sessionstore.RevokeGrant(ctx, store, "00000000000000000000000000000000"), "revoking a missing family is a no-op")
-			result, err = sessionstore.RotateGrant(ctx, store, "00000000000000000000000000000000", 0, now)
+			require.NoError(t, store.RevokeGrant(ctx, "00000000000000000000000000000000"), "revoking a missing family is a no-op")
+			result, err = store.RotateGrant(ctx, "00000000000000000000000000000000", 0, now)
 			require.NoError(t, err)
 			assert.Equal(t, sessionstore.GrantMissing, result)
 		})
-	}
-}
-
-// lostResponse lands the first grant write it is given, then reports that
-// write as failed with err, the way a write whose response never arrived does.
-type lostResponse struct {
-	sessionstore.Store
-	err  error
-	lost bool
-}
-
-func (s *lostResponse) StoreGrant(ctx context.Context, family string, grant sessionstore.GrantRecord, version int64) error {
-	if err := s.Store.StoreGrant(ctx, family, grant, version); err != nil {
-		return err //nolint:wrapcheck // passes the backend's outcome through unchanged
-	}
-	if s.lost {
-		return nil
-	}
-	s.lost = true
-	return s.err
-}
-
-// TestGrantWriteSurvivesLostResponse pins that a grant write which landed but
-// reported failure — a GCS retry answered 412 after the first attempt
-// committed, or a transport error after the commit — counts as done, instead
-// of reading the advanced record as someone else's and revoking the family.
-func TestGrantWriteSurvivesLostResponse(t *testing.T) {
-	failures := map[string]error{
-		"conflict":  sessionstore.ErrGrantConflict,
-		"transport": errors.New("connection reset by peer"),
-	}
-	for failure, failErr := range failures {
-		for name, store := range stores(t) {
-			t.Run(failure+"/"+name, func(t *testing.T) {
-				ctx := t.Context()
-				now := time.Now()
-				lost := func() sessionstore.Store { return &lostResponse{Store: store, err: failErr} }
-
-				created, err := sessionstore.RedeemCode(ctx, lost(), testGrantFamily, now.Add(time.Hour))
-				require.NoError(t, err)
-				assert.True(t, created, "the code's own landed write is a redemption, not a reuse")
-
-				result, err := sessionstore.RotateGrant(ctx, lost(), testGrantFamily, 0, now)
-				require.NoError(t, err)
-				assert.Equal(t, sessionstore.GrantRotated, result, "the rotation's own landed write is not a replay")
-
-				result, err = sessionstore.RotateGrant(ctx, store, testGrantFamily, 1, now)
-				require.NoError(t, err)
-				assert.Equal(t, sessionstore.GrantRotated, result, "the family must survive the lost response")
-
-				require.NoError(t, sessionstore.RevokeGrant(ctx, lost(), testGrantFamily))
-				result, err = sessionstore.RotateGrant(ctx, store, testGrantFamily, 2, now)
-				require.NoError(t, err)
-				assert.Equal(t, sessionstore.GrantReplay, result, "a revocation whose response was lost still revokes")
-			})
-		}
 	}
 }
 
@@ -215,24 +121,24 @@ func TestGrantStoreExpiryContract(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
 			expiresAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-			created, err := sessionstore.RedeemCode(ctx, store, testGrantFamily, expiresAt)
+			created, err := store.RedeemCode(ctx, testGrantFamily, expiresAt)
 			require.NoError(t, err)
 			require.True(t, created)
 
 			// Expiry follows the caller's clock, not the backend's.
-			result, err := sessionstore.RotateGrant(ctx, store, testGrantFamily, 0, expiresAt.Add(-time.Second))
+			result, err := store.RotateGrant(ctx, testGrantFamily, 0, expiresAt.Add(-time.Second))
 			require.NoError(t, err)
 			assert.Equal(t, sessionstore.GrantRotated, result)
-			result, err = sessionstore.RotateGrant(ctx, store, testGrantFamily, 1, expiresAt)
+			result, err = store.RotateGrant(ctx, testGrantFamily, 1, expiresAt)
 			require.NoError(t, err)
 			assert.Equal(t, sessionstore.GrantMissing, result, "a grant is expired from ExpiresAt on")
 
 			// A record without an expiry is malformed and counts as expired.
 			const zeroFamily = "00000000000000000000000000000001"
-			created, err = sessionstore.RedeemCode(ctx, store, zeroFamily, time.Time{})
+			created, err = store.RedeemCode(ctx, zeroFamily, time.Time{})
 			require.NoError(t, err)
 			require.True(t, created)
-			result, err = sessionstore.RotateGrant(ctx, store, zeroFamily, 0, expiresAt)
+			result, err = store.RotateGrant(ctx, zeroFamily, 0, expiresAt)
 			require.NoError(t, err)
 			assert.Equal(t, sessionstore.GrantMissing, result)
 		})
@@ -245,20 +151,21 @@ func TestGrantStoreSweepContract(t *testing.T) {
 			ctx := t.Context()
 			now := time.Now()
 			const liveFamily = "00000000000000000000000000000002"
-			created, err := sessionstore.RedeemCode(ctx, store, testGrantFamily, now.Add(-time.Minute))
+			created, err := store.RedeemCode(ctx, testGrantFamily, now.Add(-time.Minute))
 			require.NoError(t, err)
 			require.True(t, created)
-			created, err = sessionstore.RedeemCode(ctx, store, liveFamily, now.Add(time.Hour))
+			created, err = store.RedeemCode(ctx, liveFamily, now.Add(time.Hour))
 			require.NoError(t, err)
 			require.True(t, created)
 			require.NoError(t, store.SweepAuthState(ctx, now))
 
-			_, version, err := store.LoadGrant(ctx, testGrantFamily)
+			// Redeeming again creates a record only where none is left.
+			created, err = store.RedeemCode(ctx, testGrantFamily, now.Add(time.Hour))
 			require.NoError(t, err)
-			assert.Zero(t, version, "the expired grant must be swept")
-			_, version, err = store.LoadGrant(ctx, liveFamily)
+			assert.True(t, created, "the expired grant must be swept")
+			created, err = store.RedeemCode(ctx, liveFamily, now.Add(time.Hour))
 			require.NoError(t, err)
-			assert.NotZero(t, version, "a live grant must survive the sweep")
+			assert.False(t, created, "a live grant must survive the sweep")
 		})
 	}
 }
@@ -267,11 +174,11 @@ func TestGrantStoreRejectsMalformedIdentity(t *testing.T) {
 	for name, store := range stores(t) {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
-			_, err := sessionstore.RedeemCode(ctx, store, "../not-a-family", time.Now().Add(time.Hour))
+			_, err := store.RedeemCode(ctx, "../not-a-family", time.Now().Add(time.Hour))
 			require.ErrorIs(t, err, sessionstore.ErrInvalidSID)
-			_, err = sessionstore.RotateGrant(ctx, store, "../not-a-family", 0, time.Now())
+			_, err = store.RotateGrant(ctx, "../not-a-family", 0, time.Now())
 			require.ErrorIs(t, err, sessionstore.ErrInvalidSID)
-			require.ErrorIs(t, sessionstore.RevokeGrant(ctx, store, "../not-a-family"), sessionstore.ErrInvalidSID)
+			require.ErrorIs(t, store.RevokeGrant(ctx, "../not-a-family"), sessionstore.ErrInvalidSID)
 		})
 	}
 }

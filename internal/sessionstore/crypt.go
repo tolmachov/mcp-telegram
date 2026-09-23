@@ -231,29 +231,8 @@ func (s *encryptedStore) DeleteRevoked(ctx context.Context, userID tgid.UserID, 
 	return nil
 }
 
-// Grant records carry no secret either (counters and an expiry), so they pass
-// straight through too.
-
-func (s *encryptedStore) LoadGrant(ctx context.Context, family string) (GrantRecord, int64, error) {
-	if !ValidSID(family) {
-		return GrantRecord{}, 0, ErrInvalidSID
-	}
-	grant, version, err := s.inner.LoadGrant(ctx, family)
-	if err != nil {
-		return GrantRecord{}, 0, fmt.Errorf("encrypted store: %w", err)
-	}
-	return grant, version, nil
-}
-
-func (s *encryptedStore) StoreGrant(ctx context.Context, family string, grant GrantRecord, version int64) error {
-	if !ValidSID(family) {
-		return ErrInvalidSID
-	}
-	if err := s.inner.StoreGrant(ctx, family, grant, version); err != nil {
-		return fmt.Errorf("encrypted store: %w", err)
-	}
-	return nil
-}
+// Grant records carry no secret either (counters and an expiry), so the grant
+// rules (store.go) work on the backend's records directly.
 
 func (s *encryptedStore) SweepAuthState(ctx context.Context, now time.Time) error {
 	if err := s.inner.SweepAuthState(ctx, now); err != nil {

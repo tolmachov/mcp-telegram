@@ -169,7 +169,7 @@ func TestSweepIsolatesPanickingPart(t *testing.T) {
 	const sid = "0123456789abcdef0123456789abcdef"
 	const family = "fedcba9876543210fedcba9876543210"
 	require.NoError(t, store.Revoke(ctx, allowedUser, sid))
-	created, err := sessionstore.RedeemCode(ctx, store, family, base.Add(time.Hour))
+	created, err := store.RedeemCode(ctx, family, base.Add(time.Hour))
 	require.NoError(t, err)
 	require.True(t, created)
 
@@ -180,7 +180,8 @@ func TestSweepIsolatesPanickingPart(t *testing.T) {
 	revoked, err := store.Revoked(ctx, allowedUser, sid)
 	require.NoError(t, err)
 	assert.False(t, revoked, "the tombstone sweep must run despite the session sweep panicking")
-	_, version, err := store.LoadGrant(ctx, family)
+	// Redeeming the family again succeeds only once its record is gone.
+	created, err = store.RedeemCode(ctx, family, base.Add(time.Hour))
 	require.NoError(t, err)
-	assert.Zero(t, version, "the grant sweep must run despite the session sweep panicking")
+	assert.True(t, created, "the grant sweep must run despite the session sweep panicking")
 }
