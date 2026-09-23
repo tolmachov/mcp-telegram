@@ -182,7 +182,7 @@ func (h *MessageDeleteHandler) deleteRegular(ctx context.Context, peer tg.InputP
 
 	left, _, err := h.getRegular(ctx, peer, toDelete)
 	if err != nil {
-		return nil, withHint(fmt.Errorf("re-reading the messages after Telegram accepted the deletion: %w", err), "Check with GetMessages which of them are gone.")
+		return nil, withNote(fmt.Errorf("re-reading the messages: %w", err), "Telegram accepted the deletion; check with GetMessages which of them are gone.")
 	}
 	markVerified(statuses, toDelete, left)
 	return statuses, nil
@@ -214,7 +214,7 @@ func (h *MessageDeleteHandler) deleteScheduled(ctx context.Context, peer tg.Inpu
 
 	left, err := h.getScheduled(ctx, peer, toDelete)
 	if err != nil {
-		return nil, withHint(fmt.Errorf("re-reading the schedule queue after Telegram accepted the cancellation: %w", err), "Check with GetMessages include_scheduled=true which of them are gone.")
+		return nil, withNote(fmt.Errorf("re-reading the schedule queue: %w", err), "Telegram accepted the cancellation; check with GetMessages include_scheduled=true which of them are gone.")
 	}
 	markVerified(statuses, toDelete, left)
 	return statuses, nil

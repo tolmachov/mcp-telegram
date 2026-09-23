@@ -217,10 +217,17 @@ func AddContentTool[In any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In,
 
 // failure is a tool call that failed past input validation — a Telegram RPC
 // or another runtime error. Handlers return it as their Go error and
-// toolFailure renders it as "Failed to <op>: <err>" plus the hint. A failure
-// without an op only carries a hint for an outer failure to render.
+// toolFailure renders it as "Failed to <op>: <err>" plus the note and the
+// hint. A failure without an op only carries a note or hint for an outer
+// failure to render.
+//
+// A note states an outcome the model must know whatever went wrong, e.g. the
+// partial file a backup saved; a hint suggests how to fix the request, which
+// cannot cure a systemic failure (tgclient.IsSystemic), so it is dropped
+// there.
 type failure struct {
 	op   string
+	note string
 	hint string
 	err  error
 }
@@ -250,6 +257,11 @@ func withHint(err error, hint string) error {
 	return &failure{hint: hint, err: err}
 }
 
+// withNote attaches an outcome note to err for the failure that wraps it.
+func withNote(err error, note string) error {
+	return &failure{note: note, err: err}
+}
+
 // peerHint follows a failure to resolve a chat ID.
 const peerHint = "The chat may not exist, you may not have access, or the ID may be wrong. Use SearchChats or GetChats to verify, or ResolveUsername if you only have a @handle."
 
@@ -265,13 +277,14 @@ func toolFailure(ctx context.Context, req *mcp.CallToolRequest, tool string, err
 	return errors.New(failureText(tool, err))
 }
 
-// failureText renders a handler error as "Failed to <op>: <what happened>".
-// A dead session and a flood wait get their fixed guidance as what happened;
-// anything else shows the error itself, followed by the failure's own hint or,
-// lacking one, the peer hint when a chat ID failed to resolve.
+// failureText renders a handler error as "Failed to <op>: <what happened>",
+// followed by the failure's note and then its hint. A systemic error gets its
+// fixed guidance as what happened (systemicText) and no hint; anything else
+// shows the error itself, followed by the failure's own hint or, lacking one,
+// the peer hint when a chat ID failed to resolve.
 func failureText(tool string, err error) string {
-	// The outermost op names what failed; the outermost hint wins.
-	op, hint, cause := "run "+tool, "", err
+	// The outermost op names what failed; the outermost note and hint win.
+	op, note, hint, cause := "run "+tool, "", "", err
 	named := false
 	for e := err; ; {
 		var f *failure
@@ -281,6 +294,9 @@ func failureText(tool string, err error) string {
 		if !named && f.op != "" {
 			op, cause, named = f.op, f.err, true
 		}
+		if note == "" {
+			note = f.note
+		}
 		if hint == "" {
 			hint = f.hint
 		}
@@ -288,23 +304,34 @@ func failureText(tool string, err error) string {
 	}
 	var what string
 	var pe *tgclient.PeerError
-	switch flood, isFlood := floodWaitMessage(tool, err); {
-	case tgclient.IsSessionUnauthorized(err):
-		what = fmt.Sprintf("Telegram no longer accepts this account's session (%v): it was logged out, revoked or expired. Log in again — `mcp-telegram login` for a local server, or reconnect the client to repeat the QR login — then retry.", cause)
-	case isFlood:
-		what = flood
-	case hint == "" && errors.As(err, &pe):
-		what = sentence(cause) + " " + peerHint
+	switch {
+	case tgclient.IsSystemic(cause):
+		what, hint = systemicText(tool, cause), ""
+	case hint == "" && errors.As(cause, &pe):
+		what, hint = sentence(cause), peerHint
 	default:
 		what = sentence(cause)
 	}
 	text := fmt.Sprintf("Failed to %s: %s", op, what)
-	// The hint follows the fixed guidance too: it may carry the outcome, e.g.
-	// a partial backup that was saved before the flood wait.
-	if hint != "" {
-		text += " " + hint
+	for _, s := range []string{note, hint} {
+		if s != "" {
+			text += " " + s
+		}
 	}
 	return text
+}
+
+// systemicText renders err, for which tgclient.IsSystemic holds: a dead
+// session and a flood wait get their fixed guidance, a cancelled or expired
+// call shows the error itself.
+func systemicText(tool string, err error) string {
+	if flood, ok := floodWaitMessage(tool, err); ok {
+		return flood
+	}
+	if tgclient.IsSessionUnauthorized(err) {
+		return fmt.Sprintf("Telegram no longer accepts this account's session (%v): it was logged out, revoked or expired. Log in again — `mcp-telegram login` for a local server, or reconnect the client to repeat the QR login — then retry.", err)
+	}
+	return sentence(err)
 }
 
 // sentence renders err as a sentence ending in a full stop, so a hint can

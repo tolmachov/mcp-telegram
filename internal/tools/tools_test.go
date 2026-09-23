@@ -17,7 +17,8 @@ import (
 )
 
 // TestFailureText covers the single rendering of handler errors: the flood
-// wait and dead-session guidance, the peer hint, and the failure's own hint.
+// wait and dead-session guidance, the peer hint, the failure's own hint, and
+// its outcome note.
 func TestFailureText(t *testing.T) {
 	flood := &tgerr.Error{Code: 420, Message: "FLOOD_WAIT_265", Type: "FLOOD_WAIT", Argument: 265}
 
@@ -52,6 +53,35 @@ func TestFailureText(t *testing.T) {
 	t.Run("inner hint surfaces under the outer op", func(t *testing.T) {
 		err := failed("delete messages in chat 5", fmt.Errorf("deleting: %w", withHint(errors.New("forbidden"), "Ask an admin.")))
 		assert.Equal(t, "Failed to delete messages in chat 5: deleting: forbidden. Ask an admin.", failureText("DeleteMessages", err))
+	})
+
+	t.Run("systemic failures get no hint", func(t *testing.T) {
+		for name, cause := range map[string]error{
+			"flood wait":   flood,
+			"dead session": tgerr.New(401, "AUTH_KEY_UNREGISTERED"),
+			"cancellation": &tgclient.PeerError{ID: 42, Err: context.Canceled},
+		} {
+			t.Run(name, func(t *testing.T) {
+				txt := failureText("ResolveUsername", failedHint("resolve @x", cause, "Try SearchChats instead."))
+				assert.NotContains(t, txt, "Try SearchChats instead.")
+				assert.NotContains(t, txt, peerHint)
+			})
+		}
+		assert.Equal(t, "Failed to resolve @x: resolving chat 42: context canceled.",
+			failureText("ResolveUsername", failedHint("resolve @x", &tgclient.PeerError{ID: 42, Err: context.Canceled}, "Try SearchChats instead.")))
+	})
+
+	t.Run("note survives a systemic failure, hint does not", func(t *testing.T) {
+		err := failedHint("back up chat 5", withNote(fmt.Errorf("fetching: %w", flood), "A partial file was saved to /tmp/x."), "Retry later.")
+		txt := failureText("BackupMessages", err)
+		assert.True(t, strings.HasPrefix(txt, "Failed to back up chat 5: Telegram rate-limited this BackupMessages call"), txt)
+		assert.True(t, strings.HasSuffix(txt, " A partial file was saved to /tmp/x."), txt)
+		assert.NotContains(t, txt, "Retry later.")
+	})
+
+	t.Run("note precedes the hint", func(t *testing.T) {
+		err := failedHint("back up chat 5", withNote(errors.New("boom"), "A partial file was saved."), "Retry later.")
+		assert.Equal(t, "Failed to back up chat 5: boom. A partial file was saved. Retry later.", failureText("BackupMessages", err))
 	})
 
 	t.Run("plain error names the tool", func(t *testing.T) {

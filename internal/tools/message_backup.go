@@ -439,19 +439,19 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 		// Context deadline exceeded: surface as a tool error so the caller
 		// knows the backup is incomplete and can retry with a narrower window.
 		// The partial file is still useful, so we report it alongside the error.
-		return nil, nil, failedHint(op, partialErr, fmt.Sprintf(
-			"The backup timed out; a partial file with %d messages was saved to %s. Retry with a narrower date window or smaller count.",
+		return nil, nil, failedHint(op, withNote(partialErr, fmt.Sprintf(
+			"The backup timed out; a partial file with %d messages was saved to %s.",
 			len(result.Messages), absPath,
-		))
+		)), "Retry with a narrower date window or smaller count.")
 	default:
 		// Real mid-pagination failure (FLOOD_WAIT, transport error, etc.).
 		// We persisted what we fetched so the user doesn't lose minutes of
 		// work, but surface it as a tool error so the caller knows the
 		// backup is incomplete and needs a retry anchored past the saved
 		// file's last message.
-		return nil, nil, failedHint(op, partialErr, fmt.Sprintf(
-			"The backup stopped mid-stream; a partial file with %d messages was saved to %s. Retry with a narrower date window or resume from the last saved message.",
+		return nil, nil, failedHint(op, withNote(partialErr, fmt.Sprintf(
+			"The backup stopped mid-stream; a partial file with %d messages was saved to %s.",
 			len(result.Messages), absPath,
-		))
+		)), "Retry with a narrower date window or resume from the last saved message.")
 	}
 }
