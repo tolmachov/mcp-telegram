@@ -14,6 +14,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/tolmachov/mcp-telegram/internal/authsrv"
+	"github.com/tolmachov/mcp-telegram/internal/keyedlimit"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
@@ -130,11 +131,11 @@ func poolKeyFor(user *authsrv.UserIdentity) poolKey {
 // session id). Builds are singleflighted; failed builds are not cached; idle
 // entries are evicted (and their Telegram clients disconnected) by the janitor.
 type userPool struct {
-	mu                 sync.Mutex
-	entries            map[poolKey]*userEntry
-	retired            map[*userEntry]struct{}
-	initializeLimiters map[tgid.UserID]*rate.Limiter
-	build              userHandlerBuilder
+	mu                sync.Mutex
+	entries           map[poolKey]*userEntry
+	retired           map[*userEntry]struct{}
+	initializeLimiter *keyedlimit.Limiter[tgid.UserID]
+	build             userHandlerBuilder
 	// baseCtx is the server-lifetime context builds run on, so canceling one
 	// request cannot poison a build other requests will share.
 	baseCtx context.Context
@@ -149,15 +150,15 @@ type userPool struct {
 
 func newUserPool(baseCtx context.Context, build userHandlerBuilder, wwwAuthenticate string, logger *slog.Logger) *userPool {
 	return &userPool{
-		entries:            map[poolKey]*userEntry{},
-		retired:            map[*userEntry]struct{}{},
-		initializeLimiters: map[tgid.UserID]*rate.Limiter{},
-		build:              build,
-		baseCtx:            baseCtx,
-		now:                time.Now,
-		logger:             logger,
-		wwwAuthenticate:    wwwAuthenticate,
-		wake:               make(chan struct{}, 1),
+		entries:           map[poolKey]*userEntry{},
+		retired:           map[*userEntry]struct{}{},
+		initializeLimiter: keyedlimit.New[tgid.UserID](initializeRate, initializeBurst),
+		build:             build,
+		baseCtx:           baseCtx,
+		now:               time.Now,
+		logger:            logger,
+		wwwAuthenticate:   wwwAuthenticate,
+		wake:              make(chan struct{}, 1),
 	}
 }
 
@@ -178,7 +179,7 @@ func (p *userPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // makes the pool state machine independently testable without any production
 // token-forging hook.
 func (p *userPool) serveUser(w http.ResponseWriter, r *http.Request, user *authsrv.UserIdentity) {
-	if r.Method == http.MethodPost && r.Header.Get("Mcp-Session-Id") == "" && !p.allowInitialize(user.ID) {
+	if r.Method == http.MethodPost && r.Header.Get("Mcp-Session-Id") == "" && !p.initializeLimiter.Allow(user.ID) {
 		p.logger.Warn("sessionless MCP initialize rate limited", "user", user.ID)
 		w.Header().Set("Retry-After", "6")
 		http.Error(w, "too many new MCP sessions", http.StatusTooManyRequests)
@@ -218,17 +219,6 @@ func (p *userPool) serveUser(w http.ResponseWriter, r *http.Request, user *auths
 		return
 	}
 	entry.handler.ServeHTTP(w, r)
-}
-
-func (p *userPool) allowInitialize(userID tgid.UserID) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	limiter := p.initializeLimiters[userID]
-	if limiter == nil {
-		limiter = rate.NewLimiter(initializeRate, initializeBurst)
-		p.initializeLimiters[userID] = limiter
-	}
-	return limiter.Allow()
 }
 
 // entryFor returns the caller's entry with inflight already incremented (the

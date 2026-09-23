@@ -222,7 +222,7 @@ func newTestServerWithInvalidator(t *testing.T, cfg *Config, store sessionstore.
 	require.NoError(t, err)
 	t.Cleanup(a.Close)
 	require.NoError(t, a.Start(t.Context()))
-	a.limiter = newIPRateLimiter(100000, 100000)
+	a.limiter = newIPRateLimiter(100000, 100000, 0)
 
 	mux := http.NewServeMux()
 	a.Routes(mux)
