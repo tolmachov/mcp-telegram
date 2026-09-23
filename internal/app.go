@@ -155,32 +155,7 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					if err != nil {
 						return err
 					}
-					var geminiKey, anthropicKey string
-					summarizeProvider := summarize.ProviderName(cmd.String(flags.SummarizeProvider))
-					if summarizeProvider == summarize.ProviderGemini {
-						geminiKey, err = resolver.String(flags.GeminiAPIKey, flags.EnvGeminiAPIKey)
-						if err != nil {
-							return err
-						}
-					}
-					if summarizeProvider == summarize.ProviderAnthropic {
-						anthropicKey, err = resolver.String(flags.AnthropicAPIKey, flags.EnvAnthropicAPIKey)
-						if err != nil {
-							return err
-						}
-					}
 					transport := cmd.String(flags.Transport)
-					summarizer, err := summarize.New(summarize.Config{
-						Provider:        summarizeProvider,
-						Model:           cmd.String(flags.SummarizeModel),
-						OllamaURL:       cmd.String(flags.OllamaURL),
-						GeminiAPIKey:    geminiKey,
-						AnthropicAPIKey: anthropicKey,
-						BatchTokens:     cmd.Int(flags.SummarizeBatchTokens),
-					})
-					if err != nil {
-						return err
-					}
 					var authCfg *authsrv.Config
 					var store sessionstore.Store
 					if transport == server.TransportHTTP {
@@ -194,12 +169,23 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 						return err
 					}
 					serverOpts := server.Options{
-						Config:         cfg,
-						Version:        Version,
-						Auth:           authCfg,
-						SessionStore:   store,
-						AllowedPaths:   cmd.StringSlice(flags.AllowedPaths),
-						Summarizer:     summarizer,
+						Config:       cfg,
+						Version:      Version,
+						Auth:         authCfg,
+						SessionStore: store,
+						AllowedPaths: cmd.StringSlice(flags.AllowedPaths),
+						Summarize: summarize.Config{
+							Provider:  summarize.ProviderName(cmd.String(flags.SummarizeProvider)),
+							Model:     cmd.String(flags.SummarizeModel),
+							OllamaURL: cmd.String(flags.OllamaURL),
+							GeminiAPIKey: func() (string, error) {
+								return resolver.String(flags.GeminiAPIKey, flags.EnvGeminiAPIKey)
+							},
+							AnthropicAPIKey: func() (string, error) {
+								return resolver.String(flags.AnthropicAPIKey, flags.EnvAnthropicAPIKey)
+							},
+							BatchTokens: cmd.Int(flags.SummarizeBatchTokens),
+						},
 						MediaMaxBytes:  cmd.Int(flags.MediaMaxBytes),
 						TGRateLimitRPS: cmd.Int(flags.TGRateLimitRPS),
 						PinnedRefresh:  time.Duration(cmd.Int(flags.PinnedRefreshSecs)) * time.Second,

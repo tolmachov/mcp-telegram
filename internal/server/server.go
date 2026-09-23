@@ -57,13 +57,20 @@ const missingCredentialsMessage = "mcp-telegram is not configured: MCP_TELEGRAM_
 
 const notLoggedInMessage = "mcp-telegram is not logged in to Telegram — the stored session is missing, expired, or was revoked from Telegram's Devices/Active sessions list. Run `mcp-telegram login --phone <+countrycode…>` in a terminal to authenticate, then " + reconnectHint
 
+func summarizeMisconfiguredMessage(err error) string {
+	return fmt.Sprintf("mcp-telegram is not configured: its summarisation settings are invalid (%v). Fix the setting it names — a flag or MCP_SUMMARIZE_* environment variable in this server's configuration, or an API key stored with `mcp-telegram config set` — then %s", err, reconnectHint)
+}
+
 // Options configures New. Every field is passed through from the resolved
-// CLI flags; New only validates the combination.
+// CLI flags; New validates the combination and builds the summariser, whose
+// own misconfiguration Run reports instead (see Summarize).
 type Options struct {
-	Config         *tgclient.Config
-	Version        string
-	AllowedPaths   []string // --allowed-paths; empty → the OS backup directory (see backupAllowedPaths)
-	Summarizer     *summarize.Summarizer
+	Config       *tgclient.Config
+	Version      string
+	AllowedPaths []string // --allowed-paths; empty → the OS backup directory (see backupAllowedPaths)
+	// Summarize configures SummarizeChat; New builds the summarizer from it
+	// and Run reports a misconfiguration as a blocked startup.
+	Summarize      summarize.Config
 	MediaMaxBytes  int
 	TGRateLimitRPS int
 	PinnedRefresh  time.Duration // 0 → disable pinned-chat background watcher
@@ -85,6 +92,11 @@ type Options struct {
 type Server struct {
 	logger *slog.Logger
 	opts   Options
+
+	// summarizer serves SummarizeChat; summarizeErr is why opts.Summarize
+	// could not build one, which Run reports as a blocked startup.
+	summarizer   *summarize.Summarizer
+	summarizeErr error
 
 	// authProbeFn is the live authorization re-check the login-required tool
 	// performs, injectable so the tool's states can be exercised without a
@@ -142,26 +154,31 @@ func New(opts Options) (*Server, error) {
 		With("component", "mcp-telegram")
 
 	srv := &Server{logger: logger, opts: opts}
+	srv.summarizer, srv.summarizeErr = summarize.New(opts.Summarize)
 	srv.authProbeFn = srv.authProbe
 	return srv, nil
 }
 
 // Run starts the MCP server on the configured transport (stdio, or streamable
-// HTTP behind the embedded OAuth server). When Telegram cannot be reached at
-// all — missing credentials, an unusable session store, a connect-phase
-// failure, a failed auth check, or a session that is simply not authorized —
-// the stdio path comes up in login-required mode instead of failing: a server
-// exposing one loudly-named tool that reports the problem, plus instructions
-// that say the same thing to the model. See runLoginRequired for why that
-// beats failing the connection.
+// HTTP behind the embedded OAuth server). When the server cannot serve at
+// all — missing credentials, a misconfigured summarisation provider, an
+// unusable session store, a connect-phase failure, a failed auth check, or a
+// session that is simply not authorized — the stdio path comes up in
+// login-required mode instead of failing: a server exposing one loudly-named
+// tool that reports the problem, plus instructions that say the same thing to
+// the model. See runLoginRequired for why that beats failing the connection.
 //
-// Over HTTP only the missing-credentials condition can arise, because the
-// per-user clients are connected lazily by the pool; with no MCP peer to tell,
-// it fails the process.
+// Over HTTP only the configuration conditions can arise, because the per-user
+// clients are connected lazily by the pool; with no MCP peer to tell, they
+// fail the process.
 func (s *Server) Run(ctx context.Context) error {
 	if s.opts.Config.APIID == 0 || s.opts.Config.APIHash == "" {
 		s.logger.Warn("no Telegram access", "reason", "missing Telegram API credentials")
 		return s.startBlocked(ctx, missingCredentialsMessage)
+	}
+	if s.summarizeErr != nil {
+		s.logger.Warn("not serving", "reason", "summarisation is misconfigured", "err", s.summarizeErr)
+		return s.startBlocked(ctx, summarizeMisconfiguredMessage(s.summarizeErr))
 	}
 
 	// HTTP has no ambient single-account client: each user's client is
@@ -430,7 +447,7 @@ func (s *Server) buildHandlers(api *tg.Client, peers *tgclient.Resolver, msgProv
 		tools.NewGetForumTopicsHandler(msgProvider),
 		tools.NewUsernameResolveHandler(api),
 		tools.NewMessageLinkResolveHandler(api),
-		tools.NewChatSummarizeHandler(msgProvider, s.opts.Summarizer),
+		tools.NewChatSummarizeHandler(msgProvider, s.summarizer),
 		tools.NewMediaGetHandler(api, s.opts.MediaMaxBytes),
 		tools.NewGetFoldersHandler(api),
 	}

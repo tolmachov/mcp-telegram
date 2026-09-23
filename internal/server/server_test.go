@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tolmachov/mcp-telegram/internal/summarize"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
@@ -55,6 +57,7 @@ func connectServer(t *testing.T, cfg *tgclient.Config, tweak func(*Server), star
 
 	srv, err := New(Options{
 		Config:    cfg,
+		Summarize: testSummarize,
 		Version:   "test",
 		Stdin:     serverR,
 		Stdout:    serverW,
@@ -329,6 +332,7 @@ func newPipeServer(t *testing.T, stdin io.Reader) *Server {
 	t.Helper()
 	srv, err := New(Options{
 		Config:    &tgclient.Config{},
+		Summarize: testSummarize,
 		Version:   "test",
 		Stdin:     stdin,
 		Stdout:    &nopWriteCloser{Writer: io.Discard},
@@ -415,6 +419,7 @@ func TestBlockedStartupServesLoginRequiredOverStdio(t *testing.T) {
 
 	srv, err := New(Options{
 		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
+		Summarize: testSummarize,
 		Version:   "test",
 		Stdin:     serverR,
 		Stdout:    serverW,
@@ -445,4 +450,50 @@ func TestBlockedStartupServesLoginRequiredOverStdio(t *testing.T) {
 	assert.Equal(t, loginRequiredTool, tools.Tools[0].Name)
 	assert.Contains(t, cs.InitializeResult().Instructions, "corrupted key",
 		"the reason gotd reported has to reach the model")
+}
+
+// TestSummarizeMisconfigurationBlocksStartup pins that an invalid
+// summarisation setting found at startup goes through the blocked-startup
+// path like every other startup failure: over stdio the host gets the
+// login-required server naming the setting, and its re-check reports a
+// configuration problem without probing Telegram; over HTTP the process
+// fails with the same reason.
+func TestSummarizeMisconfigurationBlocksStartup(t *testing.T) {
+	_, summarizeErr := summarize.New(summarize.Config{
+		Provider:     summarize.ProviderGemini,
+		BatchTokens:  1,
+		GeminiAPIKey: func() (string, error) { return "", nil },
+	})
+	require.Error(t, summarizeErr)
+
+	cs := connectViaRun(t, &tgclient.Config{APIID: 1, APIHash: "hash"}, func(s *Server) {
+		s.summarizer, s.summarizeErr = nil, summarizeErr
+		s.authProbeFn = func(context.Context) (string, bool, error) {
+			t.Error("a configuration problem must not be re-checked against Telegram")
+			return "", false, nil
+		}
+	})
+	tools, err := cs.ListTools(t.Context(), &mcp.ListToolsParams{})
+	require.NoError(t, err)
+	require.Len(t, tools.Tools, 1)
+	assert.Equal(t, loginRequiredTool, tools.Tools[0].Name)
+	assert.Contains(t, cs.InitializeResult().Instructions, "MCP_SUMMARIZE_GEMINI_API_KEY")
+
+	status := callLoginTool(t, cs)
+	assert.Equal(t, StateNotConfigured, status.State)
+	assert.Contains(t, status.Detail, "MCP_SUMMARIZE_GEMINI_API_KEY")
+
+	opts := Options{
+		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
+		Transport: TransportHTTP,
+		HTTPAddr:  freePort(t),
+		Summarize: summarize.Config{Provider: summarize.ProviderSampling},
+		Stdin:     strings.NewReader(""),
+		Stdout:    io.Discard,
+		ErrOut:    io.Discard,
+	}
+	opts.Auth, opts.SessionStore = testAuth(t, "http://"+opts.HTTPAddr)
+	srv, err := New(opts)
+	require.NoError(t, err)
+	require.ErrorContains(t, srv.Run(t.Context()), "summarize-batch-tokens must be positive")
 }

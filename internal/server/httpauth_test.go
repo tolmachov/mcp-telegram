@@ -25,6 +25,7 @@ func TestRunHTTPWithAuthWiring(t *testing.T) {
 	auth, store := testAuth(t, issuer)
 	srv, err := New(Options{
 		Config:       &tgclient.Config{APIID: 1, APIHash: "hash"},
+		Summarize:    testSummarize,
 		Transport:    TransportHTTP,
 		HTTPAddr:     addr,
 		Auth:         auth,

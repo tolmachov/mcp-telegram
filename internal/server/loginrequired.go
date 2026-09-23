@@ -31,7 +31,8 @@ const authProbeTimeout = 20 * time.Second
 type LoginState string
 
 const (
-	// StateNotConfigured means api-id/api-hash were missing at startup.
+	// StateNotConfigured means a setting read at startup — the API
+	// credentials or the summarisation provider — is missing or invalid.
 	StateNotConfigured LoginState = "not_configured"
 	// StateLoginRequired means Telegram was reached and the session is not
 	// authorized.
@@ -152,14 +153,17 @@ func (s *Server) loginRequiredHandler(reason string) func(context.Context, *mcp.
 		status := &LoginRequiredStatus{}
 
 		switch {
+		// The configuration is frozen at process start, so these verdicts
+		// cannot change while we run — say so, or the model will loop on a
+		// tool that keeps handing back the same answer after the user has
+		// already applied the fix.
 		case s.opts.Config.APIID == 0 || s.opts.Config.APIHash == "":
-			// tgConfig is frozen at process start, so this verdict cannot
-			// change while we run — say so, or the model will loop on a tool
-			// that keeps handing back the same answer after the user has
-			// already applied the fix.
 			status.State = StateNotConfigured
 			status.Detail = missingCredentialsMessage + " Once they are set, " + reconnectHint
 			status.FixCommand = configureCommand()
+		case s.summarizeErr != nil:
+			status.State = StateNotConfigured
+			status.Detail = summarizeMisconfiguredMessage(s.summarizeErr)
 		default:
 			s.fillProbedStatus(ctx, status)
 		}

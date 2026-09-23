@@ -322,7 +322,7 @@ resolve as CLI flags → process environment → defaults. The binary never read
 | `MCP_TELEGRAM_ALLOWED_PATHS` | Server-owned backup roots; client MCP roots are ignored | OS state backup dir in stdio `full`/`compact`; unused in HTTP/research |
 | `MCP_SUMMARIZE_PROVIDER` | LLM provider for summarization | `sampling` |
 | `MCP_SUMMARIZE_MODEL` | Model name | Provider default |
-| `MCP_SUMMARIZE_BATCH_TOKENS` | Tokens per summarization batch | `8000` |
+| `MCP_SUMMARIZE_BATCH_TOKENS` | Tokens per summarization batch (must be positive) | `8000` |
 | `MCP_SUMMARIZE_OLLAMA_URL` | Ollama API URL | `http://localhost:11434` |
 | `MCP_SUMMARIZE_GEMINI_API_KEY` | Google Gemini API key | - |
 | `MCP_SUMMARIZE_ANTHROPIC_API_KEY` | Anthropic API key | - |
@@ -482,7 +482,7 @@ of the client's elicitation capabilities.
 
 ## When Telegram Isn't Authorized
 
-Telegram sessions expire and can be revoked from **Settings → Devices → Active sessions** on any of your devices. When that happens — or when `api-id`/`api-hash` are missing — the server does **not** fail its MCP connection. Over stdio it comes up in **login-required mode**:
+Telegram sessions expire and can be revoked from **Settings → Devices → Active sessions** on any of your devices. When that happens at startup — or when `api-id`/`api-hash` are missing, or the summarisation settings are invalid — the server does **not** fail its MCP connection. Over stdio it comes up in **login-required mode**:
 
 - the host shows the server as connected, exposing a single tool named **`TelegramLoginRequired`** and no Telegram tools at all;
 - the server instructions tell the model Telegram is unavailable and what the fix is, so the first Telegram request you make gets answered with the real reason instead of a generic failure;

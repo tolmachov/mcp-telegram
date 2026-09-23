@@ -15,7 +15,7 @@ import (
 // TestChatSummarizeBuildResult covers the (result, err) → response branching:
 // success, sampling-unsupported, salvaged-partial, and total failure.
 func TestChatSummarizeBuildResult(t *testing.T) {
-	summarizer, err := summarize.New(summarize.Config{Provider: summarize.ProviderSampling})
+	summarizer, err := summarize.New(summarize.Config{Provider: summarize.ProviderSampling, BatchTokens: 1})
 	require.NoError(t, err)
 	h := &ChatSummarizeHandler{summarizer: summarizer}
 	in := SummarizeChatInput{ChatID: 7, Goal: "key points", Period: "week"}

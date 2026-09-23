@@ -63,26 +63,14 @@ type Summarizer struct {
 
 // New validates cfg and builds the summarizer it describes.
 func New(cfg Config) (*Summarizer, error) {
-	if err := cfg.Validate(); err != nil {
+	if cfg.BatchTokens <= 0 {
+		return nil, fmt.Errorf("--summarize-batch-tokens must be positive, got %d", cfg.BatchTokens)
+	}
+	providerFor, err := cfg.providerFor()
+	if err != nil {
 		return nil, err
 	}
-	s := &Summarizer{name: cfg.Provider, batchTokens: cfg.BatchTokens}
-	switch cfg.Provider {
-	case ProviderSampling:
-		s.providerFor = func(session *mcp.ServerSession) Provider { return NewSamplingProvider(session) }
-	case ProviderGemini:
-		s.providerFor = fixedProvider(NewGeminiProvider(cfg.GeminiAPIKey, cfg.Model))
-	case ProviderOllama:
-		s.providerFor = fixedProvider(NewOllamaProvider(cfg.OllamaURL, cfg.Model))
-	case ProviderAnthropic:
-		s.providerFor = fixedProvider(NewAnthropicProvider(cfg.AnthropicAPIKey, cfg.Model))
-	}
-	return s, nil
-}
-
-// fixedProvider serves p to every tool call regardless of its session.
-func fixedProvider(p Provider) func(*mcp.ServerSession) Provider {
-	return func(*mcp.ServerSession) Provider { return p }
+	return &Summarizer{name: cfg.Provider, providerFor: providerFor, batchTokens: cfg.BatchTokens}, nil
 }
 
 // ProviderName reports which provider this summarizer uses.
@@ -102,7 +90,7 @@ type Result struct {
 // or batch fails. session is the MCP session of the tool call (sampling
 // summarizes through it).
 func (s *Summarizer) Summarize(ctx context.Context, session *mcp.ServerSession, msgProvider *messages.Provider, chatID int64, goal string, since time.Time, maxMessages int, onProgress ProgressCallback) (Result, error) {
-	// Fetch all messages since the given time
+	// Fetch up to maxMessages messages since the given time.
 	opts := messages.FetchOptions{
 		Limit:    batchSize,
 		MinDate:  since,

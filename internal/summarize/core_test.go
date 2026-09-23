@@ -30,21 +30,38 @@ func fixedSummarizer(llm Provider, batchTokens int) *Summarizer {
 	return &Summarizer{name: ProviderSampling, providerFor: fixedProvider(llm), batchTokens: batchTokens}
 }
 
+// key serves a fixed API key.
+func key(value string) func() (string, error) {
+	return func() (string, error) { return value, nil }
+}
+
+// unread fails the test if New reads a key the provider does not use.
+func unread(t *testing.T) func() (string, error) {
+	return func() (string, error) {
+		t.Error("read an API key the configured provider does not use")
+		return "", nil
+	}
+}
+
 func TestNewValidatesConfig(t *testing.T) {
+	readErr := errors.New("keychain access denied")
 	tests := []struct {
 		name        string
 		config      Config
 		wantErrPart string
 	}{
-		{"sampling", Config{Provider: ProviderSampling}, ""},
-		{"gemini", Config{Provider: ProviderGemini, GeminiAPIKey: "test-key"}, ""},
-		{"gemini missing key", Config{Provider: ProviderGemini}, "MCP_SUMMARIZE_GEMINI_API_KEY is required"},
-		{"ollama", Config{Provider: ProviderOllama, OllamaURL: "http://localhost:11434"}, ""},
-		{"ollama missing url", Config{Provider: ProviderOllama}, "OLLAMA_URL is required"},
-		{"anthropic", Config{Provider: ProviderAnthropic, AnthropicAPIKey: "test-key"}, ""},
-		{"anthropic missing key", Config{Provider: ProviderAnthropic}, "MCP_SUMMARIZE_ANTHROPIC_API_KEY is required"},
-		{"empty", Config{}, "invalid summarization provider"},
-		{"unknown", Config{Provider: "openai"}, "invalid summarization provider"},
+		{"sampling", Config{Provider: ProviderSampling, BatchTokens: 1, GeminiAPIKey: unread(t), AnthropicAPIKey: unread(t)}, ""},
+		{"gemini", Config{Provider: ProviderGemini, BatchTokens: 1, GeminiAPIKey: key("test-key"), AnthropicAPIKey: unread(t)}, ""},
+		{"gemini missing key", Config{Provider: ProviderGemini, BatchTokens: 1, GeminiAPIKey: key("")}, "MCP_SUMMARIZE_GEMINI_API_KEY is required"},
+		{"gemini key unreadable", Config{Provider: ProviderGemini, BatchTokens: 1, GeminiAPIKey: func() (string, error) { return "", readErr }}, "keychain access denied"},
+		{"ollama", Config{Provider: ProviderOllama, BatchTokens: 1, OllamaURL: "http://localhost:11434", GeminiAPIKey: unread(t), AnthropicAPIKey: unread(t)}, ""},
+		{"ollama missing url", Config{Provider: ProviderOllama, BatchTokens: 1}, "OLLAMA_URL is required"},
+		{"anthropic", Config{Provider: ProviderAnthropic, BatchTokens: 1, AnthropicAPIKey: key("test-key"), GeminiAPIKey: unread(t)}, ""},
+		{"anthropic missing key", Config{Provider: ProviderAnthropic, BatchTokens: 1, AnthropicAPIKey: key("")}, "MCP_SUMMARIZE_ANTHROPIC_API_KEY is required"},
+		{"empty", Config{BatchTokens: 1}, "invalid summarization provider"},
+		{"unknown", Config{Provider: "openai", BatchTokens: 1}, "invalid summarization provider"},
+		{"zero batch tokens", Config{Provider: ProviderSampling}, "batch-tokens must be positive"},
+		{"negative batch tokens", Config{Provider: ProviderSampling, BatchTokens: -5}, "batch-tokens must be positive"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -61,19 +78,10 @@ func TestNewValidatesConfig(t *testing.T) {
 }
 
 func TestSamplingBindsToTheCallSession(t *testing.T) {
-	s, err := New(Config{Provider: ProviderSampling})
+	s, err := New(Config{Provider: ProviderSampling, BatchTokens: 1})
 	require.NoError(t, err)
 	_, err = s.providerFor(nil).Summarize(t.Context(), providerTestRequest())
 	assert.ErrorIs(t, err, ErrSamplingUnsupported)
-}
-
-func TestConfigRedaction(t *testing.T) {
-	cfg := Config{Provider: ProviderGemini, Model: "model", GeminiAPIKey: "secret", BatchTokens: 123}
-	for _, rendered := range []string{cfg.String(), fmt.Sprintf("%#v", cfg)} {
-		assert.NotContains(t, rendered, "secret")
-		assert.Contains(t, rendered, "<redacted>")
-		assert.Contains(t, rendered, "<unset>")
-	}
 }
 
 func TestTokenEstimationAndBatching(t *testing.T) {

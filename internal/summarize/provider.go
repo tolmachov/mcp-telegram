@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Provider is an interface for LLM providers that can summarize text.
@@ -56,57 +58,60 @@ const (
 
 // Config holds configuration for summarization providers.
 type Config struct {
-	Provider        ProviderName // "sampling", "ollama", "gemini", or "anthropic"
-	Model           string       // provider-specific model name
-	OllamaURL       string       // URL for Ollama API
-	GeminiAPIKey    string       // API key for Gemini
-	AnthropicAPIKey string       // API key for Anthropic
-	BatchTokens     int          // approximate number of tokens per batch for summarization
+	Provider  ProviderName // "sampling", "ollama", "gemini", or "anthropic"
+	Model     string       // provider-specific model name
+	OllamaURL string       // URL for Ollama API
+	// GeminiAPIKey and AnthropicAPIKey read their provider's API key. New
+	// calls only the one the configured provider needs, so a key that is not
+	// used is never read (on darwin, reading one can raise a Keychain prompt).
+	GeminiAPIKey    func() (string, error)
+	AnthropicAPIKey func() (string, error)
+	BatchTokens     int // approximate number of tokens per batch for summarization
 }
 
-// Validate reports whether cfg names a known provider together with the
-// setting that provider cannot run without.
-func (c Config) Validate() error {
+// providerFor builds the provider cfg names, reading the one setting that
+// provider cannot run without.
+func (c Config) providerFor() (func(*mcp.ServerSession) Provider, error) {
 	switch c.Provider {
 	case ProviderSampling:
+		return func(session *mcp.ServerSession) Provider { return NewSamplingProvider(session) }, nil
 	case ProviderGemini:
-		if c.GeminiAPIKey == "" {
-			return fmt.Errorf("MCP_SUMMARIZE_GEMINI_API_KEY is required when using --summarize-provider=gemini")
+		key, err := requiredKey(c.GeminiAPIKey, "MCP_SUMMARIZE_GEMINI_API_KEY", c.Provider)
+		if err != nil {
+			return nil, err
 		}
+		return fixedProvider(NewGeminiProvider(key, c.Model)), nil
 	case ProviderOllama:
 		if c.OllamaURL == "" {
-			return fmt.Errorf("MCP_SUMMARIZE_OLLAMA_URL is required when using --summarize-provider=ollama")
+			return nil, fmt.Errorf("MCP_SUMMARIZE_OLLAMA_URL is required when using --summarize-provider=ollama")
 		}
+		return fixedProvider(NewOllamaProvider(c.OllamaURL, c.Model)), nil
 	case ProviderAnthropic:
-		if c.AnthropicAPIKey == "" {
-			return fmt.Errorf("MCP_SUMMARIZE_ANTHROPIC_API_KEY is required when using --summarize-provider=anthropic")
+		key, err := requiredKey(c.AnthropicAPIKey, "MCP_SUMMARIZE_ANTHROPIC_API_KEY", c.Provider)
+		if err != nil {
+			return nil, err
 		}
+		return fixedProvider(NewAnthropicProvider(key, c.Model)), nil
 	default:
-		return fmt.Errorf("invalid summarization provider %q (must be 'sampling', 'ollama', 'gemini', or 'anthropic')", c.Provider)
+		return nil, fmt.Errorf("invalid summarization provider %q (must be 'sampling', 'ollama', 'gemini', or 'anthropic')", c.Provider)
 	}
-	return nil
 }
 
-// String implements fmt.Stringer so accidental logging of a Config value
-// (via %v / %s) never leaks API keys. GoString provides the same guarantee
-// for %#v. We only report whether each key is set, never its contents.
-func (c Config) String() string {
-	return fmt.Sprintf(
-		"summarize.Config{Provider:%q Model:%q OllamaURL:%q GeminiAPIKey:%s AnthropicAPIKey:%s BatchTokens:%d}",
-		c.Provider, c.Model, c.OllamaURL,
-		redactedPresence(c.GeminiAPIKey), redactedPresence(c.AnthropicAPIKey),
-		c.BatchTokens,
-	)
+// requiredKey reads provider's API key through read, failing when it is unset.
+func requiredKey(read func() (string, error), env string, provider ProviderName) (string, error) {
+	key, err := read()
+	if err != nil {
+		return "", fmt.Errorf("reading the %s API key: %w", provider, err)
+	}
+	if key == "" {
+		return "", fmt.Errorf("%s is required when using --summarize-provider=%s", env, provider)
+	}
+	return key, nil
 }
 
-// GoString implements fmt.GoStringer so %#v is also redacted.
-func (c Config) GoString() string { return c.String() }
-
-func redactedPresence(s string) string {
-	if s == "" {
-		return "<unset>"
-	}
-	return "<redacted>"
+// fixedProvider serves p to every tool call regardless of its session.
+func fixedProvider(p Provider) func(*mcp.ServerSession) Provider {
+	return func(*mcp.ServerSession) Provider { return p }
 }
 
 // errBodySnippetMax bounds how many bytes of an HTTP error response body are

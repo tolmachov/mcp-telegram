@@ -42,7 +42,7 @@ func TestFlagValidationActions(t *testing.T) {
 	assert.NoError(t, users.Action(ctx, nil, []string{"123"}))
 	assert.Error(t, users.Action(ctx, nil, []string{"*", "123"}))
 
-	for _, flag := range []*cli.IntFlag{SummarizeBatchTokensFlag(), TGRateLimitRPSFlag(), FloodWaitMaxSecsFlag()} {
+	for _, flag := range []*cli.IntFlag{TGRateLimitRPSFlag(), FloodWaitMaxSecsFlag()} {
 		require.NotNil(t, flag.Action, flag.Name)
 		assert.NoError(t, flag.Action(ctx, nil, flag.Value), flag.Name)
 		assert.Error(t, flag.Action(ctx, nil, 0), flag.Name)

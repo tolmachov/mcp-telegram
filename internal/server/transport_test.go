@@ -17,8 +17,12 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/keyring"
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore/sessionstoretest"
+	"github.com/tolmachov/mcp-telegram/internal/summarize"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
+
+// testSummarize is a valid summarisation configuration that reads no keys.
+var testSummarize = summarize.Config{Provider: summarize.ProviderSampling, BatchTokens: 1}
 
 func testServer(t *testing.T) *Server {
 	t.Helper()
@@ -170,6 +174,7 @@ func TestRunHTTPRejectsInvalidAuthConfig(t *testing.T) {
 		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
 		Transport: TransportHTTP,
 		HTTPAddr:  freePort(t),
+		Summarize: testSummarize,
 		Stdin:     strings.NewReader(""),
 		Stdout:    io.Discard,
 		ErrOut:    io.Discard,

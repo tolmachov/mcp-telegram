@@ -181,7 +181,6 @@ func SummarizeBatchTokensFlag() *cli.IntFlag {
 		Value:   DefaultSummarizeBatchTokens,
 		Usage:   "Approximate number of tokens per batch for summarization",
 		Sources: cli.EnvVars("MCP_SUMMARIZE_BATCH_TOKENS"),
-		Action:  requirePositive(SummarizeBatchTokens),
 	}
 }
 
