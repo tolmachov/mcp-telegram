@@ -220,6 +220,8 @@ func TestChatsCacheLoad(t *testing.T) {
 	t.Run("refresh does not join a load that started before it", func(t *testing.T) {
 		l := newGatedLoader()
 		c := NewChatsCache(t.Context(), l.load)
+		waiting := make(chan struct{})
+		c.refreshWaits = func() { close(waiting) }
 
 		stale := make(chan *ChatsSnapshot, 1)
 		go func() {
@@ -235,9 +237,7 @@ func TestChatsCacheLoad(t *testing.T) {
 			assert.NoError(t, err)
 			refreshed <- snap
 		}()
-		// Give the refresh time to reach the running load. Nothing marks
-		// that moment; arriving late only makes the check pass trivially.
-		time.Sleep(20 * time.Millisecond)
+		<-waiting // the refresh has seen the running load
 		close(l.release)
 
 		first, second := <-stale, <-refreshed
@@ -273,6 +273,45 @@ func TestChatsCacheLoad(t *testing.T) {
 		<-secondDone
 		assert.Zero(t, firstHeard.Load(), "a caller that left hears no more progress")
 		assert.Equal(t, int64(1), secondHeard.Load(), "a caller that joined late still hears the load's progress")
+	})
+
+	t.Run("a slow progress callback does not hold back a caller leaving", func(t *testing.T) {
+		l := newGatedLoader()
+		c := NewChatsCache(t.Context(), l.load)
+
+		inSlow, releaseSlow := make(chan struct{}), make(chan struct{})
+		slowDone := make(chan struct{})
+		go func() {
+			defer close(slowDone)
+			_, err := c.Load(t.Context(), func(int, string) {
+				close(inSlow)
+				<-releaseSlow
+			}, false)
+			assert.NoError(t, err)
+		}()
+		<-l.entered
+
+		var leaverHeard atomic.Int64
+		leaverCtx, cancelLeaver := context.WithCancel(t.Context())
+		leaverDone := make(chan struct{})
+		go func() {
+			defer close(leaverDone)
+			_, _ = c.Load(leaverCtx, func(int, string) { leaverHeard.Add(1) }, false)
+		}()
+		require.Eventually(t, func() bool { return c.watchers() == 2 }, time.Second, time.Millisecond)
+
+		close(l.release)
+		<-inSlow // the load is stuck in the slow caller's callback
+		cancelLeaver()
+		select {
+		case <-leaverDone:
+		case <-time.After(time.Second):
+			require.FailNow(t, "a caller leaving waited for another caller's progress callback")
+		}
+		heardBeforeLeaving := leaverHeard.Load()
+		close(releaseSlow)
+		<-slowDone
+		assert.Equal(t, heardBeforeLeaving, leaverHeard.Load(), "no progress reaches a caller after it left")
 	})
 }
 

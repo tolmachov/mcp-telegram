@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -61,6 +62,11 @@ type ChatsCache struct {
 	// started and numbers them.
 	flight  *chatsFlight
 	started int64
+
+	// refreshWaits, when set, is called each time a refresh starts waiting
+	// out a load that predates it. Tests use it to know the refresh has seen
+	// that load.
+	refreshWaits func()
 }
 
 // chatsFlight is one load shared by every caller waiting on it.
@@ -72,8 +78,15 @@ type chatsFlight struct {
 	err  error
 
 	mu       sync.Mutex
-	watchers map[int]ProgressFunc
+	watchers map[int]progressWatcher
 	nextID   int
+}
+
+// progressWatcher is one caller subscribed to a load's progress: onProgress
+// is called only while ctx, the caller's context, is live.
+type progressWatcher struct {
+	ctx        context.Context
+	onProgress ProgressFunc
 }
 
 // NewChatsCache creates a cache that fills itself through load. life is the
@@ -98,7 +111,7 @@ func (c *ChatsCache) Load(ctx context.Context, onProgress ProgressFunc, refresh 
 	if f == nil {
 		return snap, err
 	}
-	defer f.watch(onProgress)()
+	defer f.watch(ctx, onProgress)()
 	return f.wait(ctx)
 }
 
@@ -127,6 +140,9 @@ func (c *ChatsCache) join(ctx context.Context, refresh bool) (*chatsFlight, *Cha
 		// The running load predates this refresh: let it finish, then start
 		// or join a newer one.
 		c.mu.Unlock()
+		if c.refreshWaits != nil {
+			c.refreshWaits()
+		}
 		select {
 		case <-ctx.Done():
 			return nil, nil, fmt.Errorf("loading chats: %w", ctx.Err())
@@ -162,7 +178,7 @@ func (c *ChatsCache) newest() *ChatsSnapshot {
 // startLocked starts a new load. c.mu must be held.
 func (c *ChatsCache) startLocked() *chatsFlight {
 	c.started++
-	f := &chatsFlight{seq: c.started, done: make(chan struct{}), watchers: make(map[int]ProgressFunc)}
+	f := &chatsFlight{seq: c.started, done: make(chan struct{}), watchers: make(map[int]progressWatcher)}
 	c.flight = f
 	go c.run(f)
 	return f
@@ -205,8 +221,8 @@ func (c *ChatsCache) retainLocked(snap *ChatsSnapshot) {
 }
 
 // watch subscribes onProgress to f's progress until the returned func is
-// called. A nil onProgress hears nothing.
-func (f *chatsFlight) watch(onProgress ProgressFunc) func() {
+// called or ctx ends. A nil onProgress hears nothing.
+func (f *chatsFlight) watch(ctx context.Context, onProgress ProgressFunc) func() {
 	if onProgress == nil {
 		return func() {}
 	}
@@ -214,7 +230,7 @@ func (f *chatsFlight) watch(onProgress ProgressFunc) func() {
 	defer f.mu.Unlock()
 	id := f.nextID
 	f.nextID++
-	f.watchers[id] = onProgress
+	f.watchers[id] = progressWatcher{ctx: ctx, onProgress: onProgress}
 	return func() {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -222,12 +238,19 @@ func (f *chatsFlight) watch(onProgress ProgressFunc) func() {
 	}
 }
 
-// progress relays the load's progress to the callers waiting on it.
+// progress relays the load's progress to the callers waiting on it. The
+// callbacks write to the network, so they run outside f.mu: holding it would
+// stall every caller joining or leaving the load behind one slow write. A
+// caller may leave between the snapshot and its callback; its ended ctx keeps
+// that late callback from reaching it.
 func (f *chatsFlight) progress(current int, message string) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, onProgress := range f.watchers {
-		onProgress(current, message)
+	watchers := slices.Collect(maps.Values(f.watchers))
+	f.mu.Unlock()
+	for _, w := range watchers {
+		if w.ctx.Err() == nil {
+			w.onProgress(current, message)
+		}
 	}
 }
 
