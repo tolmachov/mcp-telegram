@@ -34,7 +34,7 @@ func TestSweepOrphanSessions(t *testing.T) {
 
 	a, _ := newTestServer(t, testConfig(t), store, neverStartLogin)
 	a.now = func() time.Time { return sweepTime }
-	a.sweepOrphanSessions(ctx)
+	a.runSweep(ctx)
 
 	for _, tc := range []struct {
 		sid  string
@@ -64,14 +64,14 @@ func TestSweepSessionCutoffBoundary(t *testing.T) {
 
 	// Just inside the cutoff: kept.
 	a.now = func() time.Time { return base.Add(refreshTokenTTL + sweepMargin - time.Minute) }
-	a.sweepOrphanSessions(ctx)
+	a.runSweep(ctx)
 	exists, err := store.Exists(ctx, allowedUser, sid)
 	require.NoError(t, err)
 	assert.True(t, exists, "session inside the cutoff must be kept")
 
 	// Just past it: reclaimed.
 	a.now = func() time.Time { return base.Add(refreshTokenTTL + sweepMargin + time.Minute) }
-	a.sweepOrphanSessions(ctx)
+	a.runSweep(ctx)
 	exists, err = store.Exists(ctx, allowedUser, sid)
 	require.NoError(t, err)
 	assert.False(t, exists, "session past the cutoff must be reclaimed")
@@ -97,7 +97,7 @@ func TestSweepExpiredTombstones(t *testing.T) {
 
 	a, _ := newTestServer(t, testConfig(t), store, neverStartLogin)
 	a.now = func() time.Time { return sweepTime }
-	a.sweepExpiredTombstones(ctx)
+	a.runSweep(ctx)
 
 	stale, err := store.Revoked(ctx, allowedUser, staleSID)
 	require.NoError(t, err)
@@ -128,14 +128,14 @@ func TestSweepTombstoneCutoffBoundary(t *testing.T) {
 	// the revoked grant could still be presented until LoginAt+TTL, and the
 	// margin absorbs clock skew on top.
 	a.now = func() time.Time { return base.Add(refreshTokenTTL + sweepMargin - time.Minute) }
-	a.sweepExpiredTombstones(ctx)
+	a.runSweep(ctx)
 	revoked, err := store.Revoked(ctx, allowedUser, sid)
 	require.NoError(t, err)
 	assert.True(t, revoked, "tombstone inside the cutoff must survive to keep rejecting live tokens")
 
 	// Just past it: reclaimed.
 	a.now = func() time.Time { return base.Add(refreshTokenTTL + sweepMargin + time.Minute) }
-	a.sweepExpiredTombstones(ctx)
+	a.runSweep(ctx)
 	revoked, err = store.Revoked(ctx, allowedUser, sid)
 	require.NoError(t, err)
 	assert.False(t, revoked, "tombstone past the cutoff must be reclaimed")
@@ -157,6 +157,6 @@ func (panicListStore) List(context.Context) ([]sessionstore.SessionRef, error) {
 func TestSweepSurvivesPanickingBackend(t *testing.T) {
 	store := panicListStore{Memory: sessionstoretest.NewMemory()}
 	a, _ := newTestServer(t, testConfig(t), store, neverStartLogin)
-	assert.NotPanics(t, func() { a.runSweep(context.Background()) },
+	assert.NotPanics(t, func() { a.runTick("test", func() { a.runSweep(context.Background()) }) },
 		"a panicking backend must be recovered, not propagated out of the sweep")
 }

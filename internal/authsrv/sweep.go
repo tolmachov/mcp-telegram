@@ -3,6 +3,9 @@ package authsrv
 import (
 	"context"
 	"time"
+
+	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
+	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
 // Orphan-session sweep cadence. A client that drops its tokens without
@@ -29,79 +32,58 @@ func (a *AuthServer) sessionSweeper(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			a.runSweep(ctx)
+			a.runTick("session sweeper", func() { a.runSweep(ctx) })
 			t.Reset(sweepInterval)
 		}
 	}
 }
 
-// runSweep executes one sweep iteration, isolating it from a panicking store
-// backend: a bad entry (or a backend bug surfacing as a panic during
-// List/Delete) is logged and the goroutine survives to the next tick instead of
-// unwinding and crashing the whole auth-server process.
-func (a *AuthServer) runSweep(ctx context.Context) {
-	for name, sweep := range map[string]func(context.Context){
-		"sessions":   a.sweepOrphanSessions,
-		"tombstones": a.sweepExpiredTombstones,
-		"oauth_state": func(ctx context.Context) {
-			if err := a.store.SweepAuthState(ctx, a.now()); err != nil {
-				a.logger.Error("oauth state sweep failed", "err", err)
-			}
-		},
-	} {
-		func() {
-			defer func() {
-				if recovered := recover(); recovered != nil {
-					a.logger.Error("auth sweep panicked; recovered", "sweep", name, "panic", recovered)
-				}
-			}()
-			sweep(ctx)
-		}()
-	}
+// runTick executes one tick of a background maintenance loop, isolating the
+// loop from a panic (a store backend bug, a misbehaving LoginFlow.Abort): it
+// is logged and the loop survives to the next tick instead of unwinding and
+// crashing the whole auth-server process.
+func (a *AuthServer) runTick(loop string, tick func()) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			a.logger.Error("auth background tick panicked; recovered", "loop", loop, "panic", recovered)
+		}
+	}()
+	tick()
 }
 
-// sweepOrphanSessions deletes every stored session whose blob is older than
-// the refresh-token TTL (plus margin). Safety invariant: login and every gotd
-// re-store both WRITE the blob, so its
+// runSweep executes one storage sweep iteration.
+//
+// Session blobs: login and every gotd re-store both WRITE the blob, so its
 // mtime >= LoginAt of every token bound to it; the refresh TTL is absolute
 // from LoginAt, so age > TTL means every refresh token for the session has
 // expired and the session can never be used again. Active sessions are
 // re-written by gotd during normal operation and by fresh logins, which keeps
-// them out of the cutoff. Individual failures are logged and skipped — the
-// next sweep retries.
-func (a *AuthServer) sweepOrphanSessions(ctx context.Context) {
-	refs, err := a.store.List(ctx)
-	if err != nil {
-		a.logger.Error("orphan-session sweep: listing sessions failed", "err", err)
-		return
-	}
-	cutoff := refreshTokenTTL + sweepMargin
-	now := a.now()
-	for _, ref := range refs {
-		age := now.Sub(ref.UpdatedAt)
-		if age <= cutoff {
-			continue
-		}
-		if err := a.store.Delete(ctx, ref.UserID, ref.SID); err != nil {
-			a.logger.Error("orphan-session sweep: delete failed",
-				"user_id", ref.UserID, "session", ref.SID, "err", err)
-			continue
-		}
-		a.logger.Info("orphan-session sweep: deleted unreachable session",
-			"user_id", ref.UserID, "session", ref.SID, "age", age.Round(time.Hour))
+// them out of the cutoff.
+//
+// Revocation tombstones: a tombstone's mtime is its revoke time, and a
+// session's LoginAt precedes its revoke time, so once the tombstone is older
+// than the cutoff no refresh token for that session can still be valid — the
+// tombstone has done its job and can go.
+func (a *AuthServer) runSweep(ctx context.Context) {
+	a.sweepRefs(ctx, "sessions", a.store.List, a.store.Delete)
+	a.sweepRefs(ctx, "tombstones", a.store.ListRevoked, a.store.DeleteRevoked)
+	if err := a.store.SweepAuthState(ctx, a.now()); err != nil {
+		a.logger.Error("oauth state sweep failed", "err", err)
 	}
 }
 
-// sweepExpiredTombstones reclaims revocation tombstones older than the cutoff.
-// A tombstone's mtime is its revoke time, and a session's LoginAt precedes its
-// revoke time, so once the tombstone is older than refreshTokenTTL+margin no
-// refresh token for that session can still be valid — the tombstone has done
-// its job and can go. Same skip-and-continue error handling as the session
-// sweep.
-func (a *AuthServer) sweepExpiredTombstones(ctx context.Context) {
-	refs, err := a.store.ListRevoked(ctx)
+// sweepRefs deletes every entry list returns whose UpdatedAt is older than
+// the refresh-token TTL plus sweepMargin. Individual failures are logged and
+// skipped — the next sweep retries.
+func (a *AuthServer) sweepRefs(
+	ctx context.Context,
+	label string,
+	list func(context.Context) ([]sessionstore.SessionRef, error),
+	del func(context.Context, tgid.UserID, string) error,
+) {
+	refs, err := list(ctx)
 	if err != nil {
-		a.logger.Error("tombstone sweep: listing tombstones failed", "err", err)
+		a.logger.Error("auth sweep: listing failed", "sweep", label, "err", err)
 		return
 	}
 	cutoff := refreshTokenTTL + sweepMargin
@@ -111,12 +93,12 @@ func (a *AuthServer) sweepExpiredTombstones(ctx context.Context) {
 		if age <= cutoff {
 			continue
 		}
-		if err := a.store.DeleteRevoked(ctx, ref.UserID, ref.SID); err != nil {
-			a.logger.Error("tombstone sweep: delete failed",
-				"user_id", ref.UserID, "session", ref.SID, "err", err)
+		if err := del(ctx, ref.UserID, ref.SID); err != nil {
+			a.logger.Error("auth sweep: delete failed",
+				"sweep", label, "user_id", ref.UserID, "session", ref.SID, "err", err)
 			continue
 		}
-		a.logger.Info("tombstone sweep: reclaimed expired tombstone",
-			"user_id", ref.UserID, "session", ref.SID, "age", age.Round(time.Hour))
+		a.logger.Info("auth sweep: deleted expired entry",
+			"sweep", label, "user_id", ref.UserID, "session", ref.SID, "age", age.Round(time.Hour))
 	}
 }

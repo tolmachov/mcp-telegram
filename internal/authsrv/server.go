@@ -118,18 +118,9 @@ func (a *AuthServer) Start(parent context.Context) error {
 	a.janitorDone = make(chan struct{})
 	a.sweepDone = make(chan struct{})
 	a.started = true
-	go a.runLoop("login janitor", a.janitor, ctx)
-	go a.runLoop("session sweeper", a.sessionSweeper, ctx)
+	go a.janitor(ctx)
+	go a.sessionSweeper(ctx)
 	return nil
-}
-
-func (a *AuthServer) runLoop(name string, loop func(context.Context), ctx context.Context) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			a.logger.Error("auth background loop panicked; recovered", "loop", name, "panic", recovered)
-		}
-	}()
-	loop(ctx)
 }
 
 // Close stops the janitor and the orphan-session sweeper, then aborts every
