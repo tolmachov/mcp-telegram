@@ -37,11 +37,6 @@ func TestAllFlagConstructors(t *testing.T) {
 
 func TestFlagValidationActions(t *testing.T) {
 	ctx := context.Background()
-	provider := SummarizeProviderFlag()
-	require.NotNil(t, provider.Action)
-	assert.NoError(t, provider.Action(ctx, nil, "sampling"))
-	assert.Error(t, provider.Action(ctx, nil, "unknown"))
-
 	users := AuthAllowedUsersFlag()
 	require.NotNil(t, users.Action)
 	assert.NoError(t, users.Action(ctx, nil, []string{"123"}))

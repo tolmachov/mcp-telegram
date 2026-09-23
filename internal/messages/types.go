@@ -29,7 +29,6 @@ type Message struct {
 	Entities   []string       `json:"entities,omitempty"`
 	Reactions  []ReactionInfo `json:"reactions,omitempty"`
 	Replies    *RepliesInfo   `json:"replies,omitempty"`
-	Raw        *tg.Message    `json:"-"` // Original message for advanced use cases
 }
 
 // RepliesInfo summarizes the discussion thread attached to a message: the

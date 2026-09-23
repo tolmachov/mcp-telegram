@@ -15,7 +15,9 @@ import (
 // TestChatSummarizeBuildResult covers the (result, err) → response branching:
 // success, sampling-unsupported, salvaged-partial, and total failure.
 func TestChatSummarizeBuildResult(t *testing.T) {
-	h := &ChatSummarizeHandler{config: summarize.Config{Provider: summarize.ProviderSampling}}
+	summarizer, err := summarize.New(summarize.Config{Provider: summarize.ProviderSampling})
+	require.NoError(t, err)
+	h := &ChatSummarizeHandler{summarizer: summarizer}
 	in := SummarizeChatInput{ChatID: 7, Goal: "key points", Period: "week"}
 	since := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
@@ -134,39 +136,4 @@ func TestParseSinceTime(t *testing.T) {
 	// Unknown period
 	_, err = h.parseSinceTime(SummarizeChatInput{Period: "yearly"})
 	require.Error(t, err)
-}
-
-func TestCreateProvider(t *testing.T) {
-	tests := []struct {
-		name        string
-		config      summarize.Config
-		wantErr     bool
-		wantErrPart string
-	}{
-		{"sampling", summarize.Config{Provider: summarize.ProviderSampling}, false, ""},
-		{"empty defaults to sampling", summarize.Config{}, false, ""},
-		{"gemini", summarize.Config{Provider: summarize.ProviderGemini, GeminiAPIKey: "test-key"}, false, ""},
-		{"gemini missing key", summarize.Config{Provider: summarize.ProviderGemini}, true, "MCP_SUMMARIZE_GEMINI_API_KEY is required"},
-		{"ollama", summarize.Config{Provider: summarize.ProviderOllama, OllamaURL: "http://localhost:11434"}, false, ""},
-		{"ollama missing url", summarize.Config{Provider: summarize.ProviderOllama}, true, "OLLAMA_URL is required"},
-		{"anthropic", summarize.Config{Provider: summarize.ProviderAnthropic, AnthropicAPIKey: "test-key"}, false, ""},
-		{"anthropic missing key", summarize.Config{Provider: summarize.ProviderAnthropic}, true, "MCP_SUMMARIZE_ANTHROPIC_API_KEY is required"},
-		{"unknown returns error", summarize.Config{Provider: "openai"}, true, "unknown summarization provider"},
-		{"typo returns error", summarize.Config{Provider: "smapling"}, true, "unknown summarization provider"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			h := &ChatSummarizeHandler{config: tt.config}
-			got, err := h.createProvider(nil)
-			if tt.wantErr {
-				require.Error(t, err)
-				if tt.wantErrPart != "" {
-					assert.Contains(t, err.Error(), tt.wantErrPart)
-				}
-				return
-			}
-			require.NoError(t, err)
-			require.NotNil(t, got)
-		})
-	}
 }

@@ -15,14 +15,14 @@ import (
 // ChatSummarizeHandler handles the SummarizeChat tool.
 type ChatSummarizeHandler struct {
 	msgProvider *messages.Provider
-	config      summarize.Config
+	summarizer  *summarize.Summarizer
 }
 
 // NewChatSummarizeHandler creates a new ChatSummarizeHandler.
-func NewChatSummarizeHandler(msgProvider *messages.Provider, config summarize.Config) *ChatSummarizeHandler {
+func NewChatSummarizeHandler(msgProvider *messages.Provider, summarizer *summarize.Summarizer) *ChatSummarizeHandler {
 	return &ChatSummarizeHandler{
 		msgProvider: msgProvider,
-		config:      config,
+		summarizer:  summarizer,
 	}
 }
 
@@ -103,17 +103,11 @@ func (h *ChatSummarizeHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 		return errResult(fmt.Sprintf("Invalid time parameters: %v", err)), nil, nil
 	}
 
-	provider, err := h.createProvider(req.Session)
-	if err != nil {
-		return nil, nil, failed("set up summarization", err)
-	}
-	summarizer := summarize.NewSummarizer(provider, h.msgProvider, h.config.BatchTokens)
-
 	mcpLog(ctx, req.Session, logLevelInfo, "SummarizeChat", map[string]any{
 		"chat_id":  in.ChatID,
 		"goal":     in.Goal,
 		"since":    since.Format(time.RFC3339),
-		"provider": h.config.Provider,
+		"provider": h.summarizer.ProviderName(),
 	})
 
 	// Progress callback using MCP notifications. sendProgress is a no-op when
@@ -122,7 +116,7 @@ func (h *ChatSummarizeHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 		sendProgress(ctx, req, float64(current), float64(total), message)
 	}
 
-	result, err := summarizer.SummarizeDetailed(ctx, in.ChatID, in.Goal, since, maxMessages, onProgress)
+	result, err := h.summarizer.Summarize(ctx, req.Session, h.msgProvider, in.ChatID, in.Goal, since, maxMessages, onProgress)
 	return h.buildDetailedResult(in, since, periodEnd, result, err)
 }
 
@@ -142,7 +136,7 @@ func (h *ChatSummarizeHandler) buildDetailedResult(in SummarizeChatInput, since,
 		Period:            in.Period,
 		PeriodStart:       since.UTC().Format(time.RFC3339),
 		PeriodEnd:         periodEnd.UTC().Format(time.RFC3339),
-		Provider:          string(h.config.Provider),
+		Provider:          string(h.summarizer.ProviderName()),
 		Summary:           result.Summary,
 		MessagesProcessed: result.MessagesProcessed,
 		Truncated:         result.Truncated,
@@ -182,30 +176,4 @@ func (h *ChatSummarizeHandler) parseSinceTime(in SummarizeChatInput) (time.Time,
 		return time.Time{}, fmt.Errorf("invalid period: %s (use one of: %s)", period, strings.Join(summarize.PeriodNames(), ", "))
 	}
 	return time.Now().Add(-d), nil
-}
-
-func (h *ChatSummarizeHandler) createProvider(session *mcp.ServerSession) (summarize.Provider, error) {
-	switch h.config.Provider {
-	case "", summarize.ProviderSampling:
-		// Empty string is the zero value of ProviderName; treat it as the
-		// default (sampling) so programmatic Config{} works without surprises.
-		return summarize.NewSamplingProvider(session), nil
-	case summarize.ProviderGemini:
-		if h.config.GeminiAPIKey == "" {
-			return nil, fmt.Errorf("MCP_SUMMARIZE_GEMINI_API_KEY is required when using --summarize-provider=gemini")
-		}
-		return summarize.NewGeminiProvider(h.config.GeminiAPIKey, h.config.Model), nil
-	case summarize.ProviderOllama:
-		if h.config.OllamaURL == "" {
-			return nil, fmt.Errorf("MCP_SUMMARIZE_OLLAMA_URL is required when using --summarize-provider=ollama")
-		}
-		return summarize.NewOllamaProvider(h.config.OllamaURL, h.config.Model), nil
-	case summarize.ProviderAnthropic:
-		if h.config.AnthropicAPIKey == "" {
-			return nil, fmt.Errorf("MCP_SUMMARIZE_ANTHROPIC_API_KEY is required when using --summarize-provider=anthropic")
-		}
-		return summarize.NewAnthropicProvider(h.config.AnthropicAPIKey, h.config.Model), nil
-	default:
-		return nil, fmt.Errorf("unknown summarization provider %q; expected one of: sampling, gemini, ollama, anthropic", h.config.Provider)
-	}
 }

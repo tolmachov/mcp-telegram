@@ -17,7 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
-	"github.com/tolmachov/mcp-telegram/internal/summarize"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 	"github.com/tolmachov/mcp-telegram/internal/tools"
@@ -78,7 +77,7 @@ func listToolNames(t *testing.T, srv *mcp.Server) map[string]string {
 func buildTestHandlers(t *testing.T) (full, research []tools.Handler) {
 	t.Helper()
 	api := tg.NewClient(noopInvoker{})
-	s := &Server{opts: Options{SummarizeCfg: summarize.Config{BatchTokens: 8000}, MediaMaxBytes: 1024}}
+	s := &Server{opts: Options{MediaMaxBytes: 1024}}
 	peers := tgclient.NewResolver(api, 100_000)
 	chatsCache := tgdata.NewChatsCache(nil)
 	return s.buildHandlers(api, peers, messages.NewProvider(peers), chatsCache)
@@ -538,7 +537,7 @@ func TestBackupMessagesOfferedOnlyOnStdioOutsideResearch(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.transport+"/"+tc.variant, func(t *testing.T) {
-			s := &Server{logger: testLogger(), opts: Options{Transport: tc.transport, Variant: tc.variant, SummarizeCfg: summarize.Config{BatchTokens: 8000}}}
+			s := &Server{logger: testLogger(), opts: Options{Transport: tc.transport, Variant: tc.variant}}
 			full, _ := s.buildHandlers(api, peers, messages.NewProvider(peers), tgdata.NewChatsCache(nil))
 			_, ok := listToolNames(t, newInner(impl, nil, full, noWire, false, testLogger()))["BackupMessages"]
 			assert.Equal(t, tc.want, ok)

@@ -65,7 +65,7 @@ type Options struct {
 	Config         *tgclient.Config
 	Version        string
 	AllowedPaths   []string // --allowed-paths; empty → the OS backup directory (see backupAllowedPaths)
-	SummarizeCfg   summarize.Config
+	Summarizer     *summarize.Summarizer
 	MediaMaxBytes  int
 	TGRateLimitRPS int
 	PinnedRefresh  time.Duration // 0 → disable pinned-chat background watcher
@@ -426,7 +426,7 @@ func (s *Server) buildHandlers(api *tg.Client, peers *tgclient.Resolver, msgProv
 		tools.NewGetForumTopicsHandler(msgProvider),
 		tools.NewUsernameResolveHandler(api),
 		tools.NewMessageLinkResolveHandler(api),
-		tools.NewChatSummarizeHandler(msgProvider, s.opts.SummarizeCfg),
+		tools.NewChatSummarizeHandler(msgProvider, s.opts.Summarizer),
 		tools.NewMediaGetHandler(api, s.opts.MediaMaxBytes),
 		tools.NewGetFoldersHandler(api),
 	}

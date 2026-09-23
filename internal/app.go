@@ -170,13 +170,16 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 						}
 					}
 					transport := cmd.String(flags.Transport)
-					summarizeCfg := summarize.Config{
+					summarizer, err := summarize.New(summarize.Config{
 						Provider:        summarizeProvider,
 						Model:           cmd.String(flags.SummarizeModel),
 						OllamaURL:       cmd.String(flags.OllamaURL),
 						GeminiAPIKey:    geminiKey,
 						AnthropicAPIKey: anthropicKey,
 						BatchTokens:     cmd.Int(flags.SummarizeBatchTokens),
+					})
+					if err != nil {
+						return err
 					}
 					var authCfg *authsrv.Config
 					var store sessionstore.Store
@@ -196,7 +199,7 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 						Auth:           authCfg,
 						SessionStore:   store,
 						AllowedPaths:   cmd.StringSlice(flags.AllowedPaths),
-						SummarizeCfg:   summarizeCfg,
+						Summarizer:     summarizer,
 						MediaMaxBytes:  cmd.Int(flags.MediaMaxBytes),
 						TGRateLimitRPS: cmd.Int(flags.TGRateLimitRPS),
 						PinnedRefresh:  time.Duration(cmd.Int(flags.PinnedRefreshSecs)) * time.Second,

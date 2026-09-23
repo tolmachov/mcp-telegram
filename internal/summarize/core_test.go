@@ -25,12 +25,49 @@ func (f providerFunc) Summarize(ctx context.Context, req Request) (string, error
 	return f(ctx, req)
 }
 
-func TestProviderValidationAndConfigRedaction(t *testing.T) {
-	for _, name := range []string{"sampling", "ollama", "gemini", "anthropic"} {
-		assert.NoError(t, ValidateProviderName(name))
-	}
-	assert.Error(t, ValidateProviderName("unknown"))
+// fixedSummarizer summarizes through llm with the given batch budget.
+func fixedSummarizer(llm Provider, batchTokens int) *Summarizer {
+	return &Summarizer{name: ProviderSampling, providerFor: fixedProvider(llm), batchTokens: batchTokens}
+}
 
+func TestNewValidatesConfig(t *testing.T) {
+	tests := []struct {
+		name        string
+		config      Config
+		wantErrPart string
+	}{
+		{"sampling", Config{Provider: ProviderSampling}, ""},
+		{"gemini", Config{Provider: ProviderGemini, GeminiAPIKey: "test-key"}, ""},
+		{"gemini missing key", Config{Provider: ProviderGemini}, "MCP_SUMMARIZE_GEMINI_API_KEY is required"},
+		{"ollama", Config{Provider: ProviderOllama, OllamaURL: "http://localhost:11434"}, ""},
+		{"ollama missing url", Config{Provider: ProviderOllama}, "OLLAMA_URL is required"},
+		{"anthropic", Config{Provider: ProviderAnthropic, AnthropicAPIKey: "test-key"}, ""},
+		{"anthropic missing key", Config{Provider: ProviderAnthropic}, "MCP_SUMMARIZE_ANTHROPIC_API_KEY is required"},
+		{"empty", Config{}, "invalid summarization provider"},
+		{"unknown", Config{Provider: "openai"}, "invalid summarization provider"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, err := New(tt.config)
+			if tt.wantErrPart != "" {
+				assert.ErrorContains(t, err, tt.wantErrPart)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.config.Provider, s.ProviderName())
+			assert.NotNil(t, s.providerFor(nil))
+		})
+	}
+}
+
+func TestSamplingBindsToTheCallSession(t *testing.T) {
+	s, err := New(Config{Provider: ProviderSampling})
+	require.NoError(t, err)
+	_, err = s.providerFor(nil).Summarize(t.Context(), providerTestRequest())
+	assert.ErrorIs(t, err, ErrSamplingUnsupported)
+}
+
+func TestConfigRedaction(t *testing.T) {
 	cfg := Config{Provider: ProviderGemini, Model: "model", GeminiAPIKey: "secret", BatchTokens: 123}
 	for _, rendered := range []string{cfg.String(), fmt.Sprintf("%#v", cfg)} {
 		assert.NotContains(t, rendered, "secret")
@@ -40,16 +77,19 @@ func TestProviderValidationAndConfigRedaction(t *testing.T) {
 }
 
 func TestTokenEstimationAndBatching(t *testing.T) {
-	assert.Equal(t, 1, estimateTokens("abcd"))
-	assert.Equal(t, 2, estimateTokens("абвг"))
-	assert.Nil(t, splitIntoBatchesByTokens(nil, 10))
+	assert.Equal(t, 1, estimateTokens([]byte("abcd")))
+	assert.Equal(t, 2, estimateTokens([]byte("абвг")))
+	empty, err := splitIntoBatchesByTokens(nil, 10)
+	require.NoError(t, err)
+	assert.Nil(t, empty)
 
 	input := []messages.Message{
 		{ID: 1, Text: strings.Repeat("a", 40)},
 		{ID: 2, Text: strings.Repeat("b", 40)},
 		{ID: 3, Text: strings.Repeat("c", 40)},
 	}
-	batches := splitIntoBatchesByTokens(input, 15)
+	batches, err := splitIntoBatchesByTokens(input, 15)
+	require.NoError(t, err)
 	require.NotEmpty(t, batches)
 	count := 0
 	for _, batch := range batches {
@@ -59,35 +99,56 @@ func TestTokenEstimationAndBatching(t *testing.T) {
 	assert.Equal(t, len(input), count)
 }
 
+// TestBatchingEstimatesTheEncodedBytes pins that the budget is spent on what
+// the provider receives: each batch's JSON, not a shorter rendering of it.
+func TestBatchingEstimatesTheEncodedBytes(t *testing.T) {
+	input := []messages.Message{
+		{ID: 1, SenderName: strings.Repeat("n", 200), Text: "a"},
+		{ID: 2, SenderName: strings.Repeat("n", 200), Text: "b"},
+	}
+	encoded, err := json.Marshal(input[0])
+	require.NoError(t, err)
+	perMessage := estimateTokens(encoded)
+
+	batches, err := splitIntoBatchesByTokens(input, perMessage)
+	require.NoError(t, err)
+	assert.Len(t, batches, 2, "two messages must not fit a one-message budget")
+
+	batches, err = splitIntoBatchesByTokens(input, 2*perMessage)
+	require.NoError(t, err)
+	require.Len(t, batches, 1)
+	sent, err := json.Marshal(batches[0])
+	require.NoError(t, err)
+	want, err := json.Marshal(input)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(want), string(sent))
+}
+
 func TestSummarizeWithProgressSuccessFailurePanicAndCancellation(t *testing.T) {
 	req := providerTestRequest()
 
-	s := NewSummarizer(providerFunc(func(context.Context, Request) (string, error) {
+	got, err := summarizeWithProgress(t.Context(), providerFunc(func(context.Context, Request) (string, error) {
 		return " summary ", nil
-	}), nil, 8000)
-	got, err := s.summarizeWithProgress(t.Context(), req, 1, 1, nil)
+	}), req, 1, 1, nil)
 	require.NoError(t, err)
 	assert.Equal(t, " summary ", got)
 
-	s.provider = providerFunc(func(context.Context, Request) (string, error) {
+	_, err = summarizeWithProgress(t.Context(), providerFunc(func(context.Context, Request) (string, error) {
 		return "", errors.New("provider failed")
-	})
-	_, err = s.summarizeWithProgress(t.Context(), req, 1, 1, nil)
+	}), req, 1, 1, nil)
 	assert.ErrorContains(t, err, "provider failed")
 
-	s.provider = providerFunc(func(context.Context, Request) (string, error) {
+	_, err = summarizeWithProgress(t.Context(), providerFunc(func(context.Context, Request) (string, error) {
 		panic("provider panic")
-	})
-	_, err = s.summarizeWithProgress(t.Context(), req, 1, 1, nil)
+	}), req, 1, 1, nil)
 	assert.ErrorContains(t, err, "provider panicked")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	s.provider = providerFunc(func(ctx context.Context, _ Request) (string, error) {
+	_, err = summarizeWithProgress(ctx, providerFunc(func(ctx context.Context, _ Request) (string, error) {
 		<-ctx.Done()
 		return "", ctx.Err()
-	})
-	_, err = s.summarizeWithProgress(ctx, req, 1, 1, nil)
+	}), req, 1, 1, nil)
 	assert.ErrorContains(t, err, "canceled")
 }
 
@@ -99,7 +160,7 @@ func TestSamplingProviderWithoutCapabilityAndContentText(t *testing.T) {
 	assert.Empty(t, contentText(&mcp.ImageContent{}))
 }
 
-func TestSummarizeDetailedCountsCompletedBatches(t *testing.T) {
+func TestSummarizeCountsCompletedBatches(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		texts       []string
@@ -154,8 +215,8 @@ func TestSummarizeDetailedCountsCompletedBatches(t *testing.T) {
 				}
 				return strings.TrimSpace(summary), nil
 			})
-			s := NewSummarizer(llm, messages.NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000)), max(tc.batchTokens, 1))
-			got, err := s.SummarizeDetailed(t.Context(), 77, "summarize", time.Time{}, 100, nil)
+			s := fixedSummarizer(llm, max(tc.batchTokens, 1))
+			got, err := s.Summarize(t.Context(), nil, messages.NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000)), 77, "summarize", time.Time{}, 100, nil)
 			if tc.failBatch > 0 {
 				require.ErrorIs(t, err, assert.AnError)
 			} else {

@@ -11,6 +11,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/tolmachov/mcp-telegram/internal/messages"
 )
 
@@ -47,12 +49,44 @@ func PeriodNames() []string {
 // ProgressCallback is called with the current batch number, total batches, and a message.
 type ProgressCallback func(current, total int, message string)
 
-// Summarizer handles chat summarization using a Provider.
+// Summarizer runs rolling chat summarization through one configured provider.
+// It holds no per-chat or per-session state, so one instance serves every
+// assembly.
 type Summarizer struct {
-	provider    Provider
-	msgProvider *messages.Provider
+	name ProviderName
+	// providerFor returns the provider for one tool call. The direct-LLM
+	// providers are built once and ignore the session; sampling is a
+	// per-session operation, so it binds to the session of the call.
+	providerFor func(*mcp.ServerSession) Provider
 	batchTokens int
 }
+
+// New validates cfg and builds the summarizer it describes.
+func New(cfg Config) (*Summarizer, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	s := &Summarizer{name: cfg.Provider, batchTokens: cfg.BatchTokens}
+	switch cfg.Provider {
+	case ProviderSampling:
+		s.providerFor = func(session *mcp.ServerSession) Provider { return NewSamplingProvider(session) }
+	case ProviderGemini:
+		s.providerFor = fixedProvider(NewGeminiProvider(cfg.GeminiAPIKey, cfg.Model))
+	case ProviderOllama:
+		s.providerFor = fixedProvider(NewOllamaProvider(cfg.OllamaURL, cfg.Model))
+	case ProviderAnthropic:
+		s.providerFor = fixedProvider(NewAnthropicProvider(cfg.AnthropicAPIKey, cfg.Model))
+	}
+	return s, nil
+}
+
+// fixedProvider serves p to every tool call regardless of its session.
+func fixedProvider(p Provider) func(*mcp.ServerSession) Provider {
+	return func(*mcp.ServerSession) Provider { return p }
+}
+
+// ProviderName reports which provider this summarizer uses.
+func (s *Summarizer) ProviderName() ProviderName { return s.name }
 
 // Result includes provenance and degradation state for a bounded operation.
 type Result struct {
@@ -63,25 +97,18 @@ type Result struct {
 	Warning           string
 }
 
-// NewSummarizer creates a new Summarizer.
-func NewSummarizer(provider Provider, msgProvider *messages.Provider, batchTokens int) *Summarizer {
-	return &Summarizer{
-		provider:    provider,
-		msgProvider: msgProvider,
-		batchTokens: batchTokens,
-	}
-}
-
-// SummarizeDetailed fetches at most maxMessages and preserves usable work when
-// a later Telegram page fails.
-func (s *Summarizer) SummarizeDetailed(ctx context.Context, chatID int64, goal string, since time.Time, maxMessages int, onProgress ProgressCallback) (Result, error) {
+// Summarize fetches at most maxMessages of chatID through msgProvider and
+// summarizes them for goal, preserving usable work when a later Telegram page
+// or batch fails. session is the MCP session of the tool call (sampling
+// summarizes through it).
+func (s *Summarizer) Summarize(ctx context.Context, session *mcp.ServerSession, msgProvider *messages.Provider, chatID int64, goal string, since time.Time, maxMessages int, onProgress ProgressCallback) (Result, error) {
 	// Fetch all messages since the given time
 	opts := messages.FetchOptions{
 		Limit:    batchSize,
 		MinDate:  since,
 		MaxCount: maxMessages,
 	}
-	fetched, fetchErr := s.msgProvider.FetchAll(ctx, chatID, opts, nil)
+	fetched, fetchErr := msgProvider.FetchAll(ctx, chatID, opts, nil)
 	if fetched == nil || (fetchErr != nil && len(fetched.Messages) == 0) {
 		return Result{}, fmt.Errorf("fetching messages: %w", fetchErr)
 	}
@@ -109,9 +136,12 @@ func (s *Summarizer) SummarizeDetailed(ctx context.Context, chatID int64, goal s
 		return out, nil
 	}
 
-	// Split into batches by token count
-	batches := splitIntoBatchesByTokens(textMessages, s.batchTokens)
+	batches, err := splitIntoBatchesByTokens(textMessages, s.batchTokens)
+	if err != nil {
+		return out, err
+	}
 	totalBatches := len(batches)
+	provider := s.providerFor(session)
 
 	var runningSummary string
 
@@ -126,7 +156,7 @@ func (s *Summarizer) SummarizeDetailed(ctx context.Context, chatID int64, goal s
 		}
 		request := Request{System: systemPrompt, Goal: goal, PreviousSummary: runningSummary, Messages: encodedMessages}
 
-		summary, err := s.summarizeWithProgress(ctx, request, i+1, totalBatches, onProgress)
+		summary, err := summarizeWithProgress(ctx, provider, request, i+1, totalBatches, onProgress)
 		if err != nil {
 			// Return the summary accumulated from earlier batches alongside the
 			// error so the caller can surface partial work instead of discarding
@@ -145,62 +175,60 @@ func (s *Summarizer) SummarizeDetailed(ctx context.Context, chatID int64, goal s
 	return out, nil
 }
 
-// estimateTokens provides a rough token estimate for text.
-// Uses the common approximation of ~4 characters per token for English
+// estimateTokens provides a rough token estimate for encoded text.
+// Uses the common approximation of ~4 bytes per token for English
 // but adjusts for other languages that may have different ratios.
-func estimateTokens(text string) int {
-	// Rough approximation: ~4 chars per token for English
+func estimateTokens(text []byte) int {
+	// Rough approximation: ~4 bytes per token for English
 	// For non-ASCII text (like Cyrillic, CJK), tokens can be ~1-2 chars
-	charCount := len(text)
-	runeCount := utf8.RuneCountInString(text)
+	byteCount := len(text)
+	runeCount := utf8.RuneCount(text)
 
 	// If there are many multi-byte characters, use a lower ratio
-	if charCount > runeCount*2 {
+	if byteCount > runeCount*2 {
 		return runeCount / 2
 	}
-	return charCount / 4
+	return byteCount / 4
 }
 
-// splitIntoBatchesByTokens splits messages into batches where each batch
-// contains approximately maxTokens tokens.
-func splitIntoBatchesByTokens(msgs []messages.Message, maxTokens int) [][]messages.Message {
-	if len(msgs) == 0 {
-		return nil
-	}
-
-	var batches [][]messages.Message
-	var currentBatch []messages.Message
+// splitIntoBatchesByTokens encodes each message once and groups the encodings
+// into batches of approximately maxTokens tokens. The estimate runs over the
+// very bytes the provider receives, and each batch always holds at least one
+// message.
+func splitIntoBatchesByTokens(msgs []messages.Message, maxTokens int) ([][]json.RawMessage, error) {
+	var batches [][]json.RawMessage
+	var currentBatch []json.RawMessage
 	currentTokens := 0
 
 	for _, msg := range msgs {
-		// Estimate tokens for this message including formatting overhead
-		msgTokens := estimateTokens(messages.FormatForSummary(msg))
+		encoded, err := json.Marshal(msg)
+		if err != nil {
+			return nil, fmt.Errorf("encoding message %d: %w", msg.ID, err)
+		}
+		msgTokens := estimateTokens(encoded)
 
-		// If adding this message exceeds the limit, start a new batch
-		// But always include at least one message per batch
 		if currentTokens+msgTokens > maxTokens && len(currentBatch) > 0 {
 			batches = append(batches, currentBatch)
 			currentBatch = nil
 			currentTokens = 0
 		}
 
-		currentBatch = append(currentBatch, msg)
+		currentBatch = append(currentBatch, encoded)
 		currentTokens += msgTokens
 	}
 
-	// Remember the last batch
 	if len(currentBatch) > 0 {
 		batches = append(batches, currentBatch)
 	}
 
-	return batches
+	return batches, nil
 }
 
 const progressInterval = 5 * time.Second
 
 // summarizeWithProgress calls the provider and sends periodic progress updates
 // to prevent client timeout during long LLM calls.
-func (s *Summarizer) summarizeWithProgress(ctx context.Context, req Request, currentBatch, totalBatches int, onProgress ProgressCallback) (string, error) {
+func summarizeWithProgress(ctx context.Context, provider Provider, req Request, currentBatch, totalBatches int, onProgress ProgressCallback) (string, error) {
 	type result struct {
 		summary string
 		err     error
@@ -214,7 +242,7 @@ func (s *Summarizer) summarizeWithProgress(ctx context.Context, req Request, cur
 				resultCh <- result{err: fmt.Errorf("summarize provider panicked: %v", r)}
 			}
 		}()
-		summary, err := s.provider.Summarize(ctx, req)
+		summary, err := provider.Summarize(ctx, req)
 		resultCh <- result{summary: summary, err: err}
 	}()
 

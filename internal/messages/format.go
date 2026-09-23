@@ -12,16 +12,6 @@ const DateFormat = "2006-01-02 15:04:05"
 // ShortDateFormat is a shorter timestamp format.
 const ShortDateFormat = "2006-01-02 15:04"
 
-// FormatForSummary formats a message for LLM summarization.
-// Format: [timestamp] sender_id: text
-func FormatForSummary(msg Message) string {
-	return fmt.Sprintf("[%s] %d: %s",
-		msg.Date.Format(ShortDateFormat),
-		msg.SenderID,
-		msg.Text,
-	)
-}
-
 // FormatBatchForBackup formats a batch of messages for a backup file.
 // Format: -----\n[timestamp] [sender_name] [id=N] [reply_to=N]\n<text>\n-----
 func FormatBatchForBackup(messages []Message) string {

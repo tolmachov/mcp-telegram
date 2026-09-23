@@ -54,16 +54,6 @@ const (
 	ProviderAnthropic ProviderName = "anthropic"
 )
 
-// ValidateProviderName checks if the provider name is valid.
-func ValidateProviderName(name string) error {
-	switch ProviderName(name) {
-	case ProviderSampling, ProviderOllama, ProviderGemini, ProviderAnthropic:
-		return nil
-	default:
-		return fmt.Errorf("invalid provider: %q (must be 'sampling', 'ollama', 'gemini', or 'anthropic')", name)
-	}
-}
-
 // Config holds configuration for summarization providers.
 type Config struct {
 	Provider        ProviderName // "sampling", "ollama", "gemini", or "anthropic"
@@ -72,6 +62,29 @@ type Config struct {
 	GeminiAPIKey    string       // API key for Gemini
 	AnthropicAPIKey string       // API key for Anthropic
 	BatchTokens     int          // approximate number of tokens per batch for summarization
+}
+
+// Validate reports whether cfg names a known provider together with the
+// setting that provider cannot run without.
+func (c Config) Validate() error {
+	switch c.Provider {
+	case ProviderSampling:
+	case ProviderGemini:
+		if c.GeminiAPIKey == "" {
+			return fmt.Errorf("MCP_SUMMARIZE_GEMINI_API_KEY is required when using --summarize-provider=gemini")
+		}
+	case ProviderOllama:
+		if c.OllamaURL == "" {
+			return fmt.Errorf("MCP_SUMMARIZE_OLLAMA_URL is required when using --summarize-provider=ollama")
+		}
+	case ProviderAnthropic:
+		if c.AnthropicAPIKey == "" {
+			return fmt.Errorf("MCP_SUMMARIZE_ANTHROPIC_API_KEY is required when using --summarize-provider=anthropic")
+		}
+	default:
+		return fmt.Errorf("invalid summarization provider %q (must be 'sampling', 'ollama', 'gemini', or 'anthropic')", c.Provider)
+	}
+	return nil
 }
 
 // String implements fmt.Stringer so accidental logging of a Config value

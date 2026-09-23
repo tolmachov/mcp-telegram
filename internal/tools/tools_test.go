@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/tolmachov/mcp-telegram/internal/summarize"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
@@ -147,7 +146,7 @@ func TestEveryToolHandlerRegisters(t *testing.T) {
 		NewGetForumTopicsHandler(nil),
 		NewUsernameResolveHandler(nil),
 		NewMessageLinkResolveHandler(nil),
-		NewChatSummarizeHandler(nil, summarize.Config{}),
+		NewChatSummarizeHandler(nil, nil),
 		NewMediaGetHandler(nil, 1),
 		NewGetFoldersHandler(nil),
 		NewMessageBackupHandler(tgclient.NewResolver(nil, 100_000), nil, []string{t.TempDir()}),

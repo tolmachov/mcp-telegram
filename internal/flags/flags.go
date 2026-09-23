@@ -139,9 +139,6 @@ func SummarizeProviderFlag() *cli.StringFlag {
 		Value:   string(summarize.ProviderSampling),
 		Usage:   "Provider for summarization: 'sampling', 'ollama', 'gemini', or 'anthropic'",
 		Sources: cli.EnvVars("MCP_SUMMARIZE_PROVIDER"),
-		Action: func(_ context.Context, _ *cli.Command, value string) error {
-			return summarize.ValidateProviderName(value)
-		},
 	}
 }
 

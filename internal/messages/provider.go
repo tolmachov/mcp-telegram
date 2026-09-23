@@ -519,7 +519,6 @@ func buildMessage(msg *tg.Message, users, chats map[int64]string, senderFallback
 		ID:   msg.ID,
 		Date: time.Unix(int64(msg.Date), 0),
 		Text: msg.Message,
-		Raw:  msg,
 	}
 
 	if msg.FromID != nil {
