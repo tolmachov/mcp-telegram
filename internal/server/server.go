@@ -105,6 +105,9 @@ type Server struct {
 	// it at tgclient.NewSessionStorage; only tests replace it, to start a
 	// client without touching the real session.
 	openLocalSession func() (session.Storage, error)
+	// connectLocal starts the client Run serves over stdio. New points it at
+	// startLocalClient; only tests replace it, to serve on a fake client.
+	connectLocal func(context.Context) (telegramClient, error)
 
 	// authProbeFn is the live authorization re-check the login-required tool
 	// performs, injectable so the tool's states can be exercised without a
@@ -163,6 +166,13 @@ func New(opts Options) (*Server, error) {
 
 	srv := &Server{logger: logger, opts: opts}
 	srv.openLocalSession = func() (session.Storage, error) { return tgclient.NewSessionStorage() }
+	srv.connectLocal = func(ctx context.Context) (telegramClient, error) {
+		running, err := srv.startLocalClient(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return running, nil
+	}
 	srv.summarizer, srv.summarizeErr = summarize.New(opts.Summarize)
 	if srv.summarizeErr != nil {
 		logger.Warn("summarisation is misconfigured; SummarizeChat reports it and every other tool works", "err", srv.summarizeErr)
@@ -207,7 +217,7 @@ func (s *Server) Run(ctx context.Context) error {
 		return s.runHTTPWithAuth(ctx)
 	}
 
-	running, err := s.startLocalClient(ctx)
+	client, err := s.connectLocal(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			// The host shut down while the client was still starting:
@@ -222,7 +232,7 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		return s.startBlocked(ctx, blockedReason(err))
 	}
-	return s.serveStdio(ctx, running)
+	return s.serveAssembly(ctx, client)
 }
 
 // startLocalClient connects the single local account on its stored session
@@ -252,8 +262,9 @@ func blockedReason(err error) string {
 	return fmt.Sprintf("mcp-telegram: could not connect to Telegram: %v. If this is a network problem, verify connectivity and retry; if the stored session was revoked or is corrupt, `mcp-telegram logout` followed by `mcp-telegram login` recovers it.", err)
 }
 
-// serveStdio serves the Telegram tools over stdio on a connected client and
-// disconnects it afterwards.
+// serveAssembly serves the Telegram tools over stdio on a connected client
+// until the host disconnects (closes stdin) or ctx is cancelled, then
+// disconnects the client.
 //
 // A client that stops on its own — Telegram refusing the session mid-run, or
 // a permanent transport failure — does not end the session: the host stays
@@ -263,13 +274,6 @@ func blockedReason(err error) string {
 // it would hand the host's stdin from one MCP session to the next, and the
 // SDK's stdio connection keeps reading ahead into a buffer it drops on close,
 // losing whatever the host sent in between.
-func (s *Server) serveStdio(ctx context.Context, running *tgclient.Running) error {
-	defer running.Close()
-	return s.serveAssembly(ctx, running)
-}
-
-// serveAssembly serves one assembly over stdio until the host disconnects
-// (closes stdin) or ctx is cancelled.
 func (s *Server) serveAssembly(ctx context.Context, client telegramClient) error {
 	asm, err := s.buildAssembly(ctx, client, s.logger)
 	if err != nil {
@@ -314,11 +318,15 @@ func (s *Server) floodWaitLogger() tgclient.FloodWaitCallback {
 // client, plus the pinned-chat watcher mirroring its resource set: either the
 // SEP-2053 variants proxy or a single pinned-variant server. The stdio path
 // builds exactly one; the HTTP auth mode builds one per authenticated user.
-// Callers serve it through run or httpHandler and never pick the form
-// themselves.
+// Callers serve it through run (stdio) or ServeHTTP (http) and never pick the
+// form themselves. The assembly owns its client: Close disconnects it.
 type assembly struct {
 	variants *variants.Server // non-nil when exposing all variants
 	single   *mcp.Server      // non-nil when --variant pins one
+	client   telegramClient
+	// handler serves the assembly over streamable HTTP; set for the http
+	// transport only.
+	handler http.Handler
 
 	// end ends the assembly's lifetime: the pinned-chat watcher and any
 	// chat-list load or peer resolve still running for it. watchDone closes
@@ -351,7 +359,7 @@ func (a *assembly) run(ctx context.Context, t mcp.Transport) error {
 	return nil
 }
 
-// httpHandler serves the assembly over streamable HTTP.
+// httpHandler builds the assembly's streamable HTTP handler.
 func (a *assembly) httpHandler() http.Handler {
 	if a.variants == nil {
 		srv := a.single
@@ -359,6 +367,16 @@ func (a *assembly) httpHandler() http.Handler {
 	}
 	return variants.NewStreamableHTTPHandler(a.variants, streamableHTTPOptions())
 }
+
+// ServeHTTP serves one request of the assembly over streamable HTTP.
+func (a *assembly) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	a.handler.ServeHTTP(w, r)
+}
+
+// Err is nil while the assembly can serve and, once its Telegram client has
+// stopped, why: wrapping tgclient.ErrSessionUnauthorized when Telegram
+// refused the session.
+func (a *assembly) Err() error { return a.client.Err() }
 
 // telegramClient is the running Telegram client an assembly serves on;
 // *tgclient.Running is the production one.
@@ -368,19 +386,31 @@ type telegramClient interface {
 	Err() error
 	// Done is closed once the client has stopped.
 	Done() <-chan struct{}
+	// Close disconnects the client and waits for it to stop.
+	Close()
 }
 
 // buildAssembly constructs handlers, resources, prompts, and the MCP
 // server(s) for one Telegram client. The assembly lives on a child of ctx —
 // its pinned-chat watcher and the loads its chat-list cache and peer resolver
 // share between calls run there — which ends on Close or once the client
-// stops. The caller must Close the assembly.
-func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logger *slog.Logger) (*assembly, error) {
-	api := client.API()
+// stops.
+//
+// The assembly takes ownership of client: the caller must Close the
+// assembly, which disconnects it. When no assembly comes out — an error or a
+// panic in the wiring — buildAssembly disconnects the client itself.
+func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logger *slog.Logger) (asm *assembly, err error) {
 	// The assembly gets a lifetime of its own because the stdio host
 	// normally shuts us down by closing stdin, which ends the serve loop
 	// while ctx stays live; Close ends it either way.
 	life, end := context.WithCancel(ctx)
+	defer func() {
+		if asm == nil {
+			end()
+			client.Close()
+		}
+	}()
+	api := client.API()
 	// One chat-list cache shared by GetChats, SearchChats, the chats
 	// resource and completion, so none of them re-paginates every dialog on
 	// its own.
@@ -421,23 +451,25 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 		srv.AddReceivingMiddleware(s.clientDownMiddleware(client))
 	}
 
-	asm := &assembly{logger: logger}
+	built := &assembly{client: client, end: end, logger: logger}
 	// pinnedServers are the inner servers the pinned-chat watcher mirrors its
 	// resource set onto.
 	var pinnedServers []*mcp.Server
 	if s.opts.Variant == "" {
-		asm.variants, pinnedServers = buildVariantsServer(impl, serverOpts, fullHandlers, researchHandlers, wire, logger)
+		built.variants, pinnedServers = buildVariantsServer(impl, serverOpts, fullHandlers, researchHandlers, wire, logger)
 	} else {
 		d, ok := defForVariant(s.opts.Variant)
 		if !ok {
 			// Unreachable: New rejects unknown non-empty variants, and Server is
 			// only constructible through New. Fail loudly rather than silently
 			// falling back to the zero-value mode if that invariant is ever broken.
-			end()
 			return nil, fmt.Errorf("buildAssembly: variant %q not found in table (should have been rejected by New)", s.opts.Variant)
 		}
-		asm.single = newInnerForMode(impl, serverOpts, fullHandlers, researchHandlers, d.mode, wire, logger)
-		pinnedServers = []*mcp.Server{asm.single}
+		built.single = newInnerForMode(impl, serverOpts, fullHandlers, researchHandlers, d.mode, wire, logger)
+		pinnedServers = []*mcp.Server{built.single}
+	}
+	if s.opts.Transport == TransportHTTP {
+		built.handler = built.httpHandler()
 	}
 
 	// The SDK has no BeforeListResources hook, so the pinned-chat set is
@@ -445,21 +477,22 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 	// list_changed only fires when the set actually changes, so the ticker is
 	// safe to run on a short interval.
 	pinnedProvider := resources.NewPinnedChatsProvider(api, msgProvider, logger, pinnedServers...)
-	asm.end = end
-	asm.watchDone = pinnedProvider.WatchInBackground(life, s.opts.PinnedRefresh)
+	built.watchDone = pinnedProvider.WatchInBackground(life, s.opts.PinnedRefresh)
 	// A client that stops on its own ends the assembly's lifetime too: there
 	// is nothing left for the watcher to poll or a load to call. Close ends
-	// it before the client stops, so a stop seen here is never the
-	// assembly's own teardown.
+	// the lifetime before it stops the client, so a stop found with the
+	// lifetime already over is the assembly's own teardown.
 	go func() {
 		select {
 		case <-client.Done():
-			logger.Warn("Telegram client stopped; tool calls and resource reads now answer with the reason", "err", client.Err())
-			end()
+			if life.Err() == nil {
+				logger.Warn("Telegram client stopped; tool calls and resource reads now answer with the reason", "err", client.Err())
+				end()
+			}
 		case <-life.Done():
 		}
 	}()
-	return asm, nil
+	return built, nil
 }
 
 // clientDownMiddleware tells tool calls and resource reads why the assembly's
@@ -547,10 +580,11 @@ func (s *Server) clientDownText(err error) string {
 const pinnedWatchExitTimeout = 5 * time.Second
 
 // Close ends the assembly's lifetime — stopping the pinned-chat watcher and
-// failing any shared chat-list load or peer resolve still running — and
-// closes the variants proxy. It waits for the watcher to exit so its goroutine cannot race with server
-// teardown while mid-way through AddResource/RemoveResources. The cancel
-// stops it deterministically; the timeout only guards against a genuinely
+// failing any shared chat-list load or peer resolve still running — closes
+// the variants proxy and, last, disconnects the Telegram client, so nothing
+// of the assembly still runs on it. It waits for the watcher to exit so its
+// goroutine cannot race with server teardown while mid-way through
+// AddResource/RemoveResources. The cancel stops it deterministically; the timeout only guards against a genuinely
 // wedged provider (e.g. blocked in a Telegram call) holding up shutdown
 // indefinitely. If it ever fires we are abandoning a live goroutine that will
 // then touch a torn-down server — a real correctness hazard, so it logs at
@@ -562,12 +596,14 @@ func (a *assembly) Close() error {
 	case <-time.After(pinnedWatchExitTimeout):
 		a.logger.Error("pinned-chat watcher did not exit in time; abandoning", "timeout", pinnedWatchExitTimeout)
 	}
+	var err error
 	if a.variants != nil {
-		if err := a.variants.Close(); err != nil {
-			return fmt.Errorf("closing variants proxy: %w", err)
+		if closeErr := a.variants.Close(); closeErr != nil {
+			err = fmt.Errorf("closing variants proxy: %w", closeErr)
 		}
 	}
-	return nil
+	a.client.Close()
+	return err
 }
 
 // buildHandlers constructs every tool handler once and returns the full set and

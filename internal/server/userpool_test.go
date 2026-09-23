@@ -62,9 +62,9 @@ func okHandler() http.Handler {
 }
 
 func TestUserPoolServeHTTPRejectsMissingIdentity(t *testing.T) {
-	pool := newUserPool(t.Context(), func(context.Context, *authsrv.UserIdentity) (builtAssembly, error) {
+	pool := newUserPool(t.Context(), func(context.Context, *authsrv.UserIdentity) (pooledAssembly, error) {
 		t.Fatal("builder must not run for an unauthenticated request")
-		return builtAssembly{}, nil
+		return nil, nil
 	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 	recorder := httptest.NewRecorder()
 	pool.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/", nil))
@@ -74,7 +74,7 @@ func TestUserPoolServeHTTPRejectsMissingIdentity(t *testing.T) {
 }
 
 func TestUserPoolLimitsSessionlessInitializePerUser(t *testing.T) {
-	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		return okAssembly(), nil
 	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 	for i := range initializeBurst + 1 {
@@ -90,10 +90,30 @@ func TestUserPoolLimitsSessionlessInitializePerUser(t *testing.T) {
 	}
 }
 
-// okAssembly is a healthy build with a no-op closer.
-func okAssembly() builtAssembly {
-	return builtAssembly{Handler: okHandler(), Closer: closerFunc(func() error { return nil }), Health: healthy}
+// fakeAssembly is a pooled assembly that answers 200, runs onClose when
+// closed and reports health as its client's state.
+type fakeAssembly struct {
+	http.Handler
+	onClose func()
+	health  func() error
 }
+
+func newFakeAssembly(onClose func(), health func() error) *fakeAssembly {
+	return &fakeAssembly{Handler: okHandler(), onClose: onClose, health: health}
+}
+
+func (a *fakeAssembly) Close() error {
+	a.onClose()
+	return nil
+}
+
+func (a *fakeAssembly) Err() error { return a.health() }
+
+// countClose is an onClose counting the closes in n.
+func countClose(n *atomic.Int64) func() { return func() { n.Add(1) } }
+
+// okAssembly is a healthy build with a no-op close.
+func okAssembly() *fakeAssembly { return newFakeAssembly(func() {}, healthy) }
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
@@ -129,7 +149,7 @@ func (d *dropRecorder) keys() []poolKey {
 
 func TestUserPoolBuildsOncePerUser(t *testing.T) {
 	var builds atomic.Int64
-	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		builds.Add(1)
 		return okAssembly(), nil
 	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
@@ -154,7 +174,7 @@ func TestUserPoolBuildsOncePerUser(t *testing.T) {
 // must hit the warm entry rather than build again.
 func TestUserPoolIndependentSessionsPerUser(t *testing.T) {
 	var builds atomic.Int64
-	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		builds.Add(1)
 		return okAssembly(), nil
 	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
@@ -182,13 +202,9 @@ func TestUserPoolIndependentSessionsPerUser(t *testing.T) {
 // session's client is stopped and the next request cold-rebuilds.
 func TestUserPoolEvictSession(t *testing.T) {
 	var builds, closes atomic.Int64
-	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		builds.Add(1)
-		return builtAssembly{
-			Handler: okHandler(),
-			Closer:  closerFunc(func() error { closes.Add(1); return nil }),
-			Health:  healthy,
-		}, nil
+		return newFakeAssembly(countClose(&closes), healthy), nil
 	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 
 	if rec := poolRequestSID(t, pool, 1, "aaaa"); rec.Code != http.StatusOK {
@@ -215,12 +231,8 @@ func TestUserPoolEvictSession(t *testing.T) {
 // immediately but closed only when the last in-flight request releases it.
 func TestUserPoolEvictSessionDefersBusyClose(t *testing.T) {
 	var closes atomic.Int64
-	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
-		return builtAssembly{
-			Handler: okHandler(),
-			Closer:  closerFunc(func() error { closes.Add(1); return nil }),
-			Health:  healthy,
-		}, nil
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
+		return newFakeAssembly(countClose(&closes), healthy), nil
 	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 
 	if rec := poolRequestSID(t, pool, 1, "aaaa"); rec.Code != http.StatusOK {
@@ -250,7 +262,7 @@ func TestUserPoolEvictSessionDefersBusyClose(t *testing.T) {
 // at userPoolMaxPerUser assemblies, a further authorization evicts THAT
 // account's own LRU entry, never another user's.
 func TestUserPoolPerUserCap(t *testing.T) {
-	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		return okAssembly(), nil
 	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 
@@ -286,8 +298,8 @@ func TestUserPoolPerUserCap(t *testing.T) {
 // 401 with the OAuth metadata, so the client signs in again.
 func TestUserPoolRefusedAtBuildDeletesSessionAnd401s(t *testing.T) {
 	drops := &dropRecorder{}
-	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
-		return builtAssembly{}, fmt.Errorf("connecting: %w", tgclient.ErrSessionUnauthorized)
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
+		return nil, fmt.Errorf("connecting: %w", tgclient.ErrSessionUnauthorized)
 	}, drops.drop, testWWWAuthenticate, discardLogger())
 
 	rec := poolRequestSID(t, pool, 7, "dead")
@@ -307,8 +319,8 @@ func TestUserPoolRefusedAtBuildDeletesSessionAnd401s(t *testing.T) {
 // request's 401 through, and that a failed delete does not change the answer.
 func TestUserPoolBoundsTheRefusedSessionDelete(t *testing.T) {
 	var bounded bool
-	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
-		return builtAssembly{}, fmt.Errorf("connecting: %w", tgclient.ErrSessionUnauthorized)
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
+		return nil, fmt.Errorf("connecting: %w", tgclient.ErrSessionUnauthorized)
 	}, func(ctx context.Context, _ tgid.UserID, _ string) error {
 		deadline, ok := ctx.Deadline()
 		bounded = ok && time.Until(deadline) <= sessionDropTimeout
@@ -325,9 +337,9 @@ func TestUserPoolBoundsTheRefusedSessionDelete(t *testing.T) {
 
 func TestUserPoolBuildFailureNotCached(t *testing.T) {
 	var builds atomic.Int64
-	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		if builds.Add(1) == 1 {
-			return builtAssembly{}, errors.New("transient failure")
+			return nil, errors.New("transient failure")
 		}
 		return okAssembly(), nil
 	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
@@ -341,7 +353,7 @@ func TestUserPoolBuildFailureNotCached(t *testing.T) {
 }
 
 func TestUserPoolFullRejectsWith503(t *testing.T) {
-	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		return okAssembly(), nil
 	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 
@@ -363,20 +375,16 @@ func TestUserPoolRebuildsDeadAssembly(t *testing.T) {
 	var builds atomic.Int64
 	var closes atomic.Int64
 	var deads []*atomic.Bool
-	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		builds.Add(1)
 		dead := &atomic.Bool{}
 		deads = append(deads, dead)
-		return builtAssembly{
-			Handler: okHandler(),
-			Closer:  closerFunc(func() error { closes.Add(1); return nil }),
-			Health: func() error {
-				if dead.Load() {
-					return errors.New("client run loop exited")
-				}
-				return nil
-			},
-		}, nil
+		return newFakeAssembly(countClose(&closes), func() error {
+			if dead.Load() {
+				return errors.New("client run loop exited")
+			}
+			return nil
+		}), nil
 	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 
 	if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
@@ -424,13 +432,9 @@ func TestUserPoolRefusedMidRunDeletesSessionAnd401s(t *testing.T) {
 		var builds, closes atomic.Int64
 		client := &stoppable{}
 		drops := &dropRecorder{}
-		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 			builds.Add(1)
-			return builtAssembly{
-				Handler: okHandler(),
-				Closer:  closerFunc(func() error { closes.Add(1); return nil }),
-				Health:  client.health,
-			}, nil
+			return newFakeAssembly(countClose(&closes), client.health), nil
 		}, drops.drop, testWWWAuthenticate, discardLogger())
 
 		if rec := poolRequestSID(t, pool, 1, "s"); rec.Code != http.StatusOK {
@@ -482,15 +486,11 @@ func TestUserPoolStoppedClientIsRebuiltNotReauthenticated(t *testing.T) {
 	for _, busy := range []bool{false, true} {
 		var builds, closes atomic.Int64
 		var clients []*stoppable
-		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 			builds.Add(1)
 			client := &stoppable{}
 			clients = append(clients, client)
-			return builtAssembly{
-				Handler: okHandler(),
-				Closer:  closerFunc(func() error { closes.Add(1); return nil }),
-				Health:  client.health,
-			}, nil
+			return newFakeAssembly(countClose(&closes), client.health), nil
 		}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 
 		if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
@@ -522,23 +522,6 @@ func TestUserPoolStoppedClientIsRebuiltNotReauthenticated(t *testing.T) {
 	}
 }
 
-// TestUserPoolRejectsAssemblyWithoutHealthProbe pins that a build missing its
-// liveness probe fails instead of being served as "always healthy", and that
-// what it did build is closed.
-func TestUserPoolRejectsAssemblyWithoutHealthProbe(t *testing.T) {
-	var closes atomic.Int64
-	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
-		return builtAssembly{Handler: okHandler(), Closer: closerFunc(func() error { closes.Add(1); return nil })}, nil
-	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
-
-	if rec := poolRequest(t, pool, 1); rec.Code != http.StatusServiceUnavailable {
-		t.Errorf("status = %d, want 503", rec.Code)
-	}
-	if got := closes.Load(); got != 1 {
-		t.Errorf("incomplete assembly closed %d times, want 1", got)
-	}
-}
-
 // TestUserPoolEvictReleaseTransitionIsAtomic exercises both possible lock
 // orders between eviction and the final release. The mutex-protected state
 // machine must close exactly once without a production-only interposition
@@ -546,13 +529,13 @@ func TestUserPoolRejectsAssemblyWithoutHealthProbe(t *testing.T) {
 func TestUserPoolEvictReleaseTransitionIsAtomic(t *testing.T) {
 	for range 100 {
 		var closes atomic.Int64
-		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
-			return builtAssembly{}, errors.New("unused")
+		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
+			return nil, errors.New("unused")
 		}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 		key := poolKey{id: 1}
 		e := &userEntry{
 			key: key, ready: make(chan struct{}), state: entryActive,
-			handler: okHandler(), closer: closerFunc(func() error { closes.Add(1); return nil }),
+			asm:      newFakeAssembly(countClose(&closes), healthy),
 			inflight: 1, lastUsed: time.Now(),
 		}
 		close(e.ready)
@@ -581,7 +564,7 @@ func TestUserPoolBuilderPanic(t *testing.T) {
 	var calls atomic.Int64
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		if calls.Add(1) == 1 {
 			close(entered)
 			<-release
@@ -634,14 +617,10 @@ func TestUserPoolCloseDuringBuild(t *testing.T) {
 	var closes atomic.Int64
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		close(entered)
 		<-release
-		return builtAssembly{
-			Handler: okHandler(),
-			Closer:  closerFunc(func() error { closes.Add(1); return nil }),
-			Health:  healthy,
-		}, nil
+		return newFakeAssembly(countClose(&closes), healthy), nil
 	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 
 	done := make(chan int, 1)
@@ -671,12 +650,8 @@ func TestUserPoolCloseDuringBuild(t *testing.T) {
 func TestUserPoolEvictSessionGraceForceClose(t *testing.T) {
 	t.Run("busy built entry force-closed after grace", func(t *testing.T) {
 		var closes atomic.Int64
-		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
-			return builtAssembly{
-				Handler: okHandler(),
-				Closer:  closerFunc(func() error { closes.Add(1); return nil }),
-				Health:  healthy,
-			}, nil
+		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
+			return newFakeAssembly(countClose(&closes), healthy), nil
 		}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 		var skew atomic.Int64
 		pool.now = func() time.Time { return time.Now().Add(time.Duration(skew.Load())) }
@@ -716,14 +691,10 @@ func TestUserPoolEvictSessionGraceForceClose(t *testing.T) {
 		var closes atomic.Int64
 		entered := make(chan struct{})
 		release := make(chan struct{})
-		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 			close(entered)
 			<-release
-			return builtAssembly{
-				Handler: okHandler(),
-				Closer:  closerFunc(func() error { closes.Add(1); return nil }),
-				Health:  healthy,
-			}, nil
+			return newFakeAssembly(countClose(&closes), healthy), nil
 		}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 		var skew atomic.Int64
 		pool.now = func() time.Time { return time.Now().Add(time.Duration(skew.Load())) }
@@ -747,8 +718,8 @@ func TestUserPoolEvictSessionGraceForceClose(t *testing.T) {
 func TestUserPoolEvictIdleClosesAssembly(t *testing.T) {
 	var closed atomic.Bool
 	now := time.Now()
-	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
-		return builtAssembly{Handler: okHandler(), Closer: closerFunc(func() error { closed.Store(true); return nil }), Health: healthy}, nil
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
+		return newFakeAssembly(func() { closed.Store(true) }, healthy), nil
 	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 	pool.now = func() time.Time { return now }
 

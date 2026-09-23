@@ -95,10 +95,11 @@ func userLogger(base *slog.Logger, user *authsrv.UserIdentity) *slog.Logger {
 
 // userAssemblyBuilder returns the pool's builder: for each authenticated
 // user it connects a Telegram client on their stored session and constructs
-// a fresh MCP assembly on top of it. A session Telegram refuses comes back as
-// ErrSessionUnauthorized, which the pool acts on (see userPool.dropSession).
+// a fresh MCP assembly on top of it, which owns the client from then on. A
+// session Telegram refuses comes back as ErrSessionUnauthorized, which the
+// pool acts on (see userPool.dropRefusedSession).
 func (s *Server) userAssemblyBuilder() userHandlerBuilder {
-	return func(ctx context.Context, user *authsrv.UserIdentity) (builtAssembly, error) {
+	return func(ctx context.Context, user *authsrv.UserIdentity) (pooledAssembly, error) {
 		logger := userLogger(s.logger, user)
 		running, err := tgclient.StartClient(ctx, s.opts.Config, s.opts.SessionStore.Session(user.ID, user.SessionID, user.SessionKey), logger, s.floodWaitLogger())
 		if err != nil {
@@ -110,46 +111,13 @@ func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 				// it would make a recoverable operator mistake permanent.
 				logger.Error("stored session could not be decrypted; check MCP_AUTH_TOKEN_KEYS / MCP_AUTH_ISSUER_URL", "session", user.SessionID, "err", err)
 			}
-			return builtAssembly{}, fmt.Errorf("connecting Telegram client for user %s: %w", user.ID, err)
+			return nil, fmt.Errorf("connecting Telegram client for user %s: %w", user.ID, err)
 		}
-
-		// Once the client is connected, any failure — including a PANIC in the
-		// wiring below that runBuild's recover turns into a build error — must
-		// close it, or the pool leaks a live MTProto connection (its Closer is
-		// never published). committed flips to true only on the successful
-		// return; until then these deferred guards tear down whatever has been
-		// started.
-		committed := false
-		defer func() {
-			if !committed {
-				running.Close()
-			}
-		}()
-
 		asm, err := s.buildAssembly(ctx, running, logger)
 		if err != nil {
-			return builtAssembly{}, err
+			return nil, err
 		}
-		defer func() {
-			if !committed {
-				_ = asm.Close()
-			}
-		}()
-
-		committed = true
-		return builtAssembly{
-			Handler: asm.httpHandler(),
-			// The assembly (watcher, variants proxy) goes first, while the
-			// client it runs on is still connected.
-			Closer: multiCloser{asm, closerFunc(func() error {
-				running.Close()
-				return nil
-			})},
-			// Err turns non-nil the moment the client stops serving — when
-			// the home DC confirms Telegram refused the session, or when its
-			// Run loop exits — and says why.
-			Health: running.Err,
-		}, nil
+		return asm, nil
 	}
 }
 

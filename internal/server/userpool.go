@@ -63,22 +63,22 @@ var initializeRate = rate.Every(time.Minute / 10)
 // errPoolFull is returned when the pool is at capacity with no idle entry.
 var errPoolFull = errors.New("user pool is full")
 
-// builtAssembly is the result of one per-authorization build. Handler serves MCP;
-// Closer tears the assembly down on eviction (disconnecting the client);
-// Health is a liveness probe returning nil while the assembly can serve and,
-// once its Telegram client has stopped, why — wrapping
-// tgclient.ErrSessionUnauthorized when Telegram refused the session. All three
-// are required: runBuild rejects an assembly without them, so a forgotten
-// probe fails the build instead of passing for "always healthy".
-type builtAssembly struct {
-	Handler http.Handler
-	Closer  io.Closer
-	Health  func() error
+// pooledAssembly is one authorization's assembly as the pool serves it;
+// *assembly is the production one. It owns its Telegram client.
+type pooledAssembly interface {
+	// ServeHTTP serves MCP.
+	http.Handler
+	// Close tears the assembly down on eviction, disconnecting its client.
+	Close() error
+	// Err is nil while the assembly can serve and, once its Telegram client
+	// has stopped, why — wrapping tgclient.ErrSessionUnauthorized when
+	// Telegram refused the session.
+	Err() error
 }
 
 // userHandlerBuilder builds the complete per-authorization HTTP assembly: MCP
 // server(s) whose tools run on the user's own Telegram session.
-type userHandlerBuilder func(ctx context.Context, user *authsrv.UserIdentity) (builtAssembly, error)
+type userHandlerBuilder func(ctx context.Context, user *authsrv.UserIdentity) (pooledAssembly, error)
 
 // sessionDropper deletes one stored session (sessionstore.Store.Delete).
 type sessionDropper func(ctx context.Context, userID tgid.UserID, sid string) error
@@ -104,9 +104,7 @@ type userEntry struct {
 	key           poolKey
 	ready         chan struct{}
 	state         userEntryState
-	handler       http.Handler
-	closer        io.Closer
-	health        func() error
+	asm           pooledAssembly
 	buildErr      error
 	lastUsed      time.Time
 	inflight      int
@@ -227,7 +225,7 @@ func (p *userPool) serveUser(w http.ResponseWriter, r *http.Request, user *auths
 		http.Error(w, "failed to initialize Telegram client", http.StatusServiceUnavailable)
 		return
 	}
-	entry.handler.ServeHTTP(w, r)
+	entry.asm.ServeHTTP(w, r)
 }
 
 // entryFor returns the caller's entry with inflight already incremented (the
@@ -248,7 +246,7 @@ func (p *userPool) entryFor(ctx context.Context, user *authsrv.UserIdentity) (*u
 		p.mu.Lock()
 		if e := p.entries[key]; e != nil {
 			if e.state == entryActive {
-				if dead := e.health(); dead != nil {
+				if dead := e.asm.Err(); dead != nil {
 					// The client has stopped, so nothing is left connected on
 					// the session: evict (a busy entry drains until its last
 					// holder leaves) and act on why it stopped. Only a session
@@ -336,7 +334,7 @@ func (p *userPool) runBuild(e *userEntry, user *authsrv.UserIdentity) (retErr er
 			p.logger.Error("user assembly build panic", "user", user.ID, "panic", r, "stack", string(debug.Stack()))
 		}
 		if retErr != nil {
-			p.completeBuild(e, builtAssembly{}, retErr)
+			p.completeBuild(e, nil, retErr)
 		}
 	}()
 
@@ -346,12 +344,6 @@ func (p *userPool) runBuild(e *userEntry, user *authsrv.UserIdentity) (retErr er
 			p.dropRefusedSession(e.key, err)
 		}
 		return err
-	}
-	if asm.Handler == nil || asm.Closer == nil || asm.Health == nil {
-		if asm.Closer != nil {
-			p.closeAssembly(e.key, asm.Closer)
-		}
-		return errors.New("user assembly build returned no handler, closer or health probe (server bug)")
 	}
 	p.completeBuild(e, asm, nil)
 	return nil
@@ -372,7 +364,7 @@ func (p *userPool) dropRefusedSession(key poolKey, reason error) {
 	}
 }
 
-func (p *userPool) completeBuild(e *userEntry, asm builtAssembly, buildErr error) {
+func (p *userPool) completeBuild(e *userEntry, asm pooledAssembly, buildErr error) {
 	p.mu.Lock()
 	if buildErr != nil {
 		e.buildErr = buildErr
@@ -385,7 +377,7 @@ func (p *userPool) completeBuild(e *userEntry, asm builtAssembly, buildErr error
 		p.mu.Unlock()
 		return
 	}
-	e.handler, e.closer, e.health = asm.Handler, asm.Closer, asm.Health
+	e.asm = asm
 	if e.state == entryBuildingEvicted {
 		e.state = entryDraining
 		e.evictDeadline = p.now().Add(userPoolEvictGrace)
@@ -588,7 +580,7 @@ func (p *userPool) finalizeLocked(e *userEntry) io.Closer {
 	}
 	e.state = entryClosed
 	delete(p.retired, e)
-	return e.closer
+	return e.asm
 }
 
 func (p *userPool) closeAssembly(key poolKey, closer io.Closer) {
@@ -631,19 +623,3 @@ func (p *userPool) Close() error {
 	}
 	return errors.Join(errs...)
 }
-
-// multiCloser closes several closers as one, joining errors.
-type multiCloser []io.Closer
-
-func (m multiCloser) Close() error {
-	var errs []error
-	for _, c := range m {
-		errs = append(errs, c.Close())
-	}
-	return errors.Join(errs...)
-}
-
-// closerFunc adapts a function to io.Closer.
-type closerFunc func() error
-
-func (f closerFunc) Close() error { return f() }

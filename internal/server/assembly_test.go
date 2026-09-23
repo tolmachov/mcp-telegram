@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -22,17 +22,20 @@ import (
 )
 
 // fakeClient is a never-connected Telegram client that a test can stop with a
-// reason, the way a *tgclient.Running stops on its own.
+// reason, the way a *tgclient.Running stops on its own. Its API answers
+// users.getFullUser for the self user and parks every other request until
+// the request's context ends.
 type fakeClient struct {
 	api  *tg.Client
 	done chan struct{}
 
-	mu  sync.Mutex
-	err error
+	mu     sync.Mutex
+	err    error
+	closed bool
 }
 
 func newFakeClient() *fakeClient {
-	return &fakeClient{api: telegram.NewClient(1, "hash", telegram.Options{}).API(), done: make(chan struct{})}
+	return &fakeClient{api: tg.NewClient(fakeInvoker{}), done: make(chan struct{})}
 }
 
 func (c *fakeClient) API() *tg.Client       { return c.api }
@@ -47,8 +50,37 @@ func (c *fakeClient) Err() error {
 func (c *fakeClient) stop(reason error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.err = reason
-	close(c.done)
+	if c.err == nil {
+		c.err = reason
+		close(c.done)
+	}
+}
+
+func (c *fakeClient) Close() {
+	c.stop(errors.New("client closed"))
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+}
+
+func (c *fakeClient) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+// fakeSelf is the account fakeClient is logged in as.
+const fakeSelf = "Ada"
+
+type fakeInvoker struct{}
+
+func (fakeInvoker) Invoke(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
+	if _, ok := input.(*tg.UsersGetFullUserRequest); ok {
+		*output.(*tg.UsersUserFull) = tg.UsersUserFull{Users: []tg.UserClass{&tg.User{ID: 42, Self: true, FirstName: fakeSelf}}}
+		return nil
+	}
+	<-ctx.Done()
+	return ctx.Err()
 }
 
 func TestBuildAssemblyForVariantModesWithoutTelegramConnection(t *testing.T) {
@@ -65,7 +97,8 @@ func TestBuildAssemblyForVariantModesWithoutTelegramConnection(t *testing.T) {
 				Transport: TransportStdio,
 			})
 			require.NoError(t, err)
-			assembly, err := srv.buildAssembly(t.Context(), newFakeClient(), testLogger())
+			client := newFakeClient()
+			assembly, err := srv.buildAssembly(t.Context(), client, testLogger())
 			require.NoError(t, err)
 			if variant == "" {
 				require.NotNil(t, assembly.variants)
@@ -78,8 +111,44 @@ func TestBuildAssemblyForVariantModesWithoutTelegramConnection(t *testing.T) {
 			default:
 				t.Fatal("Close must not return before the pinned-chat watcher has exited")
 			}
+			assert.True(t, client.isClosed(), "the assembly owns its client: Close disconnects it")
 		})
 	}
+}
+
+// TestClientStopEndsAssemblyLifetime pins that a client stopping on its own
+// ends the assembly's lifetime: the pinned-chat watcher, parked in a Telegram
+// call on it, exits without the assembly being closed.
+func TestClientStopEndsAssemblyLifetime(t *testing.T) {
+	srv, err := New(Options{
+		Config:        &tgclient.Config{APIID: 1, APIHash: "hash"},
+		Summarize:     testSummarize,
+		Version:       "test",
+		Variant:       variantFull,
+		PinnedRefresh: time.Hour,
+		Stdin:         strings.NewReader(""),
+		Stdout:        io.Discard,
+		ErrOut:        io.Discard,
+		Transport:     TransportStdio,
+	})
+	require.NoError(t, err)
+	client := newFakeClient()
+	asm, err := srv.buildAssembly(t.Context(), client, testLogger())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = asm.Close() })
+
+	select {
+	case <-asm.watchDone:
+		t.Fatal("the watcher exited while the client still serves")
+	default:
+	}
+	client.stop(errors.New("read tcp: connection reset by peer"))
+	select {
+	case <-asm.watchDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the client stopped but the assembly's lifetime did not end")
+	}
+	assert.False(t, client.isClosed(), "a client stopping on its own is not closed by the assembly until Close")
 }
 
 func TestServeAssemblyPinnedVariantExitsOnStdinEOF(t *testing.T) {
@@ -293,19 +362,10 @@ func TestServerAuxiliaryLifecycleBranches(t *testing.T) {
 	require.Error(t, err)
 
 	srv.opts.Variant = "unknown"
-	_, err = srv.buildAssembly(t.Context(), newFakeClient(), testLogger())
+	client := newFakeClient()
+	_, err = srv.buildAssembly(t.Context(), client, testLogger())
 	require.ErrorContains(t, err, "variant")
-
-	first := errors.New("first")
-	second := errors.New("second")
-	closed := 0
-	err = (multiCloser{
-		closerFunc(func() error { closed++; return first }),
-		closerFunc(func() error { closed++; return second }),
-	}).Close()
-	assert.Equal(t, 2, closed)
-	assert.ErrorIs(t, err, first)
-	assert.ErrorIs(t, err, second)
+	assert.True(t, client.isClosed(), "a failed build disconnects the client it was handed")
 }
 
 func TestLoginRequiredSmallHelpers(t *testing.T) {
