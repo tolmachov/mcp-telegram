@@ -164,17 +164,14 @@ func TestTelegramErrorHelpers(t *testing.T) {
 }
 
 func TestChatsHandlersServeSeededSnapshot(t *testing.T) {
-	cache := NewChatsCache(nil)
-	cache.chats = []tgdata.ChatInfo{
+	cache, snap := seededChatsCache(t, []tgdata.ChatInfo{
 		{ID: 1, Name: "Alpha", Username: "alpha"},
 		{ID: 2, Name: "Beta", Username: "beta"},
 		{ID: 3, Name: "Gamma", Username: "gamma"},
-	}
-	cache.sessionID = 99
-	cache.truncated = true
+	}, true)
 
 	get := NewChatsGetHandler(cache)
-	first := get.pageFrom(cache.chats, cache.sessionID, 0, 2, true)
+	first := get.pageFrom(snap, 0, 2)
 	require.True(t, first.HasMore)
 	assert.NotEmpty(t, first.NextCursor)
 	errRes, second, err := get.handle(t.Context(), &mcp.CallToolRequest{}, GetChatsInput{Limit: 2, Cursor: first.NextCursor})

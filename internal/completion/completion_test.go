@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
@@ -16,14 +15,13 @@ import (
 func newTestCompleter(chats []tgdata.ChatInfo, listErr error) (*completer, *int) {
 	calls := 0
 	return &completer{
-		list: func(context.Context) ([]tgdata.ChatInfo, error) {
+		load: func(context.Context) (*tgdata.ChatsSnapshot, error) {
 			calls++
 			if listErr != nil {
 				return nil, listErr
 			}
-			return chats, nil
+			return &tgdata.ChatsSnapshot{ID: 1, Chats: chats}, nil
 		},
-		now: func() time.Time { return time.Unix(0, 0) },
 	}, &calls
 }
 
@@ -92,9 +90,16 @@ func TestUnknownArgumentReturnsEmpty(t *testing.T) {
 	assert.Zero(t, *calls, "unknown argument must not fetch chats")
 }
 
-func TestChatListIsCachedWithinTTL(t *testing.T) {
-	c, calls := newTestCompleter([]tgdata.ChatInfo{{ID: 1, Name: "Alice"}}, nil)
-	complete(t, c, "chat", "a")
+func TestCandidatesAreBuiltOncePerSnapshot(t *testing.T) {
+	snap := &tgdata.ChatsSnapshot{ID: 1, Chats: []tgdata.ChatInfo{{ID: 1, Name: "Alice"}}}
+	c := &completer{load: func(context.Context) (*tgdata.ChatsSnapshot, error) { return snap, nil }}
+
+	assert.Equal(t, []string{"Alice"}, complete(t, c, "chat", "a"))
+	built := c.cands.Load()
 	complete(t, c, "chat", "al")
-	assert.Equal(t, 1, *calls, "repeated completions within the TTL must reuse the cache")
+	assert.Same(t, built, c.cands.Load(), "the same snapshot must reuse its candidates")
+
+	snap = &tgdata.ChatsSnapshot{ID: 2, Chats: []tgdata.ChatInfo{{ID: 2, Name: "Bob"}}}
+	assert.Equal(t, []string{"Bob"}, complete(t, c, "chat", "b"))
+	assert.NotSame(t, built, c.cands.Load(), "a new snapshot must rebuild the candidates")
 }

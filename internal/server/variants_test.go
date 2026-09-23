@@ -18,6 +18,7 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/messages"
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
+	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 	"github.com/tolmachov/mcp-telegram/internal/tools"
 )
 
@@ -78,7 +79,7 @@ func buildTestHandlers(t *testing.T) (full, research []tools.Handler) {
 	api := tg.NewClient(noopInvoker{})
 	s := &Server{opts: Options{SummarizeCfg: summarize.Config{BatchTokens: 8000}, MediaMaxBytes: 1024}}
 	msgProvider := messages.NewProviderWithRate(api, 100_000)
-	chatsCache := tools.NewChatsCache(api)
+	chatsCache := tgdata.NewChatsCache(nil)
 	return s.buildHandlers(api, msgProvider, chatsCache)
 }
 

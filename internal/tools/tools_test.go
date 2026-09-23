@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
+	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
 // TestFloodWaitResult verifies the flood-wait detector extracts the retry
@@ -118,7 +119,7 @@ func TestRequireExplicitConfirmation(t *testing.T) {
 
 func TestEveryToolHandlerRegisters(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
-	cache := NewChatsCache(nil)
+	cache := tgdata.NewChatsCache(nil)
 	handlers := []Handler{
 		NewMeGetHandler(nil),
 		NewChatsGetHandler(cache),

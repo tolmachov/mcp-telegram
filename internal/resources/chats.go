@@ -2,8 +2,8 @@ package resources
 
 import (
 	"context"
+	"fmt"
 
-	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
@@ -11,12 +11,13 @@ import (
 
 // ChatsHandler handles the telegram://chats resource.
 type ChatsHandler struct {
-	client *tg.Client
+	cache *tgdata.ChatsCache
 }
 
-// NewChatsHandler creates a new ChatsHandler.
-func NewChatsHandler(client *tg.Client) *ChatsHandler {
-	return &ChatsHandler{client: client}
+// NewChatsHandler creates a new ChatsHandler that serves the shared chat
+// snapshot.
+func NewChatsHandler(cache *tgdata.ChatsCache) *ChatsHandler {
+	return &ChatsHandler{cache: cache}
 }
 
 // Register adds the resource to the MCP server.
@@ -30,15 +31,14 @@ func (h *ChatsHandler) Register(s *mcp.Server) {
 }
 
 func (h *ChatsHandler) handle(ctx context.Context, _ *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-	// Resource handlers don't get a progress token in the same way tools do —
-	// reads are typically fast and clients don't expect progress on them.
-	// If the progress channel is needed in the future, capture req.Session
-	// and call NotifyProgress with a server-generated token.
-	onProgress := func(_ int, _ string) {}
-
-	result, err := tgdata.GetChats(ctx, h.client, onProgress)
+	// Resource reads carry no progress token, so the load reports none.
+	snap, err := h.cache.Load(ctx, nil, false)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("loading chats: %w", err)
 	}
-	return jsonResource("telegram://chats", result)
+	return jsonResource("telegram://chats", tgdata.ChatsList{
+		Chats:     snap.Chats,
+		Count:     len(snap.Chats),
+		Truncated: snap.Truncated,
+	})
 }

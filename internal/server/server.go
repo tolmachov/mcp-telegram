@@ -26,6 +26,7 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
+	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 	"github.com/tolmachov/mcp-telegram/internal/tools"
 )
 
@@ -288,35 +289,39 @@ type assembly struct {
 // buildAssembly constructs handlers, resources, prompts, and the MCP
 // server(s) for one Telegram client.
 func (s *Server) buildAssembly(client *telegram.Client) (*assembly, error) {
+	// One chat-list snapshot shared by GetChats, SearchChats, the chats
+	// resource and completion, so none of them re-paginates every dialog on
+	// its own.
+	api := client.API()
+	chatsCache := tgdata.NewChatsCache(func(ctx context.Context, onProgress tgdata.ProgressFunc) (*tgdata.ChatsList, error) {
+		return tgdata.GetChats(ctx, api, onProgress)
+	})
+
 	impl := &mcp.Implementation{Name: "mcp-telegram", Version: s.opts.Version}
 	serverOpts := &mcp.ServerOptions{
 		Instructions: happyInstructions,
 		Logger:       s.logger,
 		// Suggest chat titles/usernames/ids for prompt arguments and the
 		// chat resource template as the user types.
-		CompletionHandler: completion.Handler(client.API()),
+		CompletionHandler: completion.Handler(chatsCache),
 	}
 
 	// The RPS ceiling is configurable (--tg-rate-limit-rps) so
 	// operators can loosen it when tools bottleneck on the shared limiter.
 	// Raising it too high will trip Telegram's FLOOD_WAIT which the tgclient
 	// waiter wrapper reports via onFloodWait.
-	msgProvider := messages.NewProviderWithRate(client.API(), s.opts.TGRateLimitRPS)
+	msgProvider := messages.NewProviderWithRate(api, s.opts.TGRateLimitRPS)
 
-	// One chat-list snapshot shared by GetChats and SearchChats so a search
-	// reuses an already-loaded listing instead of re-paginating every dialog.
-	chatsCache := tools.NewChatsCache(client.API())
-
-	fullHandlers, researchHandlers := s.buildHandlers(client.API(), msgProvider, chatsCache)
+	fullHandlers, researchHandlers := s.buildHandlers(api, msgProvider, chatsCache)
 
 	// Resources, chat template, and prompts are read-only and identical across
 	// variants, so register them on every inner server through one closure.
 	wire := func(srv *mcp.Server) {
 		resources.RegisterResources(srv, []resources.ResourceHandler{
-			resources.NewMeHandler(client.API()),
-			resources.NewChatsHandler(client.API()),
+			resources.NewMeHandler(api),
+			resources.NewChatsHandler(chatsCache),
 		})
-		resources.RegisterChatTemplate(srv, client.API())
+		resources.RegisterChatTemplate(srv, api)
 		prompts.Register(srv)
 	}
 
@@ -405,7 +410,7 @@ func (s *Server) runHappy(ctx context.Context, client *telegram.Client) error {
 // The remaining 13 mutate state (send, edit, delete, forward, react,
 // mark-as-read, join/leave, mute, and the four folder edits) and are excluded
 // from the research variant.
-func (s *Server) buildHandlers(api *tg.Client, msgProvider *messages.Provider, chatsCache *tools.ChatsCache) (full, research []tools.Handler) {
+func (s *Server) buildHandlers(api *tg.Client, msgProvider *messages.Provider, chatsCache *tgdata.ChatsCache) (full, research []tools.Handler) {
 	research = []tools.Handler{
 		tools.NewMeGetHandler(api),
 		tools.NewChatsGetHandler(chatsCache),

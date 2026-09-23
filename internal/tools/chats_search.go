@@ -18,13 +18,13 @@ import (
 // ChatsSearchHandler handles the SearchChats tool.
 type ChatsSearchHandler struct {
 	client *tg.Client
-	cache  *ChatsCache
+	cache  *tgdata.ChatsCache
 }
 
 // NewChatsSearchHandler creates a new ChatsSearchHandler. It shares the chat
 // snapshot held by cache with GetChats, so a local search reuses an already
 // loaded listing instead of re-paginating every dialog.
-func NewChatsSearchHandler(client *tg.Client, cache *ChatsCache) *ChatsSearchHandler {
+func NewChatsSearchHandler(client *tg.Client, cache *tgdata.ChatsCache) *ChatsSearchHandler {
 	return &ChatsSearchHandler{client: client, cache: cache}
 }
 
@@ -70,19 +70,19 @@ func (h *ChatsSearchHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	limit := clampLimit(in.Limit, 10, 50)
 
 	// Get all user's chats for local fuzzy search first. Reuse the shared
-	// snapshot (loading it once if cold) rather than re-listing every dialog.
+	// snapshot (loading it when cold or stale) rather than re-listing every dialog.
 	onProgress := func(current int, message string) {
 		sendProgress(ctx, req, float64(current), 0, message)
 	}
-	chats, _, truncated, err := h.cache.load(ctx, onProgress, false)
+	snap, err := h.cache.Load(ctx, onProgress, false)
 	if err != nil {
 		return errResult(fmt.Sprintf("Failed to get chats: %v", err)), nil, nil
 	}
 
-	results := scoreChats(query, chats)
+	results := scoreChats(query, snap.Chats)
 
 	var warnings []string
-	if truncated {
+	if snap.Truncated {
 		warnings = append(warnings, truncatedChatsWarning)
 	}
 	var globalResults []tgdata.ChatInfo

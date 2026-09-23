@@ -17,10 +17,10 @@ func TestPageFromTruncatedWarning(t *testing.T) {
 	h := &ChatsGetHandler{}
 	chats := makeChats(5)
 
-	out := h.pageFrom(chats, 42, 0, 10, true)
+	out := h.pageFrom(&tgdata.ChatsSnapshot{ID: 42, Chats: chats, Truncated: true}, 0, 10)
 	assert.Equal(t, truncatedChatsWarning, out.Warning, "truncated snapshot must warn")
 
-	out = h.pageFrom(chats, 42, 0, 10, false)
+	out = h.pageFrom(&tgdata.ChatsSnapshot{ID: 42, Chats: chats}, 0, 10)
 	assert.Empty(t, out.Warning, "complete snapshot must not warn")
 }
 
@@ -28,14 +28,10 @@ func TestPageFromTruncatedWarning(t *testing.T) {
 // a cursor page served from a truncated cache must repeat the warning so a
 // paginating model sees it on every hop, not just the first.
 func TestChatsGetCursorPageCarriesTruncationWarning(t *testing.T) {
-	const sid int64 = 7
-	h := &ChatsGetHandler{cache: &ChatsCache{
-		chats:     makeChats(20),
-		sessionID: sid,
-		truncated: true,
-	}}
+	cache, snap := seededChatsCache(t, makeChats(20), true)
+	h := &ChatsGetHandler{cache: cache}
 
-	cursor := FormatChatsCursor(sid, 3)
+	cursor := FormatChatsCursor(snap.ID, 3)
 	errRes, out, err := h.handleWithCursor(cursor, 5)
 	require.NoError(t, err)
 	require.Nil(t, errRes)
@@ -48,11 +44,8 @@ func TestChatsGetCursorPageCarriesTruncationWarning(t *testing.T) {
 // exist. Limit=1 with a matching local chat fills the result set, so the global
 // search (which would touch the nil client) is skipped.
 func TestSearchChatsTruncationWarning(t *testing.T) {
-	h := &ChatsSearchHandler{cache: &ChatsCache{
-		chats:     []tgdata.ChatInfo{{ID: 1, Name: "alpha", Type: tgdata.ChatTypeGroup}},
-		sessionID: 9,
-		truncated: true,
-	}}
+	cache, _ := seededChatsCache(t, []tgdata.ChatInfo{{ID: 1, Name: "alpha", Type: tgdata.ChatTypeGroup}}, true)
+	h := &ChatsSearchHandler{cache: cache}
 
 	errRes, out, err := h.handle(context.Background(), &mcp.CallToolRequest{}, SearchChatsInput{
 		Query: "alpha",

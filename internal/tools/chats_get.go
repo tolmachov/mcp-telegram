@@ -10,15 +10,15 @@ import (
 )
 
 // ChatsGetHandler handles the GetChats tool with server-side pagination.
-// All chats are loaded on the first call (no cursor) into the shared ChatsCache;
+// Every call without a cursor reloads all chats into the shared tgdata.ChatsCache;
 // subsequent calls with a cursor serve pages from that cache without hitting the
 // Telegram API, and SearchChats reads the same snapshot.
 type ChatsGetHandler struct {
-	cache *ChatsCache
+	cache *tgdata.ChatsCache
 }
 
 // NewChatsGetHandler creates a new ChatsGetHandler. Panics if cache is nil.
-func NewChatsGetHandler(cache *ChatsCache) *ChatsGetHandler {
+func NewChatsGetHandler(cache *tgdata.ChatsCache) *ChatsGetHandler {
 	if cache == nil {
 		panic("NewChatsGetHandler: nil cache")
 	}
@@ -74,12 +74,12 @@ func (h *ChatsGetHandler) handleFreshLoad(ctx context.Context, req *mcp.CallTool
 		sendProgress(ctx, req, float64(current), 0, message)
 	}
 
-	chats, sid, truncated, err := h.cache.load(ctx, onProgress, true)
+	snap, err := h.cache.Load(ctx, onProgress, true)
 	if err != nil {
 		return errResult(fmt.Sprintf("Failed to get chats: %v", err)), nil, nil
 	}
 
-	return nil, h.pageFrom(chats, sid, 0, limit, truncated), nil
+	return nil, h.pageFrom(snap, 0, limit), nil
 }
 
 // handleWithCursor serves a page from the cache using the provided cursor.
@@ -89,22 +89,22 @@ func (h *ChatsGetHandler) handleWithCursor(cursor string, limit int) (*mcp.CallT
 		return errResult(fmt.Sprintf("Invalid cursor: %v. Call GetChats without cursor to start fresh.", err)), nil, nil
 	}
 
-	chats, truncated, ok := h.cache.snapshot(sid)
+	snap, ok := h.cache.Snapshot(sid)
 	if !ok {
 		return errResult("Cursor expired (cache was refreshed or server restarted). Call GetChats without cursor to start fresh."), nil, nil
 	}
-	if offset >= len(chats) {
-		return errResult(fmt.Sprintf("Cursor offset %d is beyond the cached list (%d chats). Call GetChats without cursor to start fresh.", offset, len(chats))), nil, nil
+	if offset >= len(snap.Chats) {
+		return errResult(fmt.Sprintf("Cursor offset %d is beyond the cached list (%d chats). Call GetChats without cursor to start fresh.", offset, len(snap.Chats))), nil, nil
 	}
 
-	return nil, h.pageFrom(chats, sid, offset, limit, truncated), nil
+	return nil, h.pageFrom(snap, offset, limit), nil
 }
 
-// pageFrom builds a getChatsOutput for the given slice window.
-func (h *ChatsGetHandler) pageFrom(chats []tgdata.ChatInfo, sessionID int64, offset, limit int, truncated bool) *getChatsOutput {
-	total := len(chats)
+// pageFrom builds a getChatsOutput for the given window of snap.
+func (h *ChatsGetHandler) pageFrom(snap *tgdata.ChatsSnapshot, offset, limit int) *getChatsOutput {
+	total := len(snap.Chats)
 	end := min(offset+limit, total)
-	page := chats[offset:end]
+	page := snap.Chats[offset:end]
 	hasMore := end < total
 
 	out := &getChatsOutput{
@@ -114,10 +114,10 @@ func (h *ChatsGetHandler) pageFrom(chats []tgdata.ChatInfo, sessionID int64, off
 	}
 	if hasMore {
 		out.HasMore = true
-		out.NextCursor = FormatChatsCursor(sessionID, end)
+		out.NextCursor = FormatChatsCursor(snap.ID, end)
 		out.PaginationHint = fmt.Sprintf("Showing %d–%d of %d chats. Pass next_cursor to get more.", offset+1, end, total)
 	}
-	if truncated {
+	if snap.Truncated {
 		out.Warning = truncatedChatsWarning
 	}
 	return out

@@ -13,10 +13,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
+	"sync/atomic"
 
-	"github.com/gotd/td/tg"
 	"github.com/lithammer/fuzzysearch/fuzzy"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -24,41 +22,44 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
-const (
-	// maxCompletionValues caps the suggestion list; the MCP spec recommends
-	// returning at most 100 completion values per request.
-	maxCompletionValues = 100
-	// chatCacheTTL bounds how often the chat list is refetched. Completion
-	// fires on every keystroke, so without a cache each character would hit
-	// the Telegram API and the shared rate limiter.
-	chatCacheTTL = 30 * time.Second
-)
+// maxCompletionValues caps the suggestion list; the MCP spec recommends
+// returning at most 100 completion values per request.
+const maxCompletionValues = 100
 
-// chatLister returns the user's chats. It is abstracted so tests can exercise
-// the completer without a live Telegram client.
-type chatLister func(ctx context.Context) ([]tgdata.ChatInfo, error)
+// snapshotLoader returns the current chat snapshot. It is abstracted so tests
+// can exercise the completer without a live Telegram client.
+type snapshotLoader func(ctx context.Context) (*tgdata.ChatsSnapshot, error)
 
 type completer struct {
-	list chatLister
+	load snapshotLoader
+	// cands holds the candidates derived from the latest snapshot seen, so
+	// they are built once per snapshot rather than on every keystroke.
+	cands atomic.Pointer[candidateSet]
+}
 
-	mu       sync.Mutex
-	cache    []tgdata.ChatInfo
-	cachedAt time.Time
-	now      func() time.Time
+// candidateList is a deduplicated suggestion list. vals[i] is handed back to
+// the client; labels[i] is what the query is fuzzy-matched against.
+type candidateList struct {
+	vals   []string
+	labels []string
+}
+
+// candidateSet is the candidates derived from one chat snapshot.
+type candidateSet struct {
+	snapshotID int64
+	byName     candidateList // @usernames or titles, for prompt arguments
+	byID       candidateList // numeric chat IDs, for the chat resource template
 }
 
 // Handler returns an MCP CompletionHandler that suggests values for prompt
-// arguments and resource-template variables backed by the user's Telegram chats.
-func Handler(client *tg.Client) func(context.Context, *mcp.CompleteRequest) (*mcp.CompleteResult, error) {
+// arguments and resource-template variables backed by the shared chat cache.
+// Completion fires on every keystroke; the cache keeps that from hitting the
+// Telegram API each time.
+func Handler(chats *tgdata.ChatsCache) func(context.Context, *mcp.CompleteRequest) (*mcp.CompleteResult, error) {
 	c := &completer{
-		list: func(ctx context.Context) ([]tgdata.ChatInfo, error) {
-			chats, err := tgdata.GetChats(ctx, client, nil)
-			if err != nil {
-				return nil, err
-			}
-			return chats.Chats, nil
+		load: func(ctx context.Context) (*tgdata.ChatsSnapshot, error) {
+			return chats.Load(ctx, nil, false)
 		},
-		now: time.Now,
 	}
 	return c.handle
 }
@@ -88,16 +89,58 @@ func (c *completer) handle(ctx context.Context, req *mcp.CompleteRequest) (*mcp.
 // On any Telegram error it returns an empty list rather than failing the RPC —
 // a broken completion should never surface as a hard error to the client.
 func (c *completer) completeChats(ctx context.Context, value string, asID bool) []string {
-	chats, err := c.chats(ctx)
-	if err != nil || len(chats) == 0 {
+	set, err := c.candidates(ctx)
+	if err != nil {
 		return nil
 	}
-
-	type candidate struct {
-		label string // fuzzy-matched against the query (name + @username + id)
-		val   string // value handed back to the client
+	list := set.byName
+	if asID {
+		list = set.byID
 	}
-	cands := make([]candidate, 0, len(chats))
+
+	query := strings.TrimSpace(value)
+	if query == "" {
+		// No query yet: offer the first chats (GetChats returns pinned and
+		// recently-active chats first), capped to the limit.
+		return list.vals[:min(len(list.vals), maxCompletionValues)]
+	}
+
+	ranks := fuzzy.RankFindNormalizedFold(query, list.labels)
+	sort.Sort(ranks)
+
+	vals := make([]string, 0, min(len(ranks), maxCompletionValues))
+	for _, r := range ranks[:min(len(ranks), maxCompletionValues)] {
+		vals = append(vals, list.vals[r.OriginalIndex])
+	}
+	return vals
+}
+
+// candidates returns the candidates for the current snapshot, rebuilding them
+// only when the snapshot has changed. Concurrent rebuilds for the same
+// snapshot produce identical sets, so the last store winning is harmless.
+func (c *completer) candidates(ctx context.Context) (*candidateSet, error) {
+	snap, err := c.load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if set := c.cands.Load(); set != nil && set.snapshotID == snap.ID {
+		return set, nil
+	}
+	set := &candidateSet{
+		snapshotID: snap.ID,
+		byName:     buildCandidates(snap.Chats, false),
+		byID:       buildCandidates(snap.Chats, true),
+	}
+	c.cands.Store(set)
+	return set, nil
+}
+
+// buildCandidates derives one deduplicated suggestion list from chats.
+func buildCandidates(chats []tgdata.ChatInfo, asID bool) candidateList {
+	list := candidateList{
+		vals:   make([]string, 0, len(chats)),
+		labels: make([]string, 0, len(chats)),
+	}
 	seen := make(map[string]struct{}, len(chats))
 	for _, ch := range chats {
 		var val string
@@ -124,56 +167,10 @@ func (c *completer) completeChats(ctx context.Context, value string, asID bool) 
 			label += " @" + ch.Username
 		}
 		label += " " + strconv.FormatInt(ch.ID, 10)
-		cands = append(cands, candidate{label: label, val: val})
+		list.vals = append(list.vals, val)
+		list.labels = append(list.labels, label)
 	}
-
-	query := strings.TrimSpace(value)
-	if query == "" {
-		// No query yet: offer the first chats (GetChats returns pinned and
-		// recently-active chats first), capped to the limit.
-		vals := make([]string, 0, min(len(cands), maxCompletionValues))
-		for _, cand := range cands {
-			vals = append(vals, cand.val)
-			if len(vals) >= maxCompletionValues {
-				break
-			}
-		}
-		return vals
-	}
-
-	labels := make([]string, len(cands))
-	for i, cand := range cands {
-		labels[i] = cand.label
-	}
-	ranks := fuzzy.RankFindNormalizedFold(query, labels)
-	sort.Sort(ranks)
-
-	vals := make([]string, 0, min(len(ranks), maxCompletionValues))
-	for _, r := range ranks {
-		vals = append(vals, cands[r.OriginalIndex].val)
-		if len(vals) >= maxCompletionValues {
-			break
-		}
-	}
-	return vals
-}
-
-// chats returns the cached chat list, refetching when the cache is empty or
-// stale. The lock is held across the fetch so concurrent completion requests
-// share a single in-flight load instead of stampeding the Telegram API.
-func (c *completer) chats(ctx context.Context) ([]tgdata.ChatInfo, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.cache != nil && c.now().Sub(c.cachedAt) < chatCacheTTL {
-		return c.cache, nil
-	}
-	chats, err := c.list(ctx)
-	if err != nil {
-		return nil, err
-	}
-	c.cache = chats
-	c.cachedAt = c.now()
-	return chats, nil
+	return list
 }
 
 // filterPrefix returns the values whose lowercase form starts with value.

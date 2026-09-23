@@ -1,11 +1,13 @@
 package tools
 
 import (
+	"context"
 	"encoding/base64"
 	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/require"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
@@ -82,6 +84,17 @@ func makeChats(n int) []tgdata.ChatInfo {
 	return chats
 }
 
+// seededChatsCache returns a cache already holding one snapshot of chats.
+func seededChatsCache(t *testing.T, chats []tgdata.ChatInfo, truncated bool) (*tgdata.ChatsCache, *tgdata.ChatsSnapshot) {
+	t.Helper()
+	cache := tgdata.NewChatsCache(func(context.Context, tgdata.ProgressFunc) (*tgdata.ChatsList, error) {
+		return &tgdata.ChatsList{Chats: chats, Count: len(chats), Truncated: truncated}, nil
+	})
+	snap, err := cache.Load(t.Context(), nil, false)
+	require.NoError(t, err)
+	return cache, snap
+}
+
 func TestPageFrom(t *testing.T) {
 	const sid int64 = 42
 
@@ -107,8 +120,7 @@ func TestPageFrom(t *testing.T) {
 	h := &ChatsGetHandler{}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			chats := makeChats(tt.total)
-			out := h.pageFrom(chats, sid, tt.offset, tt.limit, false)
+			out := h.pageFrom(&tgdata.ChatsSnapshot{ID: sid, Chats: makeChats(tt.total)}, tt.offset, tt.limit)
 
 			if out.Count != tt.wantCount {
 				t.Errorf("Count = %d, want %d", out.Count, tt.wantCount)
@@ -149,9 +161,10 @@ func TestPageFrom(t *testing.T) {
 
 func TestHandleWithCursorErrors(t *testing.T) {
 	chats := makeChats(5)
-	const sid int64 = 99
+	cache, snap := seededChatsCache(t, chats, false)
+	sid := snap.ID
 
-	h := &ChatsGetHandler{cache: &ChatsCache{chats: chats, sessionID: sid}}
+	h := &ChatsGetHandler{cache: cache}
 
 	t.Run("session mismatch", func(t *testing.T) {
 		cursor := FormatChatsCursor(sid+1, 0)
@@ -207,7 +220,7 @@ func TestHandleWithCursorErrors(t *testing.T) {
 	})
 
 	t.Run("unloaded cache", func(t *testing.T) {
-		h2 := &ChatsGetHandler{cache: &ChatsCache{}}
+		h2 := &ChatsGetHandler{cache: tgdata.NewChatsCache(nil)}
 		cursor := FormatChatsCursor(0, 0)
 		result, out, _ := h2.handleWithCursor(cursor, 10)
 		if out != nil {
