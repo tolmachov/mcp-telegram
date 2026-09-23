@@ -21,12 +21,18 @@ import (
 // FS stores one file per authorization under dir/sessions-v3. Intended for local
 // development and self-hosted deployments with a persistent disk.
 type FS struct {
-	dir   string
-	locks sync.Map
+	dir string
+	// grantLocks make a grant's compare and write one step. Families hash onto a
+	// fixed set of stripes, so the lock set stays bounded however many
+	// families come and go; two families sharing a stripe merely queue.
+	grantLocks [grantLockStripes]sync.Mutex
 }
 
-// NewFS creates the directory (0700) if needed and returns the store. It also
-// creates the revoked/ subdir that holds revocation tombstones.
+// grantLockStripes is the number of grant locks per FS store.
+const grantLockStripes = 64
+
+// NewFS creates the directory and its sessions, tombstone and grant
+// subdirectories (0700) if needed and returns the store.
 func NewFS(dir string) (*FS, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("sessionstore: directory is required")
@@ -45,8 +51,9 @@ func (f *FS) path(userID tgid.UserID, sid string) string {
 	return filepath.Join(f.sessionsDir(), sessionBase(userID, sid))
 }
 
-// revokedDir is the subdir holding tombstones — the gotd client only writes
-// session files in dir itself, so a tombstone here survives a blob re-store.
+// Sessions, tombstones and grants each live in their own subdirectory. The
+// gotd client only writes session files under sessionsDir, so a tombstone in
+// revokedDir survives a blob re-store.
 func (f *FS) sessionsDir() string { return filepath.Join(f.dir, "sessions-v3") }
 func (f *FS) revokedDir() string  { return filepath.Join(f.dir, "revoked-v3") }
 func (f *FS) grantsDir() string   { return filepath.Join(f.dir, "oauth-v3-grants") }
@@ -54,8 +61,9 @@ func (f *FS) grantsDir() string   { return filepath.Join(f.dir, "oauth-v3-grants
 func (f *FS) grantPath(family string) string { return filepath.Join(f.grantsDir(), family+".json") }
 
 // LoadGrant reads family's grant record. The version is a hash of the file
-// contents: every update changes the generation or sets Revoked, so a record
-// never returns to earlier contents and equal hashes mean an unchanged record.
+// contents, so StoreGrant compares the record's value: an equal hash means
+// the stored record is the one the caller read, which is all a
+// compare-and-swap needs.
 func (f *FS) LoadGrant(_ context.Context, family string) (GrantRecord, int64, error) {
 	data, err := os.ReadFile(f.grantPath(family)) //nolint:gosec // Encrypted validated family as fixed-length hex
 	if errors.Is(err, os.ErrNotExist) {
@@ -97,8 +105,9 @@ func (f *FS) StoreGrant(ctx context.Context, family string, grant GrantRecord, v
 }
 
 func (f *FS) grantLock(family string) *sync.Mutex {
-	lock, _ := f.locks.LoadOrStore(family, &sync.Mutex{})
-	return lock.(*sync.Mutex)
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(family))
+	return &f.grantLocks[h.Sum32()%grantLockStripes]
 }
 
 func (f *FS) revokedPath(userID tgid.UserID, sid string) string {
@@ -143,9 +152,9 @@ func (f *FS) ListRevoked(_ context.Context) ([]SessionRef, error) {
 	return f.listDir(f.revokedDir())
 }
 
-// listDir enumerates session-named files directly in dir (never recursing, so
-// List skips the revoked/ subdir via IsDir), skipping foreign or unreadable
-// entries rather than failing the whole listing.
+// listDir enumerates session-named files directly in dir, skipping
+// subdirectories and foreign or unreadable entries rather than failing the
+// whole listing.
 func (f *FS) listDir(dir string) ([]SessionRef, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
