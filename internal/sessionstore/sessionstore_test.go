@@ -28,6 +28,14 @@ func newKey(t *testing.T) string {
 	return base64.StdEncoding.EncodeToString(raw)
 }
 
+// rotationKeys returns two fixed master keys for a ring holding both. Their
+// one-byte key IDs differ (0x02 and 0x9f); two random keys would share one,
+// which keyring.Parse rejects, once in 256 draws.
+func rotationKeys() (oldKey, newKey string) {
+	return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x11}, keyring.MasterKeyLen)),
+		base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x22}, keyring.MasterKeyLen))
+}
+
 // newCipher builds a session cipher over a ring parsed from encoded keys.
 func newCipher(t *testing.T, issuer string, encoded ...string) *Cipher {
 	t.Helper()
@@ -101,7 +109,7 @@ func TestCipherRejectsWrongUserAndKey(t *testing.T) {
 }
 
 func TestCipherRotation(t *testing.T) {
-	oldKey, newKeyStr := newKey(t), newKey(t)
+	oldKey, newKeyStr := rotationKeys()
 	cOld := newCipher(t, testIssuer, oldKey)
 	uk := userKeyForTest(t)
 	blob, err := cOld.seal(7, uk, []byte("session"))
@@ -554,7 +562,7 @@ func TestCipherOldBlobRejected(t *testing.T) {
 // TestCipherV3Rotation pins that per-session v3 blobs survive a master-key
 // rotation: the key-ID byte still selects the right master to re-derive from.
 func TestCipherV3Rotation(t *testing.T) {
-	oldKey, newKeyStr := newKey(t), newKey(t)
+	oldKey, newKeyStr := rotationKeys()
 	cOld := newCipher(t, testIssuer, oldKey)
 	const user = tgid.UserID(7)
 	uk := userKeyForTest(t)
