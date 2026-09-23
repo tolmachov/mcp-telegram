@@ -15,6 +15,10 @@ import (
 const (
 	peerCacheMaxEntries = 4096
 	peerCacheTTL        = time.Hour
+	// peerResolveTimeout bounds one shared resolve, which runs detached from
+	// the callers waiting on it: up to three probes, each of which may sit
+	// out a flood wait.
+	peerResolveTimeout = 5 * time.Minute
 )
 
 type peerCacheEntry struct {
@@ -24,8 +28,8 @@ type peerCacheEntry struct {
 
 // Resolver is the one peer resolver of an assembly: every tool and data path
 // that turns a chat ID into a peer goes through it. It caches resolved peers
-// in a bounded, expiring map — concurrent cold resolves for the same ID
-// collapse into one Telegram probe — owns the stale-access-hash retry
+// in a bounded, expiring map, collapses concurrent cold resolves of the same
+// ID into one Telegram probe, and owns both the stale-access-hash retry
 // (WithPeer, WithPeers) and the rate limiter that paces message fetching.
 type Resolver struct {
 	client  *tg.Client
@@ -62,25 +66,37 @@ func (r *Resolver) Wait(ctx context.Context) error {
 // Resolve returns the peer for id, from the cache when it holds a live entry.
 // Failures are never cached, so a transient error (e.g. a flood wait) is
 // retried on the next call. Every failure is a *PeerError.
+//
+// Concurrent cold resolves of id share one probe. It belongs to none of them:
+// it runs on a context detached from the caller that started it (bounded by
+// peerResolveTimeout), and each caller waits on its own ctx, so one caller
+// giving up neither fails the others nor wastes the probe.
 func (r *Resolver) Resolve(ctx context.Context, id int64) (Peer, error) {
 	if peer, ok := r.cached(id); ok {
 		return peer, nil
 	}
-	value, err, _ := r.load.Do(strconv.FormatInt(id, 10), func() (any, error) {
+	flight := r.load.DoChan(strconv.FormatInt(id, 10), func() (any, error) {
 		if peer, ok := r.cached(id); ok {
 			return peer, nil
 		}
-		peer, err := resolvePeer(ctx, r.client, id)
+		probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), peerResolveTimeout)
+		defer cancel()
+		peer, err := resolvePeer(probeCtx, r.client, id)
 		if err != nil {
 			return nil, err
 		}
 		r.store(id, peer)
 		return peer, nil
 	})
-	if err != nil {
-		return Peer{}, err //nolint:wrapcheck // resolvePeer already returns a *PeerError naming the chat.
+	select {
+	case <-ctx.Done():
+		return Peer{}, &PeerError{ID: id, Err: ctx.Err()}
+	case outcome := <-flight:
+		if outcome.Err != nil {
+			return Peer{}, outcome.Err //nolint:wrapcheck // resolvePeer already returns a *PeerError naming the chat.
+		}
+		return outcome.Val.(Peer), nil
 	}
-	return value.(Peer), nil
 }
 
 func (r *Resolver) cached(id int64) (Peer, bool) {

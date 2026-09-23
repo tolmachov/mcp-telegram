@@ -7,28 +7,54 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func channelClient(calls *atomic.Int32, accessHash func() int64) *tg.Client {
-	return tg.NewClient(fakeInvoker{
-		channels: func(ids []tg.InputChannelClass) (tg.MessagesChatsClass, error) {
-			calls.Add(1)
-			id := ids[0].(*tg.InputChannel).ChannelID
-			return &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Channel{ID: id, AccessHash: accessHash()}}}, nil
-		},
-	})
+func channelClientHandler(calls *atomic.Int32, accessHash func() int64) func([]tg.InputChannelClass) (tg.MessagesChatsClass, error) {
+	return func(ids []tg.InputChannelClass) (tg.MessagesChatsClass, error) {
+		calls.Add(1)
+		id := ids[0].(*tg.InputChannel).ChannelID
+		return &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Channel{ID: id, AccessHash: accessHash()}}}, nil
+	}
 }
 
-// TestResolverCachesSuccess verifies a resolved peer is served from the cache
-// on the second call without a second round of MTProto probes, even when many
-// callers race for the same cold ID.
+func channelClient(calls *atomic.Int32, accessHash func() int64) *tg.Client {
+	return tg.NewClient(fakeInvoker{channels: channelClientHandler(calls, accessHash)})
+}
+
+// gatedInvoker holds every call until gate closes, failing it instead when
+// its ctx ends first, like a real transport. entered receives one value per
+// call that reached the gate.
+type gatedInvoker struct {
+	inner   fakeInvoker
+	entered chan struct{}
+	gate    chan struct{}
+}
+
+func (g gatedInvoker) Invoke(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
+	g.entered <- struct{}{}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-g.gate:
+		return g.inner.Invoke(ctx, input, output)
+	}
+}
+
+// TestResolverCachesSuccess verifies concurrent cold resolves of one ID share
+// a single probe, and a warm Resolve is served from the cache.
 func TestResolverCachesSuccess(t *testing.T) {
 	var calls atomic.Int32
-	r := NewResolver(channelClient(&calls, func() int64 { return 999 }), 1000)
+	inv := gatedInvoker{
+		inner:   fakeInvoker{channels: channelClientHandler(&calls, func() int64 { return 999 })},
+		entered: make(chan struct{}, 16),
+		gate:    make(chan struct{}),
+	}
+	r := NewResolver(tg.NewClient(inv), 1000)
 	want := &tg.InputPeerChannel{ChannelID: 1555091578, AccessHash: 999}
 
 	var wg sync.WaitGroup
@@ -39,16 +65,54 @@ func TestResolverCachesSuccess(t *testing.T) {
 			assert.Equal(t, want, p.Input)
 		})
 	}
+	<-inv.entered // the shared probe holds at the gate while the callers pile up
+	close(inv.gate)
 	wg.Wait()
+	assert.Equal(t, int32(1), calls.Load(), "concurrent cold resolves must share one probe")
 
 	p, err := r.Resolve(t.Context(), 1555091578)
 	require.NoError(t, err)
 	assert.Equal(t, want, p.Input)
-	assert.LessOrEqual(t, calls.Load(), int32(8), "cold resolves must not multiply")
-	before := calls.Load()
-	_, err = r.Resolve(t.Context(), 1555091578)
-	require.NoError(t, err)
-	assert.Equal(t, before, calls.Load(), "a warm Resolve must hit the cache, not the API")
+	assert.Equal(t, int32(1), calls.Load(), "a warm Resolve must hit the cache, not the API")
+}
+
+// TestResolverSharedProbeOutlivesCaller verifies the caller that started a
+// shared probe giving up does not fail another caller waiting on it.
+func TestResolverSharedProbeOutlivesCaller(t *testing.T) {
+	var calls atomic.Int32
+	inv := gatedInvoker{
+		inner:   fakeInvoker{channels: channelClientHandler(&calls, func() int64 { return 999 })},
+		entered: make(chan struct{}, 16),
+		gate:    make(chan struct{}),
+	}
+	r := NewResolver(tg.NewClient(inv), 1000)
+
+	firstCtx, cancelFirst := context.WithCancel(t.Context())
+	firstErr := make(chan error, 1)
+	go func() {
+		_, err := r.Resolve(firstCtx, 5)
+		firstErr <- err
+	}()
+	<-inv.entered // the first caller's probe is in flight
+
+	second := make(chan error, 1)
+	go func() {
+		p, err := r.Resolve(t.Context(), 5)
+		if err == nil {
+			assert.Equal(t, &tg.InputPeerChannel{ChannelID: 5, AccessHash: 999}, p.Input)
+		}
+		second <- err
+	}()
+
+	cancelFirst()
+	err := <-firstErr
+	require.ErrorIs(t, err, context.Canceled, "the cancelled caller stops waiting")
+	var pe *PeerError
+	require.ErrorAs(t, err, &pe)
+
+	close(inv.gate)
+	require.NoError(t, <-second, "the other caller still gets the peer")
+	assert.Equal(t, int32(1), calls.Load())
 }
 
 // TestResolverDoesNotCacheErrors is the core contract: a transient failure
@@ -98,6 +162,30 @@ func TestResolverExpiresAndEvicts(t *testing.T) {
 		r.store(id, Peer{Input: &tg.InputPeerChat{ChatID: id}})
 	}
 	assert.Len(t, r.byID, peerCacheMaxEntries)
+}
+
+// TestResolverEvictionPrefersExpired verifies a full cache makes room by
+// dropping expired entries, keeping every live one.
+func TestResolverEvictionPrefersExpired(t *testing.T) {
+	r := NewResolver(nil, 1000)
+	now := time.Unix(0, 0)
+	r.now = func() time.Time { return now }
+
+	const expired = int64(1)
+	r.store(expired, Peer{Input: &tg.InputPeerChat{ChatID: expired}})
+	now = now.Add(peerCacheTTL / 2)
+	for id := expired + 1; id <= peerCacheMaxEntries; id++ {
+		r.store(id, Peer{Input: &tg.InputPeerChat{ChatID: id}})
+	}
+	require.Len(t, r.byID, peerCacheMaxEntries)
+
+	now = now.Add(peerCacheTTL / 2) // only the first entry has expired
+	r.store(peerCacheMaxEntries+1, Peer{Input: &tg.InputPeerChat{ChatID: peerCacheMaxEntries + 1}})
+	assert.Len(t, r.byID, peerCacheMaxEntries)
+	assert.NotContains(t, r.byID, expired, "the expired entry makes room")
+	for id := expired + 1; id <= peerCacheMaxEntries+1; id++ {
+		assert.Contains(t, r.byID, id, "no live entry is evicted while an expired one exists")
+	}
 }
 
 // TestWithPeerRetriesStaleHashOnce verifies a stale access hash invalidates
