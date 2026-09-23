@@ -22,6 +22,13 @@ import (
 func TestFailureText(t *testing.T) {
 	flood := &tgerr.Error{Code: 420, Message: "FLOOD_WAIT_265", Type: "FLOOD_WAIT", Argument: 265}
 
+	t.Run("a failure without a cause still renders", func(t *testing.T) {
+		assert.Equal(t, "Failed to send message: the server recorded no cause for this failure (server bug).",
+			failureText("SendMessage", failed("send message", nil)))
+		assert.Equal(t, "Failed to send message: the server recorded no cause for this failure (server bug). Try again.",
+			failureText("SendMessage", failedHint("send message", withNote(nil, ""), "Try again.")))
+	})
+
 	t.Run("bare flood wait", func(t *testing.T) {
 		txt := failureText("JoinChat", failed(`join "@x"`, flood))
 		assert.True(t, strings.HasPrefix(txt, `Failed to join "@x": Telegram rate-limited this JoinChat call: wait 4m25s (265 seconds)`), txt)

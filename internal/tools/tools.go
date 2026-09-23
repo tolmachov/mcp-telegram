@@ -241,26 +241,31 @@ func (f *failure) Error() string {
 
 func (f *failure) Unwrap() error { return f.err }
 
+// errNoCause stands in for the error of a failure built without one — a
+// handler bug — so rendering it still says something true instead of
+// panicking on a nil error.
+var errNoCause = errors.New("the server recorded no cause for this failure (server bug)")
+
+// newFailure is the one constructor of failure.
+func newFailure(op, note, hint string, err error) error {
+	if err == nil {
+		err = errNoCause
+	}
+	return &failure{op: op, note: note, hint: hint, err: err}
+}
+
 // failed reports that op — a phrase fitting "Failed to <op>", e.g. "send
 // message" — failed with err.
-func failed(op string, err error) error {
-	return &failure{op: op, err: err}
-}
+func failed(op string, err error) error { return newFailure(op, "", "", err) }
 
 // failedHint is failed with a recovery hint the model can act on.
-func failedHint(op string, err error, hint string) error {
-	return &failure{op: op, hint: hint, err: err}
-}
+func failedHint(op string, err error, hint string) error { return newFailure(op, "", hint, err) }
 
 // withHint attaches a recovery hint to err for the failure that wraps it.
-func withHint(err error, hint string) error {
-	return &failure{hint: hint, err: err}
-}
+func withHint(err error, hint string) error { return newFailure("", "", hint, err) }
 
 // withNote attaches an outcome note to err for the failure that wraps it.
-func withNote(err error, note string) error {
-	return &failure{note: note, err: err}
-}
+func withNote(err error, note string) error { return newFailure("", note, "", err) }
 
 // peerHint follows a failure to resolve a chat ID.
 const peerHint = "The chat may not exist, you may not have access, or the ID may be wrong. Use SearchChats or GetChats to verify, or ResolveUsername if you only have a @handle."
