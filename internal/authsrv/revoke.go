@@ -75,7 +75,7 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	// Revoked, so the grant stays dead regardless. The already-issued access
 	// token remains valid until it expires (<= accessTokenTTL); revocation stops
 	// renewal, matching the short-lived-access / revocable-refresh model.
-	if err := a.store.RevokeGrant(r.Context(), family); err != nil {
+	if err := sessionstore.RevokeGrant(r.Context(), a.store, family); err != nil {
 		a.logger.Error("grant revocation could not be recorded", "user_id", userID, "err", err)
 		w.Header().Set("Retry-After", "60")
 		a.tokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "revocation could not be recorded, retry")

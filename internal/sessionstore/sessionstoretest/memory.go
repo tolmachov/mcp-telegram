@@ -25,8 +25,11 @@ type memBlob struct {
 	updatedAt time.Time
 }
 
-// Memory is an in-process Store for tests. Now is the write-timestamp clock;
-// tests may override it (before use) to make List/sweep behaviour deterministic.
+// Memory is an in-process Store for tests. Now is the blob write-timestamp
+// clock (the storage mtime other backends take from the filesystem or bucket);
+// tests may override it (before use) to make List/sweep behaviour
+// deterministic. Grant expiry uses the time the caller passes in, as on every
+// backend.
 type Memory struct {
 	Now func() time.Time
 
@@ -36,12 +39,11 @@ type Memory struct {
 	grants  map[string]memGrant
 }
 
-// memGrant is one authorization-code family's refresh-grant state.
+// memGrant is one authorization-code family's refresh-grant record and its
+// write counter, the version StoreGrant compares.
 type memGrant struct {
-	SID        string
-	Generation int64
-	ExpiresAt  time.Time
-	Revoked    bool
+	record  sessionstore.GrantRecord
+	version int64
 }
 
 // NewMemory returns an empty in-memory store stamped by the wall clock.
@@ -127,50 +129,27 @@ func (m *Memory) DeleteRevoked(_ context.Context, userID tgid.UserID, sid string
 	return nil
 }
 
-func (m *Memory) RedeemCode(_ context.Context, family, sid string, expiresAt time.Time) (bool, error) {
-	if !sessionstore.ValidSID(family) || !sessionstore.ValidSID(sid) {
-		return false, sessionstore.ErrInvalidSID
+func (m *Memory) LoadGrant(_ context.Context, family string) (sessionstore.GrantRecord, int64, error) {
+	if !sessionstore.ValidSID(family) {
+		return sessionstore.GrantRecord{}, 0, sessionstore.ErrInvalidSID
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, exists := m.grants[family]; exists {
-		return false, nil
-	}
-	m.grants[family] = memGrant{SID: sid, ExpiresAt: expiresAt}
-	return true, nil
+	g := m.grants[family]
+	return g.record, g.version, nil
 }
 
-func (m *Memory) RotateGrant(_ context.Context, family string, generation int64) (sessionstore.GrantRotation, error) {
-	if !sessionstore.ValidSID(family) {
-		return sessionstore.GrantMissing, sessionstore.ErrInvalidSID
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	grant, exists := m.grants[family]
-	if !exists || !m.Now().Before(grant.ExpiresAt) {
-		return sessionstore.GrantMissing, nil
-	}
-	if grant.Revoked || grant.Generation != generation {
-		grant.Revoked = true
-		m.grants[family] = grant
-		return sessionstore.GrantReplay, nil
-	}
-	grant.Generation++
-	m.grants[family] = grant
-	return sessionstore.GrantRotated, nil
-}
-
-func (m *Memory) RevokeGrant(_ context.Context, family string) error {
-	if !sessionstore.ValidSID(family) {
+func (m *Memory) StoreGrant(_ context.Context, family string, grant sessionstore.GrantRecord, version int64) error {
+	if !sessionstore.ValidSID(family) || !sessionstore.ValidSID(grant.SID) {
 		return sessionstore.ErrInvalidSID
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	grant, ok := m.grants[family]
-	if ok {
-		grant.Revoked = true
-		m.grants[family] = grant
+	current := m.grants[family]
+	if current.version != version {
+		return sessionstore.ErrGrantConflict
 	}
+	m.grants[family] = memGrant{record: grant, version: current.version + 1}
 	return nil
 }
 
@@ -178,7 +157,7 @@ func (m *Memory) SweepAuthState(_ context.Context, now time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for family, grant := range m.grants {
-		if !now.Before(grant.ExpiresAt) {
+		if grant.record.Expired(now) {
 			delete(m.grants, family)
 		}
 	}

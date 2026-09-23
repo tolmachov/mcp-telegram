@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -206,116 +205,57 @@ func isPreconditionFailed(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.Code == http.StatusPreconditionFailed
 }
 
-func (g *GCS) RedeemCode(ctx context.Context, family, sid string, expiresAt time.Time) (bool, error) {
-	if !ValidSID(family) || !ValidSID(sid) {
-		return false, ErrInvalidSID
+// LoadGrant reads family's grant record; the version is the object's GCS
+// generation, which is never zero for an existing object.
+func (g *GCS) LoadGrant(ctx context.Context, family string) (GrantRecord, int64, error) {
+	if !ValidSID(family) {
+		return GrantRecord{}, 0, ErrInvalidSID
 	}
-	data, _ := json.Marshal(grantRecord{SID: sid, ExpiresAt: expiresAt})
-	object := g.bucket.Object(grantObjectName(family)).If(storage.Conditions{DoesNotExist: true})
-	w := newWriter(ctx, object)
-	if _, err := w.Write(data); err != nil {
-		_ = w.Close()
-		if isPreconditionFailed(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	if err := w.Close(); err != nil {
-		if isPreconditionFailed(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("sessionstore: creating grant: %w", err)
-	}
-	return true, nil
-}
-
-func (g *GCS) loadGrant(ctx context.Context, family string) (grantRecord, int64, error) {
-	object := g.bucket.Object(grantObjectName(family))
-	r, err := object.NewReader(ctx)
+	r, err := g.bucket.Object(grantObjectName(family)).NewReader(ctx)
 	if errors.Is(err, storage.ErrObjectNotExist) {
-		return grantRecord{}, 0, os.ErrNotExist
+		return GrantRecord{}, 0, nil
 	}
 	if err != nil {
-		return grantRecord{}, 0, fmt.Errorf("sessionstore: opening grant: %w", err)
+		return GrantRecord{}, 0, fmt.Errorf("sessionstore: opening grant: %w", err)
 	}
 	data, err := io.ReadAll(r)
 	_ = r.Close()
 	if err != nil {
-		return grantRecord{}, 0, fmt.Errorf("sessionstore: reading grant: %w", err)
+		return GrantRecord{}, 0, fmt.Errorf("sessionstore: reading grant: %w", err)
 	}
-	var grant grantRecord
+	var grant GrantRecord
 	if err := json.Unmarshal(data, &grant); err != nil {
-		return grantRecord{}, 0, fmt.Errorf("sessionstore: parsing grant: %w", err)
+		return GrantRecord{}, 0, fmt.Errorf("sessionstore: parsing grant: %w", err)
 	}
 	return grant, r.Attrs.Generation, nil
 }
 
-func (g *GCS) storeGrantCAS(ctx context.Context, family string, generation int64, grant grantRecord) error {
-	data, _ := json.Marshal(grant)
-	object := g.bucket.Object(grantObjectName(family)).If(storage.Conditions{GenerationMatch: generation})
-	w := newWriter(ctx, object)
-	if _, err := w.Write(data); err != nil {
-		_ = w.Close()
-		return err
-	}
-	if err := w.Close(); err != nil {
-		return fmt.Errorf("sessionstore: committing grant CAS: %w", err)
-	}
-	return nil
-}
-
-func (g *GCS) RotateGrant(ctx context.Context, family string, expected int64) (GrantRotation, error) {
-	if !ValidSID(family) {
-		return GrantMissing, ErrInvalidSID
-	}
-	for range 4 {
-		grant, generation, err := g.loadGrant(ctx, family)
-		if errors.Is(err, os.ErrNotExist) || (!grant.ExpiresAt.IsZero() && !time.Now().Before(grant.ExpiresAt)) {
-			return GrantMissing, nil
-		}
-		if err != nil {
-			return GrantMissing, err
-		}
-		result := GrantRotated
-		if grant.Revoked || grant.Generation != expected {
-			grant.Revoked = true
-			result = GrantReplay
-		} else {
-			grant.Generation++
-		}
-		if err := g.storeGrantCAS(ctx, family, generation, grant); err != nil {
-			if isPreconditionFailed(err) {
-				continue
-			}
-			return GrantMissing, err
-		}
-		return result, nil
-	}
-	return GrantMissing, fmt.Errorf("sessionstore: grant CAS contention")
-}
-
-func (g *GCS) RevokeGrant(ctx context.Context, family string) error {
-	if !ValidSID(family) {
+// StoreGrant writes family's grant record conditioned on the object
+// generation (or on its absence for version 0).
+func (g *GCS) StoreGrant(ctx context.Context, family string, grant GrantRecord, version int64) error {
+	if !ValidSID(family) || !ValidSID(grant.SID) {
 		return ErrInvalidSID
 	}
-	for range 4 {
-		grant, generation, err := g.loadGrant(ctx, family)
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("sessionstore: listing grants: %w", err)
-		}
-		grant.Revoked = true
-		if err := g.storeGrantCAS(ctx, family, generation, grant); err != nil {
-			if isPreconditionFailed(err) {
-				continue
-			}
-			return err
-		}
-		return nil
+	data, err := json.Marshal(grant)
+	if err != nil {
+		return fmt.Errorf("sessionstore: encoding grant: %w", err)
 	}
-	return fmt.Errorf("sessionstore: grant CAS contention")
+	cond := storage.Conditions{GenerationMatch: version}
+	if version == 0 {
+		cond = storage.Conditions{DoesNotExist: true}
+	}
+	w := newWriter(ctx, g.bucket.Object(grantObjectName(family)).If(cond))
+	_, err = w.Write(data)
+	if closeErr := w.Close(); err == nil {
+		err = closeErr
+	}
+	if isPreconditionFailed(err) {
+		return ErrGrantConflict
+	}
+	if err != nil {
+		return fmt.Errorf("sessionstore: writing grant: %w", err)
+	}
+	return nil
 }
 
 func (g *GCS) SweepAuthState(ctx context.Context, now time.Time) error {
@@ -332,11 +272,11 @@ func (g *GCS) SweepAuthState(ctx context.Context, now time.Time) error {
 		if !ValidSID(family) {
 			continue
 		}
-		grant, generation, err := g.loadGrant(ctx, family)
+		grant, generation, err := g.LoadGrant(ctx, family)
 		if err != nil {
 			return err
 		}
-		if !now.Before(grant.ExpiresAt) {
+		if generation != 0 && grant.Expired(now) {
 			err = g.bucket.Object(attrs.Name).If(storage.Conditions{GenerationMatch: generation}).Delete(ctx)
 			if err != nil && !isPreconditionFailed(err) && !errors.Is(err, storage.ErrObjectNotExist) {
 				return fmt.Errorf("sessionstore: deleting expired grant: %w", err)

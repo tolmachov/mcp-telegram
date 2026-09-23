@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,25 +53,49 @@ func (f *FS) grantsDir() string   { return filepath.Join(f.dir, "oauth-v3-grants
 
 func (f *FS) grantPath(family string) string { return filepath.Join(f.grantsDir(), family+".json") }
 
-// loadGrant reads family's grant record; found is false when none exists. The
-// caller holds the family's grantLock.
-func (f *FS) loadGrant(family string) (grant grantRecord, found bool, err error) {
-	data, err := os.ReadFile(f.grantPath(family)) //nolint:gosec // path is derived from a validated fixed-length hex family
-	if errors.Is(err, os.ErrNotExist) {
-		return grantRecord{}, false, nil
+// LoadGrant reads family's grant record. The version is a hash of the file
+// contents: every update changes the generation or sets Revoked, so a record
+// never returns to earlier contents and equal hashes mean an unchanged record.
+func (f *FS) LoadGrant(_ context.Context, family string) (GrantRecord, int64, error) {
+	if !ValidSID(family) {
+		return GrantRecord{}, 0, ErrInvalidSID
 	}
-	if err != nil {
-		return grantRecord{}, false, fmt.Errorf("sessionstore: reading grant: %w", err)
-	}
-	if err := json.Unmarshal(data, &grant); err != nil {
-		return grantRecord{}, false, fmt.Errorf("sessionstore: parsing grant: %w", err)
-	}
-	return grant, true, nil
+	return f.readGrant(family)
 }
 
-// storeGrant atomically replaces family's grant record. The caller holds the
-// family's grantLock.
-func (f *FS) storeGrant(family string, grant grantRecord) error {
+func (f *FS) readGrant(family string) (GrantRecord, int64, error) {
+	data, err := os.ReadFile(f.grantPath(family)) //nolint:gosec // path is derived from a validated fixed-length hex family
+	if errors.Is(err, os.ErrNotExist) {
+		return GrantRecord{}, 0, nil
+	}
+	if err != nil {
+		return GrantRecord{}, 0, fmt.Errorf("sessionstore: reading grant: %w", err)
+	}
+	var grant GrantRecord
+	if err := json.Unmarshal(data, &grant); err != nil {
+		return GrantRecord{}, 0, fmt.Errorf("sessionstore: parsing grant: %w", err)
+	}
+	h := fnv.New64a()
+	_, _ = h.Write(data)
+	return grant, int64(h.Sum64() | 1), nil //nolint:gosec // the version is an opaque bit pattern; overflow is irrelevant
+}
+
+// StoreGrant atomically replaces family's grant record if its version still
+// matches. The family lock makes the compare and the write one step.
+func (f *FS) StoreGrant(_ context.Context, family string, grant GrantRecord, version int64) error {
+	if !ValidSID(family) || !ValidSID(grant.SID) {
+		return ErrInvalidSID
+	}
+	lock := f.grantLock(family)
+	lock.Lock()
+	defer lock.Unlock()
+	_, current, err := f.readGrant(family)
+	if err != nil {
+		return err
+	}
+	if current != version {
+		return ErrGrantConflict
+	}
 	data, err := json.Marshal(grant)
 	if err != nil {
 		return fmt.Errorf("sessionstore: encoding grant: %w", err)
@@ -211,66 +236,6 @@ func (f *FS) DeleteRevoked(_ context.Context, userID tgid.UserID, sid string) er
 	return nil
 }
 
-func (f *FS) RedeemCode(_ context.Context, family, sid string, expiresAt time.Time) (bool, error) {
-	if !ValidSID(family) || !ValidSID(sid) {
-		return false, ErrInvalidSID
-	}
-	lock := f.grantLock(family)
-	lock.Lock()
-	defer lock.Unlock()
-	if _, err := os.Stat(f.grantPath(family)); err == nil {
-		return false, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("sessionstore: probing grant: %w", err)
-	}
-	if err := f.storeGrant(family, grantRecord{SID: sid, ExpiresAt: expiresAt}); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func (f *FS) RotateGrant(_ context.Context, family string, generation int64) (GrantRotation, error) {
-	if !ValidSID(family) {
-		return GrantMissing, ErrInvalidSID
-	}
-	lock := f.grantLock(family)
-	lock.Lock()
-	defer lock.Unlock()
-	grant, found, err := f.loadGrant(family)
-	if err != nil || !found {
-		return GrantMissing, err
-	}
-	result := GrantRotated
-	if !time.Now().Before(grant.ExpiresAt) {
-		return GrantMissing, nil
-	}
-	if grant.Revoked || grant.Generation != generation {
-		grant.Revoked = true
-		result = GrantReplay
-	} else {
-		grant.Generation++
-	}
-	if err := f.storeGrant(family, grant); err != nil {
-		return GrantMissing, err
-	}
-	return result, nil
-}
-
-func (f *FS) RevokeGrant(_ context.Context, family string) error {
-	if !ValidSID(family) {
-		return ErrInvalidSID
-	}
-	lock := f.grantLock(family)
-	lock.Lock()
-	defer lock.Unlock()
-	grant, found, err := f.loadGrant(family)
-	if err != nil || !found {
-		return err
-	}
-	grant.Revoked = true
-	return f.storeGrant(family, grant)
-}
-
 func (f *FS) SweepAuthState(_ context.Context, now time.Time) error {
 	entries, err := os.ReadDir(f.grantsDir())
 	if err != nil {
@@ -283,8 +248,8 @@ func (f *FS) SweepAuthState(_ context.Context, now time.Time) error {
 		}
 		lock := f.grantLock(family)
 		lock.Lock()
-		grant, found, err := f.loadGrant(family)
-		if err == nil && found && !now.Before(grant.ExpiresAt) {
+		grant, version, err := f.readGrant(family)
+		if err == nil && version != 0 && grant.Expired(now) {
 			err = os.Remove(f.grantPath(family))
 		}
 		lock.Unlock()

@@ -3,6 +3,7 @@ package sessionstore
 import (
 	"io"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,7 +20,7 @@ func TestGCSGrantCorruptionFailsWithoutOverwrite(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 
-	_, err = store.RotateGrant(ctx, testGrantFamily, 0)
+	_, err = RotateGrant(ctx, store, testGrantFamily, 0, time.Now())
 	require.ErrorContains(t, err, "parsing grant")
 	r, err := object.NewReader(ctx)
 	require.NoError(t, err)

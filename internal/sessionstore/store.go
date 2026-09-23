@@ -17,6 +17,8 @@ package sessionstore
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -67,11 +69,17 @@ type SessionRef struct {
 	UpdatedAt time.Time
 }
 
+// GrantRotation is the outcome of RotateGrant.
 type GrantRotation int
 
 const (
+	// GrantRotated means the presented generation was current and is now
+	// superseded by the next one.
 	GrantRotated GrantRotation = iota
+	// GrantReplay means a stale generation (or a revoked family) was presented;
+	// the whole family is now revoked.
 	GrantReplay
+	// GrantMissing means the family does not exist or has expired.
 	GrantMissing
 )
 
@@ -119,14 +127,14 @@ type Store interface {
 	// live refresh token could reference the session.
 	DeleteRevoked(ctx context.Context, userID tgid.UserID, sid string) error
 
-	// RedeemCode atomically creates generation zero for a new OAuth grant. The
-	// family is the authorization code's random jti, so an existing record means
-	// the code was already redeemed.
-	RedeemCode(ctx context.Context, family, sid string, expiresAt time.Time) (bool, error)
-	// RotateGrant performs generation N -> N+1 with compare-and-swap. Presenting
-	// any stale generation marks the family revoked and returns GrantReplay.
-	RotateGrant(ctx context.Context, family string, generation int64) (GrantRotation, error)
-	RevokeGrant(ctx context.Context, family string) error
+	// LoadGrant returns family's refresh-grant record and an opaque non-zero
+	// version for StoreGrant; version 0 means no record exists.
+	LoadGrant(ctx context.Context, family string) (grant GrantRecord, version int64, err error)
+	// StoreGrant writes family's record only if the stored version still equals
+	// version (0: only if none exists), and returns ErrGrantConflict otherwise.
+	// The grant policy lives in RedeemCode, RotateGrant and RevokeGrant.
+	StoreGrant(ctx context.Context, family string, grant GrantRecord, version int64) error
+	// SweepAuthState deletes grant records that are expired at now.
 	SweepAuthState(ctx context.Context, now time.Time) error
 }
 
@@ -156,11 +164,113 @@ func parseSessionBase(base string) (userID tgid.UserID, sid string, ok bool) {
 	return id, sidPart, true
 }
 
-// grantRecord is the persisted refresh-grant state of one authorization-code
+// GrantRecord is the persisted refresh-grant state of one authorization-code
 // family.
-type grantRecord struct {
+type GrantRecord struct {
 	SID        string    `json:"sid"`
 	Generation int64     `json:"generation"`
 	ExpiresAt  time.Time `json:"expires_at"`
 	Revoked    bool      `json:"revoked,omitempty"`
+}
+
+// Expired reports whether the grant is past its expiry at now. A zero
+// ExpiresAt counts as expired: RedeemCode always sets one, so a record without
+// it is malformed and must not keep a family alive.
+func (g GrantRecord) Expired(now time.Time) bool { return !now.Before(g.ExpiresAt) }
+
+// rotate applies one refresh with the presented generation: the current
+// generation advances, anything else (or a revoked family) revokes the family.
+func (g GrantRecord) rotate(expected int64) (GrantRecord, GrantRotation) {
+	if g.Revoked || g.Generation != expected {
+		g.Revoked = true
+		return g, GrantReplay
+	}
+	g.Generation++
+	return g, GrantRotated
+}
+
+// ErrGrantConflict is returned by StoreGrant when the record changed since it
+// was loaded (or already exists, for a create).
+var ErrGrantConflict = errors.New("sessionstore: grant changed concurrently")
+
+// grantCASAttempts bounds the load/compare-and-swap retries of one grant update.
+const grantCASAttempts = 4
+
+// RedeemCode atomically creates generation zero for a new OAuth grant. The
+// family is the authorization code's random jti, so an existing record means
+// the code was already redeemed and false is returned.
+func RedeemCode(ctx context.Context, s Store, family, sid string, expiresAt time.Time) (bool, error) {
+	err := s.StoreGrant(ctx, family, GrantRecord{SID: sid, ExpiresAt: expiresAt}, 0)
+	if errors.Is(err, ErrGrantConflict) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("creating grant: %w", err)
+	}
+	return true, nil
+}
+
+// RotateGrant performs generation N -> N+1 at now. Presenting any stale
+// generation revokes the family and returns GrantReplay.
+func RotateGrant(ctx context.Context, s Store, family string, expected int64, now time.Time) (GrantRotation, error) {
+	var result GrantRotation
+	err := updateGrant(ctx, s, family, func(g GrantRecord) (GrantRecord, bool) {
+		if g.Expired(now) {
+			result = GrantMissing
+			return g, false
+		}
+		g, result = g.rotate(expected)
+		return g, true
+	})
+	if errors.Is(err, errGrantAbsent) {
+		return GrantMissing, nil
+	}
+	if err != nil {
+		return GrantMissing, err
+	}
+	return result, nil
+}
+
+// RevokeGrant marks family revoked so none of its refresh tokens rotate again.
+// A missing family is already dead.
+func RevokeGrant(ctx context.Context, s Store, family string) error {
+	err := updateGrant(ctx, s, family, func(g GrantRecord) (GrantRecord, bool) {
+		g.Revoked = true
+		return g, true
+	})
+	if errors.Is(err, errGrantAbsent) {
+		return nil
+	}
+	return err
+}
+
+var errGrantAbsent = errors.New("sessionstore: grant not found")
+
+// updateGrant is the one compare-and-swap loop over a grant record: it loads
+// the record, applies change, and stores the result unless another writer got
+// there first, in which case it retries on the fresh record. change reports
+// whether anything should be written.
+func updateGrant(ctx context.Context, s Store, family string, change func(GrantRecord) (GrantRecord, bool)) error {
+	for range grantCASAttempts {
+		grant, version, err := s.LoadGrant(ctx, family)
+		if err != nil {
+			return fmt.Errorf("loading grant: %w", err)
+		}
+		if version == 0 {
+			return errGrantAbsent
+		}
+		next, write := change(grant)
+		if !write {
+			return nil
+		}
+		err = s.StoreGrant(ctx, family, next, version)
+		if errors.Is(err, ErrGrantConflict) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("storing grant: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: gave up after %d attempts", ErrGrantConflict, grantCASAttempts)
 }

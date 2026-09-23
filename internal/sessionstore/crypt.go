@@ -230,20 +230,29 @@ func (s *encryptedStore) DeleteRevoked(ctx context.Context, userID tgid.UserID, 
 	return nil
 }
 
-func (s *encryptedStore) RedeemCode(ctx context.Context, family, sid string, expiresAt time.Time) (bool, error) {
-	return s.inner.RedeemCode(ctx, family, sid, expiresAt)
+// Grant records carry no secret either (a session id and counters), so they
+// pass straight through too.
+
+func (s *encryptedStore) LoadGrant(ctx context.Context, family string) (GrantRecord, int64, error) {
+	grant, version, err := s.inner.LoadGrant(ctx, family)
+	if err != nil {
+		return GrantRecord{}, 0, fmt.Errorf("encrypted store: %w", err)
+	}
+	return grant, version, nil
 }
 
-func (s *encryptedStore) RotateGrant(ctx context.Context, family string, generation int64) (GrantRotation, error) {
-	return s.inner.RotateGrant(ctx, family, generation)
-}
-
-func (s *encryptedStore) RevokeGrant(ctx context.Context, family string) error {
-	return s.inner.RevokeGrant(ctx, family)
+func (s *encryptedStore) StoreGrant(ctx context.Context, family string, grant GrantRecord, version int64) error {
+	if err := s.inner.StoreGrant(ctx, family, grant, version); err != nil {
+		return fmt.Errorf("encrypted store: %w", err)
+	}
+	return nil
 }
 
 func (s *encryptedStore) SweepAuthState(ctx context.Context, now time.Time) error {
-	return s.inner.SweepAuthState(ctx, now)
+	if err := s.inner.SweepAuthState(ctx, now); err != nil {
+		return fmt.Errorf("encrypted store: %w", err)
+	}
+	return nil
 }
 
 type encryptedSession struct {
