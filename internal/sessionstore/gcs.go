@@ -149,7 +149,7 @@ func (g *GCS) Revoke(ctx context.Context, userID tgid.UserID, sid string) error 
 	// Write the tombstone first (source of truth), then delete the blob. A
 	// zero-byte object is enough; its presence is the signal.
 	name := g.revokedName(userID, sid)
-	w := g.bucket.Object(name).NewWriter(ctx)
+	w := newWriter(ctx, g.bucket.Object(name))
 	if err := w.Close(); err != nil {
 		return fmt.Errorf("sessionstore: writing tombstone %s: %w", name, err)
 	}
@@ -187,6 +187,18 @@ func (g *GCS) DeleteRevoked(ctx context.Context, userID tgid.UserID, sid string)
 	return nil
 }
 
+// newWriter opens a single-request upload. Every object here is at most a few
+// KiB, so the default 16 MiB chunk buffer per writer is pure waste. Without
+// the buffer the client cannot retry a failed upload itself; callers already
+// surface write errors, and the conditional grant writes must not be blindly
+// retried anyway (a retry after a lost success reads as a precondition
+// failure).
+func newWriter(ctx context.Context, object *storage.ObjectHandle) *storage.Writer {
+	w := object.NewWriter(ctx)
+	w.ChunkSize = 0
+	return w
+}
+
 func grantObjectName(family string) string { return grantPrefix + family + ".json" }
 
 func isPreconditionFailed(err error) bool {
@@ -200,7 +212,7 @@ func (g *GCS) RedeemCode(ctx context.Context, family, sid string, expiresAt time
 	}
 	data, _ := json.Marshal(grantRecord{SID: sid, ExpiresAt: expiresAt})
 	object := g.bucket.Object(grantObjectName(family)).If(storage.Conditions{DoesNotExist: true})
-	w := object.NewWriter(ctx)
+	w := newWriter(ctx, object)
 	if _, err := w.Write(data); err != nil {
 		_ = w.Close()
 		if isPreconditionFailed(err) {
@@ -241,7 +253,7 @@ func (g *GCS) loadGrant(ctx context.Context, family string) (grantRecord, int64,
 func (g *GCS) storeGrantCAS(ctx context.Context, family string, generation int64, grant grantRecord) error {
 	data, _ := json.Marshal(grant)
 	object := g.bucket.Object(grantObjectName(family)).If(storage.Conditions{GenerationMatch: generation})
-	w := object.NewWriter(ctx)
+	w := newWriter(ctx, object)
 	if _, err := w.Write(data); err != nil {
 		_ = w.Close()
 		return err
@@ -363,7 +375,7 @@ func (s gcsSession) StoreSession(ctx context.Context, data []byte) error {
 	// Canceling the context makes Close return without finalizing.
 	wctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	w := s.object.NewWriter(wctx)
+	w := newWriter(wctx, s.object)
 	if _, err := w.Write(data); err != nil {
 		cancel()
 		_ = w.Close() // aborts the upload; error is expected and irrelevant here

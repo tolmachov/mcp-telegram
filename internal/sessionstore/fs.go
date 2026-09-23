@@ -30,18 +30,11 @@ func NewFS(dir string) (*FS, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("sessionstore: directory is required")
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("sessionstore: creating %s: %w", dir, err)
-	}
 	f := &FS{dir: dir}
-	if err := os.MkdirAll(f.sessionsDir(), 0o700); err != nil {
-		return nil, fmt.Errorf("sessionstore: creating %s: %w", f.sessionsDir(), err)
-	}
-	if err := os.MkdirAll(f.revokedDir(), 0o700); err != nil {
-		return nil, fmt.Errorf("sessionstore: creating %s: %w", f.revokedDir(), err)
-	}
-	if err := os.MkdirAll(f.grantsDir(), 0o700); err != nil {
-		return nil, fmt.Errorf("sessionstore: creating grant directory: %w", err)
+	for _, d := range []string{f.sessionsDir(), f.revokedDir(), f.grantsDir()} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return nil, fmt.Errorf("sessionstore: creating %s: %w", d, err)
+		}
 	}
 	return f, nil
 }
@@ -59,6 +52,35 @@ func (f *FS) grantsDir() string   { return filepath.Join(f.dir, "oauth-v3-grants
 
 func (f *FS) grantPath(family string) string { return filepath.Join(f.grantsDir(), family+".json") }
 
+// loadGrant reads family's grant record; found is false when none exists. The
+// caller holds the family's grantLock.
+func (f *FS) loadGrant(family string) (grant grantRecord, found bool, err error) {
+	data, err := os.ReadFile(f.grantPath(family)) //nolint:gosec // path is derived from a validated fixed-length hex family
+	if errors.Is(err, os.ErrNotExist) {
+		return grantRecord{}, false, nil
+	}
+	if err != nil {
+		return grantRecord{}, false, fmt.Errorf("sessionstore: reading grant: %w", err)
+	}
+	if err := json.Unmarshal(data, &grant); err != nil {
+		return grantRecord{}, false, fmt.Errorf("sessionstore: parsing grant: %w", err)
+	}
+	return grant, true, nil
+}
+
+// storeGrant atomically replaces family's grant record. The caller holds the
+// family's grantLock.
+func (f *FS) storeGrant(family string, grant grantRecord) error {
+	data, err := json.Marshal(grant)
+	if err != nil {
+		return fmt.Errorf("sessionstore: encoding grant: %w", err)
+	}
+	if err := xdg.WriteFileAtomic(f.grantPath(family), data, 0o600, ".grant-*.tmp"); err != nil {
+		return fmt.Errorf("sessionstore: writing grant: %w", err)
+	}
+	return nil
+}
+
 func (f *FS) grantLock(family string) *sync.Mutex {
 	lock, _ := f.locks.LoadOrStore(family, &sync.Mutex{})
 	return lock.(*sync.Mutex)
@@ -72,7 +94,7 @@ func (f *FS) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {
 	if !ValidSID(sid) {
 		return brokenSession{err: ErrInvalidSID}
 	}
-	return fsSession{path: f.path(userID, sid)}
+	return xdg.FileSession{Path: f.path(userID, sid)}
 }
 
 func (f *FS) Exists(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
@@ -149,7 +171,7 @@ func (f *FS) listDir(dir string) ([]SessionRef, error) {
 	return refs, nil
 }
 
-func (f *FS) Revoke(_ context.Context, userID tgid.UserID, sid string) error {
+func (f *FS) Revoke(ctx context.Context, userID tgid.UserID, sid string) error {
 	if !ValidSID(sid) {
 		return ErrInvalidSID
 	}
@@ -159,11 +181,7 @@ func (f *FS) Revoke(_ context.Context, userID tgid.UserID, sid string) error {
 	if err := xdg.WriteFileAtomic(p, []byte{}, 0o600, ".revoked-*.tmp"); err != nil {
 		return fmt.Errorf("sessionstore: writing tombstone %s: %w", p, err)
 	}
-	blob := f.path(userID, sid)
-	if err := os.Remove(blob); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("sessionstore: removing %s: %w", blob, err)
-	}
-	return nil
+	return f.Delete(ctx, userID, sid)
 }
 
 func (f *FS) Revoked(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
@@ -200,18 +218,13 @@ func (f *FS) RedeemCode(_ context.Context, family, sid string, expiresAt time.Ti
 	lock := f.grantLock(family)
 	lock.Lock()
 	defer lock.Unlock()
-	path := f.grantPath(family)
-	if _, err := os.Stat(path); err == nil {
+	if _, err := os.Stat(f.grantPath(family)); err == nil {
 		return false, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return false, fmt.Errorf("sessionstore: probing grant: %w", err)
 	}
-	data, err := json.Marshal(grantRecord{SID: sid, ExpiresAt: expiresAt})
-	if err != nil {
-		return false, fmt.Errorf("sessionstore: encoding grant: %w", err)
-	}
-	if err := xdg.WriteFileAtomic(path, data, 0o600, ".grant-*.tmp"); err != nil {
-		return false, fmt.Errorf("sessionstore: creating grant: %w", err)
+	if err := f.storeGrant(family, grantRecord{SID: sid, ExpiresAt: expiresAt}); err != nil {
+		return false, err
 	}
 	return true, nil
 }
@@ -223,17 +236,9 @@ func (f *FS) RotateGrant(_ context.Context, family string, generation int64) (Gr
 	lock := f.grantLock(family)
 	lock.Lock()
 	defer lock.Unlock()
-	path := f.grantPath(family)
-	data, err := os.ReadFile(path) //nolint:gosec // path is derived from a validated fixed-length hex family
-	if errors.Is(err, os.ErrNotExist) {
-		return GrantMissing, nil
-	}
-	if err != nil {
-		return GrantMissing, fmt.Errorf("sessionstore: reading grant: %w", err)
-	}
-	var grant grantRecord
-	if err := json.Unmarshal(data, &grant); err != nil {
-		return GrantMissing, fmt.Errorf("sessionstore: parsing grant: %w", err)
+	grant, found, err := f.loadGrant(family)
+	if err != nil || !found {
+		return GrantMissing, err
 	}
 	result := GrantRotated
 	if !time.Now().Before(grant.ExpiresAt) {
@@ -245,12 +250,8 @@ func (f *FS) RotateGrant(_ context.Context, family string, generation int64) (Gr
 	} else {
 		grant.Generation++
 	}
-	data, err = json.Marshal(grant)
-	if err != nil {
-		return GrantMissing, fmt.Errorf("sessionstore: encoding rotated grant: %w", err)
-	}
-	if err := xdg.WriteFileAtomic(path, data, 0o600, ".grant-*.tmp"); err != nil {
-		return GrantMissing, fmt.Errorf("sessionstore: rotating grant: %w", err)
+	if err := f.storeGrant(family, grant); err != nil {
+		return GrantMissing, err
 	}
 	return result, nil
 }
@@ -262,21 +263,12 @@ func (f *FS) RevokeGrant(_ context.Context, family string) error {
 	lock := f.grantLock(family)
 	lock.Lock()
 	defer lock.Unlock()
-	path := f.grantPath(family)
-	data, err := os.ReadFile(path) //nolint:gosec // path is derived from a validated fixed-length hex family
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("sessionstore: reading grant for revoke: %w", err)
-	}
-	var grant grantRecord
-	if err := json.Unmarshal(data, &grant); err != nil {
-		return fmt.Errorf("sessionstore: parsing grant for revoke: %w", err)
+	grant, found, err := f.loadGrant(family)
+	if err != nil || !found {
+		return err
 	}
 	grant.Revoked = true
-	data, _ = json.Marshal(grant)
-	return xdg.WriteFileAtomic(path, data, 0o600, ".grant-*.tmp")
+	return f.storeGrant(family, grant)
 }
 
 func (f *FS) SweepAuthState(_ context.Context, now time.Time) error {
@@ -291,42 +283,14 @@ func (f *FS) SweepAuthState(_ context.Context, now time.Time) error {
 		}
 		lock := f.grantLock(family)
 		lock.Lock()
-		data, readErr := os.ReadFile(f.grantPath(family))
-		var grant grantRecord
-		if readErr == nil {
-			readErr = json.Unmarshal(data, &grant)
-		}
-		if readErr == nil && !now.Before(grant.ExpiresAt) {
-			readErr = os.Remove(f.grantPath(family))
+		grant, found, err := f.loadGrant(family)
+		if err == nil && found && !now.Before(grant.ExpiresAt) {
+			err = os.Remove(f.grantPath(family))
 		}
 		lock.Unlock()
-		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-			return fmt.Errorf("sessionstore: sweeping grant %s: %w", family, readErr)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("sessionstore: sweeping grant %s: %w", family, err)
 		}
-	}
-	return nil
-}
-
-type fsSession struct {
-	path string
-}
-
-func (s fsSession) LoadSession(_ context.Context) ([]byte, error) {
-	data, err := os.ReadFile(s.path)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		return nil, session.ErrNotFound
-	case err != nil:
-		return nil, fmt.Errorf("sessionstore: reading %s: %w", s.path, err)
-	case len(data) == 0:
-		return nil, session.ErrNotFound
-	}
-	return data, nil
-}
-
-func (s fsSession) StoreSession(_ context.Context, data []byte) error {
-	if err := xdg.WriteFileAtomic(s.path, data, 0o600, ".session-*.tmp"); err != nil {
-		return fmt.Errorf("sessionstore: writing %s: %w", s.path, err)
 	}
 	return nil
 }
