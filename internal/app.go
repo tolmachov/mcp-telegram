@@ -13,6 +13,7 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/authsrv"
 	"github.com/tolmachov/mcp-telegram/internal/config"
 	"github.com/tolmachov/mcp-telegram/internal/flags"
+	"github.com/tolmachov/mcp-telegram/internal/keyring"
 	"github.com/tolmachov/mcp-telegram/internal/server"
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
@@ -60,17 +61,19 @@ func buildAuthOptions(ctx context.Context, cmd *cli.Command) (*authsrv.Config, s
 		return nil, nil, fmt.Errorf("--%s: %w", flags.AuthAllowedUsers, err)
 	}
 
+	keys, err := keyring.Parse(cmd.StringSlice(flags.AuthTokenKey))
+	if err != nil {
+		return nil, nil, fmt.Errorf("--%s: %w", flags.AuthTokenKey, err)
+	}
+
+	// authsrv.New validates the rest of the configuration when the HTTP
+	// server starts.
 	cfg := &authsrv.Config{
 		IssuerURL:        cmd.String(flags.AuthIssuerURL),
 		Allow:            allow,
-		TokenKeys:        cmd.StringSlice(flags.AuthTokenKey),
+		Keys:             keys,
 		ExtraRedirects:   cmd.StringSlice(flags.AuthAllowedRedirects),
 		TrustedProxyHops: cmd.Int(flags.AuthTrustedProxyHops),
-	}
-	normalized := cfg.Normalized()
-	cfg = &normalized
-	if err := cfg.Validate(); err != nil {
-		return nil, nil, fmt.Errorf("auth configuration: %w", err)
 	}
 
 	bucket := cmd.String(flags.AuthSessionBucket)
@@ -95,11 +98,7 @@ func buildAuthOptions(ctx context.Context, cmd *cli.Command) (*authsrv.Config, s
 		return nil, nil, fmt.Errorf("HTTP requires exactly one of --%s / --%s", flags.AuthSessionBucket, flags.AuthSessionDir)
 	}
 
-	cipher, err := sessionstore.NewCipher(cfg.TokenKeys, cfg.IssuerURL)
-	if err != nil {
-		return nil, nil, err
-	}
-	return cfg, sessionstore.Encrypted(backend, cipher), nil
+	return cfg, sessionstore.Encrypted(backend, sessionstore.NewCipher(keys, cfg.IssuerURL)), nil
 }
 
 // New creates a new instance of application.

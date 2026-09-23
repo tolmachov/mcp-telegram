@@ -335,7 +335,7 @@ resolve as CLI flags → process environment → defaults. The binary never read
 | `MCP_HTTP_ADDR` | Explicit listen address for HTTP; when unset on Cloud Run, the server binds to injected `:$PORT` | `127.0.0.1:8080` |
 | `MCP_LOG_FORMAT` | `text` or GCP-compatible structured `json` | `text` for stdio, `json` for HTTP |
 | `MCP_LOG_LEVEL` | `debug`, `info`, `warn`, or `error` | `info` |
-| `MCP_AUTH_ISSUER_URL` | Public OAuth issuer/resource URL; required for HTTP | - |
+| `MCP_AUTH_ISSUER_URL` | Public OAuth issuer/resource URL, without a trailing slash; required for HTTP | - |
 | `MCP_AUTH_ALLOWED_USERS` | Allowed Telegram user IDs, or `*` alone | - |
 | `MCP_AUTH_TOKEN_KEYS` | Base64 32-byte master keys, first seals and all verify | - |
 | `MCP_AUTH_ALLOWED_REDIRECTS` | Extra exact HTTPS redirect URIs | - |

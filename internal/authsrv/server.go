@@ -62,7 +62,7 @@ func New(
 	if cfg == nil {
 		return nil, fmt.Errorf("invalid auth config: auth config must not be nil")
 	}
-	cfgCopy := cfg.Normalized()
+	cfgCopy := *cfg
 	if err := cfgCopy.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid auth config: %w", err)
 	}
@@ -75,7 +75,7 @@ func New(
 	if invalidate == nil {
 		return nil, fmt.Errorf("session invalidator is required")
 	}
-	ring, err := newKeyRing(cfgCopy.TokenKeys)
+	ring, err := newKeyRing(cfgCopy.Keys)
 	if err != nil {
 		return nil, fmt.Errorf("building key ring: %w", err)
 	}

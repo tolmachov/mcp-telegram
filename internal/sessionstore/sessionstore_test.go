@@ -1,8 +1,10 @@
 package sessionstore
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/gotd/td/session"
 
+	"github.com/tolmachov/mcp-telegram/internal/keyring"
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
@@ -25,11 +28,18 @@ func newKey(t *testing.T) string {
 	return base64.StdEncoding.EncodeToString(raw)
 }
 
-func TestCipherRoundTrip(t *testing.T) {
-	c, err := NewCipher([]string{newKey(t)}, testIssuer)
+// newCipher builds a session cipher over a ring parsed from encoded keys.
+func newCipher(t *testing.T, issuer string, encoded ...string) *Cipher {
+	t.Helper()
+	ring, err := keyring.Parse(encoded)
 	if err != nil {
-		t.Fatalf("NewCipher: %v", err)
+		t.Fatalf("keyring.Parse: %v", err)
 	}
+	return NewCipher(ring, issuer)
+}
+
+func TestCipherRoundTrip(t *testing.T) {
+	c := newCipher(t, testIssuer, newKey(t))
 	const user = tgid.UserID(42)
 	uk := userKeyForTest(t)
 	plaintext := []byte(`{"session":"data"}`)
@@ -47,12 +57,28 @@ func TestCipherRoundTrip(t *testing.T) {
 	}
 }
 
+// TestCipherOpensGoldenBlob pins the v3 blob format (version, key ID, nonce,
+// HKDF label, AAD): a blob sealed by an earlier build under fixed keys must
+// still open, so deployed sessions survive refactors of the cipher.
+func TestCipherOpensGoldenBlob(t *testing.T) {
+	master := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x11}, 32))
+	c := newCipher(t, "https://issuer.example", master)
+	blob, err := hex.DecodeString("03025a289586391d31aaef567caf76b25d1aee14031249d45fee1ba3f88e7bb6b6b09d1cbd01ac2850cd372cb8fb3837")
+	if err != nil {
+		t.Fatalf("decoding golden blob: %v", err)
+	}
+	got, err := c.open(42, bytes.Repeat([]byte{0x33}, 32), blob)
+	if err != nil {
+		t.Fatalf("open golden blob: %v", err)
+	}
+	if string(got) != `{"session":"data"}` {
+		t.Errorf("golden blob = %q", got)
+	}
+}
+
 func TestCipherRejectsWrongUserAndKey(t *testing.T) {
 	key1, key2 := newKey(t), newKey(t)
-	c1, err := NewCipher([]string{key1}, testIssuer)
-	if err != nil {
-		t.Fatalf("NewCipher: %v", err)
-	}
+	c1 := newCipher(t, testIssuer, key1)
 	uk := userKeyForTest(t)
 	blob, err := c1.seal(1, uk, []byte("secret"))
 	if err != nil {
@@ -63,18 +89,12 @@ func TestCipherRejectsWrongUserAndKey(t *testing.T) {
 		t.Error("open with another user id succeeded; AAD binding is broken")
 	}
 
-	c2, err := NewCipher([]string{key2}, testIssuer)
-	if err != nil {
-		t.Fatalf("NewCipher: %v", err)
-	}
+	c2 := newCipher(t, testIssuer, key2)
 	if _, err := c2.open(1, uk, blob); err == nil {
 		t.Error("open with a foreign key ring succeeded")
 	}
 
-	cOther, err := NewCipher([]string{key1}, "https://other.example.com")
-	if err != nil {
-		t.Fatalf("NewCipher: %v", err)
-	}
+	cOther := newCipher(t, "https://other.example.com", key1)
 	if _, err := cOther.open(1, uk, blob); err == nil {
 		t.Error("open under another issuer succeeded; AAD binding is broken")
 	}
@@ -82,10 +102,7 @@ func TestCipherRejectsWrongUserAndKey(t *testing.T) {
 
 func TestCipherRotation(t *testing.T) {
 	oldKey, newKeyStr := newKey(t), newKey(t)
-	cOld, err := NewCipher([]string{oldKey}, testIssuer)
-	if err != nil {
-		t.Fatalf("NewCipher: %v", err)
-	}
+	cOld := newCipher(t, testIssuer, oldKey)
 	uk := userKeyForTest(t)
 	blob, err := cOld.seal(7, uk, []byte("session"))
 	if err != nil {
@@ -93,33 +110,13 @@ func TestCipherRotation(t *testing.T) {
 	}
 
 	// New deployments list the new key first but keep the old one for reads.
-	cRotated, err := NewCipher([]string{newKeyStr, oldKey}, testIssuer)
-	if err != nil {
-		t.Fatalf("NewCipher: %v", err)
-	}
+	cRotated := newCipher(t, testIssuer, newKeyStr, oldKey)
 	got, err := cRotated.open(7, uk, blob)
 	if err != nil {
 		t.Fatalf("open after rotation: %v", err)
 	}
 	if string(got) != "session" {
 		t.Errorf("open after rotation = %q, want %q", got, "session")
-	}
-}
-
-func TestNewCipherValidation(t *testing.T) {
-	if _, err := NewCipher(nil, testIssuer); err == nil {
-		t.Error("NewCipher accepted an empty key list")
-	}
-	if _, err := NewCipher([]string{"not-base64!"}, testIssuer); err == nil {
-		t.Error("NewCipher accepted invalid base64")
-	}
-	short := base64.StdEncoding.EncodeToString([]byte("short"))
-	if _, err := NewCipher([]string{short}, testIssuer); err == nil {
-		t.Error("NewCipher accepted a short key")
-	}
-	k := newKey(t)
-	if _, err := NewCipher([]string{k, k}, testIssuer); err == nil {
-		t.Error("NewCipher accepted duplicate keys (key-ID collision)")
 	}
 }
 
@@ -226,10 +223,7 @@ func TestListSkipsNonCanonicalNames(t *testing.T) {
 
 func TestEncryptedStore(t *testing.T) {
 	ctx := t.Context()
-	cipher, err := NewCipher([]string{newKey(t)}, testIssuer)
-	if err != nil {
-		t.Fatalf("NewCipher: %v", err)
-	}
+	cipher := newCipher(t, testIssuer, newKey(t))
 	backend := newTestFS(t)
 	store := Encrypted(backend, cipher)
 	const user = tgid.UserID(5)
@@ -273,10 +267,7 @@ func TestEncryptedStore(t *testing.T) {
 // fresh login for a new user instead of erroring the build.
 func TestEncryptedStorePreservesErrNotFound(t *testing.T) {
 	ctx := t.Context()
-	cipher, err := NewCipher([]string{newKey(t)}, testIssuer)
-	if err != nil {
-		t.Fatalf("NewCipher: %v", err)
-	}
+	cipher := newCipher(t, testIssuer, newKey(t))
 	store := Encrypted(newTestFS(t), cipher)
 	if _, err := store.Session(1, testSID, userKeyForTest(t)).LoadSession(ctx); !errors.Is(err, session.ErrNotFound) {
 		t.Errorf("LoadSession on empty encrypted store: err = %v, want session.ErrNotFound", err)
@@ -296,10 +287,7 @@ func TestFSSplitKeyNotMasterDecryptable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFS: %v", err)
 	}
-	cipher, err := NewCipher([]string{key}, testIssuer)
-	if err != nil {
-		t.Fatalf("NewCipher: %v", err)
-	}
+	cipher := newCipher(t, testIssuer, key)
 	store := Encrypted(backend, cipher)
 
 	const user = tgid.UserID(77)
@@ -332,10 +320,7 @@ func TestFSSplitKeyNotMasterDecryptable(t *testing.T) {
 
 func TestStoreRejectsMissingSessionIdentity(t *testing.T) {
 	ctx := t.Context()
-	cipher, err := NewCipher([]string{newKey(t)}, testIssuer)
-	if err != nil {
-		t.Fatalf("NewCipher: %v", err)
-	}
+	cipher := newCipher(t, testIssuer, newKey(t))
 	store := Encrypted(newTestFS(t), cipher)
 	const user = tgid.UserID(88)
 	const sid = "0123456789abcdef0123456789abcdef"
@@ -360,10 +345,7 @@ func TestStoreRejectsMissingSessionIdentity(t *testing.T) {
 // exactly userKeyLen bytes: a short/oversized key fails closed on both seal and
 // open rather than silently sealing a weak split-key blob.
 func TestCipherRejectsWrongLengthUserKey(t *testing.T) {
-	c, err := NewCipher([]string{newKey(t)}, testIssuer)
-	if err != nil {
-		t.Fatalf("NewCipher: %v", err)
-	}
+	c := newCipher(t, testIssuer, newKey(t))
 	const user = tgid.UserID(91)
 	for _, bad := range [][]byte{make([]byte, 1), make([]byte, 16), make([]byte, 31), make([]byte, 33)} {
 		if _, err := c.seal(user, bad, []byte("x")); err == nil {
@@ -386,10 +368,7 @@ func TestCipherRejectsWrongLengthUserKey(t *testing.T) {
 // into an object name, so a malformed value can never build a storage path.
 func TestEncryptedStoreRejectsInvalidSID(t *testing.T) {
 	ctx := t.Context()
-	cipher, err := NewCipher([]string{newKey(t)}, testIssuer)
-	if err != nil {
-		t.Fatalf("NewCipher: %v", err)
-	}
+	cipher := newCipher(t, testIssuer, newKey(t))
 	store := Encrypted(newTestFS(t), cipher)
 	const user = tgid.UserID(92)
 	const bad = "../escape" // non-empty, not ValidSID
@@ -503,10 +482,7 @@ func userKeyForTest(t *testing.T) []byte {
 }
 
 func TestCipherV3SplitKey(t *testing.T) {
-	c, err := NewCipher([]string{newKey(t)}, testIssuer)
-	if err != nil {
-		t.Fatalf("NewCipher: %v", err)
-	}
+	c := newCipher(t, testIssuer, newKey(t))
 	const user = tgid.UserID(42)
 	uk := userKeyForTest(t)
 	plaintext := []byte("mtproto-session")
@@ -540,10 +516,7 @@ func TestCipherV3SplitKey(t *testing.T) {
 // between a copied blob and a cross-user decrypt — dropping userID from the v3
 // AAD would pass every other test.
 func TestCipherV3WrongUserRejected(t *testing.T) {
-	c, err := NewCipher([]string{newKey(t)}, testIssuer)
-	if err != nil {
-		t.Fatalf("NewCipher: %v", err)
-	}
+	c := newCipher(t, testIssuer, newKey(t))
 	uk := userKeyForTest(t)
 	blob, err := c.seal(tgid.UserID(42), uk, []byte("mtproto-session"))
 	if err != nil {
@@ -555,11 +528,8 @@ func TestCipherV3WrongUserRejected(t *testing.T) {
 }
 
 func TestCipherOldBlobRejected(t *testing.T) {
-	c, err := NewCipher([]string{newKey(t)}, testIssuer)
-	if err != nil {
-		t.Fatalf("NewCipher: %v", err)
-	}
-	oldBlob := append([]byte{c.keys[0].id}, make([]byte, 64)...)
+	c := newCipher(t, testIssuer, newKey(t))
+	oldBlob := append([]byte{c.ring.Primary().ID}, make([]byte, 64)...)
 	if _, err := c.open(tgid.UserID(9), userKeyForTest(t), oldBlob); !errors.Is(err, ErrCorruptSession) {
 		t.Errorf("open old blob: err = %v, want ErrCorruptSession", err)
 	}
@@ -569,20 +539,14 @@ func TestCipherOldBlobRejected(t *testing.T) {
 // rotation: the key-ID byte still selects the right master to re-derive from.
 func TestCipherV3Rotation(t *testing.T) {
 	oldKey, newKeyStr := newKey(t), newKey(t)
-	cOld, err := NewCipher([]string{oldKey}, testIssuer)
-	if err != nil {
-		t.Fatalf("NewCipher: %v", err)
-	}
+	cOld := newCipher(t, testIssuer, oldKey)
 	const user = tgid.UserID(7)
 	uk := userKeyForTest(t)
 	blob, err := cOld.seal(user, uk, []byte("v3-current"))
 	if err != nil {
 		t.Fatalf("seal v3: %v", err)
 	}
-	cRotated, err := NewCipher([]string{newKeyStr, oldKey}, testIssuer)
-	if err != nil {
-		t.Fatalf("NewCipher: %v", err)
-	}
+	cRotated := newCipher(t, testIssuer, newKeyStr, oldKey)
 	got, err := cRotated.open(user, uk, blob)
 	if err != nil || string(got) != "v3-current" {
 		t.Fatalf("open v3 after rotation = (%q, %v), want (%q, nil)", got, err, "v3-current")
@@ -595,10 +559,7 @@ func TestCipherV3Rotation(t *testing.T) {
 // multi-client work.
 func TestEncryptedStoreIndependentSessions(t *testing.T) {
 	ctx := t.Context()
-	cipher, err := NewCipher([]string{newKey(t)}, testIssuer)
-	if err != nil {
-		t.Fatalf("NewCipher: %v", err)
-	}
+	cipher := newCipher(t, testIssuer, newKey(t))
 	backend := newTestFS(t)
 	store := Encrypted(backend, cipher)
 	const user = tgid.UserID(5)

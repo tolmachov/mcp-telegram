@@ -15,7 +15,7 @@ func validConfig(t *testing.T) *Config {
 	return &Config{
 		IssuerURL: "https://mcp.example.com",
 		Allow:     Allowlist{ids: []tgid.UserID{123456}},
-		TokenKeys: []string{testKey(t)},
+		Keys:      testRing(t),
 	}
 }
 
@@ -23,7 +23,7 @@ func TestConfigAllowAll(t *testing.T) {
 	c := &Config{
 		IssuerURL: "https://mcp.example.com",
 		Allow:     AllowAll(),
-		TokenKeys: []string{testKey(t)},
+		Keys:      testRing(t),
 	}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("Validate with a wildcard allowlist should pass: %v", err)
@@ -73,15 +73,6 @@ func TestConfigValidate(t *testing.T) {
 	t.Run("valid https config passes", func(t *testing.T) {
 		assert.NoError(t, validConfig(t).Validate())
 	})
-	t.Run("validation is pure and normalization is explicit", func(t *testing.T) {
-		cfg := validConfig(t)
-		cfg.IssuerURL = "https://mcp.example.com/"
-		require.NoError(t, cfg.Validate())
-		assert.Equal(t, "https://mcp.example.com/", cfg.IssuerURL)
-		normalized := cfg.Normalized()
-		assert.Equal(t, "https://mcp.example.com", normalized.IssuerURL)
-		assert.Equal(t, "https://mcp.example.com/", cfg.IssuerURL)
-	})
 	t.Run("http localhost allowed for development", func(t *testing.T) {
 		cfg := validConfig(t)
 		cfg.IssuerURL = "http://localhost:8080"
@@ -100,13 +91,13 @@ func TestConfigValidate(t *testing.T) {
 
 	fail("http non-loopback issuer", func(c *Config) { c.IssuerURL = "http://intranet.example" }, "must be https")
 	fail("malformed issuer", func(c *Config) { c.IssuerURL = "https://%" }, "invalid issuer URL")
+	fail("issuer with trailing slash", func(c *Config) { c.IssuerURL = "https://mcp.example.com/" }, "must not end with a slash")
 	fail("issuer with query", func(c *Config) { c.IssuerURL = "https://mcp.example.com?x=1" }, "query or fragment")
 	fail("issuer with fragment", func(c *Config) { c.IssuerURL = "https://mcp.example.com#frag" }, "query or fragment")
 	fail("empty allowlist", func(c *Config) { c.Allow = Allowlist{} }, "allowed Telegram user ID")
 	fail("non-positive user id", func(c *Config) { c.Allow = Allowlist{ids: []tgid.UserID{0}} }, "must be positive")
 	fail("negative user id", func(c *Config) { c.Allow = Allowlist{ids: []tgid.UserID{-5}} }, "must be positive")
-	fail("no token keys", func(c *Config) { c.TokenKeys = nil }, "token key")
-	fail("bad token key", func(c *Config) { c.TokenKeys = []string{"nope"} }, "invalid token keys")
+	fail("no token keys", func(c *Config) { c.Keys = nil }, "token key")
 	fail("malformed extra redirect", func(c *Config) { c.ExtraRedirects = []string{"https://%"} }, "invalid extra redirect")
 	fail("negative trusted hops", func(c *Config) { c.TrustedProxyHops = -1 }, "trusted proxy hops")
 	fail("too many trusted hops", func(c *Config) { c.TrustedProxyHops = 17 }, "trusted proxy hops")

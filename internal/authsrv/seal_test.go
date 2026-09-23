@@ -11,14 +11,27 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
+
+	"github.com/tolmachov/mcp-telegram/internal/keyring"
 )
 
 func testKey(t *testing.T) string {
 	t.Helper()
-	b := make([]byte, masterKeyLen)
+	b := make([]byte, keyring.MasterKeyLen)
 	_, err := rand.Read(b)
 	require.NoError(t, err)
 	return base64.StdEncoding.EncodeToString(b)
+}
+
+// testRing parses encoded master keys, or one fresh random key if none.
+func testRing(t *testing.T, keys ...string) *keyring.Ring {
+	t.Helper()
+	if len(keys) == 0 {
+		keys = []string{testKey(t)}
+	}
+	ring, err := keyring.Parse(keys)
+	require.NoError(t, err)
+	return ring
 }
 
 func testSealer(t *testing.T, keys ...string) *sealer {
@@ -26,36 +39,28 @@ func testSealer(t *testing.T, keys ...string) *sealer {
 	if len(keys) == 0 {
 		keys = []string{testKey(t)}
 	}
-	ring, err := newKeyRing(keys)
+	ring, err := newKeyRing(testRing(t, keys...))
 	require.NoError(t, err)
 	return newSealer(ring, "https://issuer.example")
 }
 
-func TestNewKeyRing(t *testing.T) {
-	t.Run("rejects empty", func(t *testing.T) {
-		_, err := newKeyRing(nil)
-		assert.Error(t, err)
-	})
-	t.Run("rejects non-base64", func(t *testing.T) {
-		_, err := newKeyRing([]string{"not base64 at all!!"})
-		assert.Error(t, err)
-	})
-	t.Run("rejects wrong length", func(t *testing.T) {
-		_, err := newKeyRing([]string{base64.StdEncoding.EncodeToString([]byte("short"))})
-		assert.Error(t, err)
-	})
-	t.Run("rejects duplicate key", func(t *testing.T) {
-		k := testKey(t)
-		_, err := newKeyRing([]string{k, k})
-		assert.ErrorContains(t, err, "collide")
-	})
-	t.Run("accepts url-safe raw base64", func(t *testing.T) {
-		b := make([]byte, masterKeyLen)
-		_, err := rand.Read(b)
-		require.NoError(t, err)
-		_, err = newKeyRing([]string{base64.RawURLEncoding.EncodeToString(b)})
-		assert.NoError(t, err)
-	})
+// TestSealerOpensGoldenBlobs pins the token formats (key ID, nonce, HKDF
+// labels, AAD, MAC input): artifacts issued by an earlier build under fixed
+// keys must still open and verify, so deployed tokens survive refactors.
+func TestSealerOpensGoldenBlobs(t *testing.T) {
+	primary := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x22}, keyring.MasterKeyLen))
+	old := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x11}, keyring.MasterKeyLen))
+	s := testSealer(t, primary, old)
+
+	const access = "mcp_at_nyyIjJlooCsBp3QvMobM_0C5Vt8r4QfK1abHM7NMX58iSaVsMYOFbfUj_JDbRllwWC63kCahu_lNkNSiZdkQ-87p2_6gg0ibhOIUuSNj5poo9Rrk3HSKQp-koyRWiIyesPatjVTPcA"
+	ac, err := openBlob(s, accessBlob, access, time.Unix(1700000000, 0))
+	require.NoError(t, err)
+	assert.Equal(t, accessClaims{Subject: "123456", ClientID: "cid", Family: "fam", IssuedAt: 1700000000, ExpiresAt: 1700003600}, ac)
+
+	const clientID = "mcp_cid_eyJydSI6WyJodHRwOi8vMTI3LjAuMC4xL2NiIl0sImlhdCI6MTcwMDAwMDAwMH0.etkRJef0si75Lq9N1H3Mhqibiw15aAGtTnRLWpTAQK8"
+	var cc clientIDClaims
+	require.NoError(t, s.verifyClientID(clientID, &cc))
+	assert.Equal(t, []string{"http://127.0.0.1/cb"}, cc.RedirectURIs)
 }
 
 func TestSealOpenRoundtrip(t *testing.T) {
@@ -72,7 +77,7 @@ func TestSealOpenRoundtrip(t *testing.T) {
 }
 
 func TestOpenRejects(t *testing.T) {
-	s := testSealer(t, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0}, masterKeyLen)))
+	s := testSealer(t, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0}, keyring.MasterKeyLen)))
 	now := time.Now()
 	blob, err := sealBlob(s, accessBlob, accessClaims{Subject: "1", IssuedAt: now.Unix()})
 	require.NoError(t, err)
@@ -92,7 +97,7 @@ func TestOpenRejects(t *testing.T) {
 		assert.ErrorIs(t, err, errInvalidBlob)
 	})
 	t.Run("wrong key reports unknown key id", func(t *testing.T) {
-		other := testSealer(t, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, masterKeyLen)))
+		other := testSealer(t, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, keyring.MasterKeyLen)))
 		_, err := openBlob(other, accessBlob, blob, now)
 		assert.ErrorIs(t, err, errUnknownKeyID)
 		assert.ErrorIs(t, err, errInvalidBlob)
@@ -128,8 +133,8 @@ func TestOpenRejects(t *testing.T) {
 
 func TestKeyRotation(t *testing.T) {
 	// Fixed keys have different one-byte IDs; random pairs collide 1/256 of the time.
-	oldKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0}, masterKeyLen))
-	newKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, masterKeyLen))
+	oldKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0}, keyring.MasterKeyLen))
+	newKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, keyring.MasterKeyLen))
 	now := time.Now()
 
 	oldSealer := testSealer(t, oldKey)

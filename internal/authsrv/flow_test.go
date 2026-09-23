@@ -201,7 +201,7 @@ func testConfig(t *testing.T) *Config {
 	return &Config{
 		IssuerURL: testIssuer,
 		Allow:     Allowlist{ids: []tgid.UserID{allowedUser}},
-		TokenKeys: []string{testKey(t)},
+		Keys:      testRing(t),
 	}
 }
 

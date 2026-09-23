@@ -197,20 +197,20 @@ func TestBuildAuthOptionsValidation(t *testing.T) {
 		}
 	})
 
-	t.Run("neither bucket nor dir", func(t *testing.T) {
-		if _, _, err := runBuildAuthOptions(t, baseArgs...); err == nil {
-			t.Error("accepted HTTP auth with no session storage")
-		}
-	})
-
-	t.Run("invalid issuer surfaced", func(t *testing.T) {
+	t.Run("bad token key", func(t *testing.T) {
 		args := []string{
-			"--auth-issuer-url", "http://not-loopback.example.com",
-			"--auth-allowed-users", "123", "--auth-token-key", testKey(t),
+			"--auth-issuer-url", "https://mcp.example.com",
+			"--auth-allowed-users", "123", "--auth-token-key", "not-a-key",
 			"--auth-session-dir", t.TempDir(),
 		}
 		if _, _, err := runBuildAuthOptions(t, args...); err == nil {
-			t.Error("accepted a non-https, non-loopback issuer")
+			t.Error("accepted a malformed token key")
+		}
+	})
+
+	t.Run("neither bucket nor dir", func(t *testing.T) {
+		if _, _, err := runBuildAuthOptions(t, baseArgs...); err == nil {
+			t.Error("accepted HTTP auth with no session storage")
 		}
 	})
 }

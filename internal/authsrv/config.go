@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tolmachov/mcp-telegram/internal/keyring"
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
@@ -97,7 +98,8 @@ func (a Allowlist) allows(id tgid.UserID) bool {
 
 // Config holds the settings of the embedded authorization server.
 type Config struct {
-	// IssuerURL is the public base URL of this service (no trailing slash),
+	// IssuerURL is the public base URL of this service (no trailing slash —
+	// Validate rejects one, so every consumer sees the canonical value),
 	// e.g. "https://mcp-telegram.example.com". It is the OAuth issuer, the
 	// MCP resource identifier, and the AAD binding of all sealed blobs.
 	IssuerURL string
@@ -106,10 +108,10 @@ type Config struct {
 	// (zero) Allow fails Validate, so the server never starts wide open by
 	// accident.
 	Allow Allowlist
-	// TokenKeys are base64-encoded 32-byte master keys. The first key seals
-	// new blobs; all keys can open existing ones, enabling rotation without
-	// a mass logout.
-	TokenKeys []string
+	// Keys is the master-key ring parsed from --auth-token-key. The first key
+	// seals new blobs; all keys can open existing ones, enabling rotation
+	// without a mass logout. The same ring encrypts the stored sessions.
+	Keys *keyring.Ring
 	// ExtraRedirects are additional exact-match redirect URIs accepted at
 	// registration on top of the defaults (claude.ai/claude.com callbacks)
 	// and the always-allowed loopback URIs.
@@ -117,12 +119,6 @@ type Config struct {
 	// TrustedProxyHops controls how many rightmost proxy addresses are trusted
 	// when deriving the client IP. Zero ignores forwarding headers entirely.
 	TrustedProxyHops int
-}
-
-// Normalized returns a copy in canonical form without mutating the caller.
-func (c Config) Normalized() Config {
-	c.IssuerURL = strings.TrimRight(c.IssuerURL, "/")
-	return c
 }
 
 // Validate checks the configuration without mutating it.
@@ -141,6 +137,9 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("issuer URL %q must be https (or http on localhost)", c.IssuerURL)
 	}
+	if strings.HasSuffix(c.IssuerURL, "/") {
+		return fmt.Errorf("issuer URL %q must not end with a slash", c.IssuerURL)
+	}
 	if u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("issuer URL %q must not contain a query or fragment", c.IssuerURL)
 	}
@@ -152,11 +151,8 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("allowed user IDs must be positive, got %d", id)
 		}
 	}
-	if len(c.TokenKeys) == 0 {
+	if c.Keys == nil {
 		return fmt.Errorf("at least one token key is required")
-	}
-	if _, err := newKeyRing(c.TokenKeys); err != nil {
-		return fmt.Errorf("invalid token keys: %w", err)
 	}
 	for _, r := range c.ExtraRedirects {
 		if _, err := url.Parse(r); err != nil {

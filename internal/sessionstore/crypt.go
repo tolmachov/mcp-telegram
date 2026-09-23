@@ -2,18 +2,17 @@ package sessionstore
 
 import (
 	"context"
-	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/gotd/td/session"
 
+	"github.com/tolmachov/mcp-telegram/internal/keyring"
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
@@ -26,8 +25,6 @@ const hkdfInfoSession = "mcp-telegram/sessionstore/aead/v3"
 
 // sessionBlobVersion is the mandatory first byte of every supported blob.
 const sessionBlobVersion = 0x03
-
-const masterKeyLen = 32
 
 // userKeyLen is the required length of a v3 per-session key (matches the key
 // authsrv mints). Enforced in aeadFor so a short/low-entropy key can never seal
@@ -44,92 +41,35 @@ const userKeyLen = 32
 // turn a recoverable key mistake into permanent data loss.
 var ErrCorruptSession = errors.New("sessionstore: cannot decrypt session blob")
 
-// cryptKey is one master key. The one-byte id (first byte of the master key's
-// SHA-256) prefixes every blob so decryption can pick the right key during
-// rotation — same scheme as the authsrv key ring. AEADs are derived per
-// (master, userKey) on demand, so master is retained for that derivation.
-type cryptKey struct {
-	id     byte
-	master []byte
-}
-
-// Cipher encrypts session blobs with the first key and decrypts with any.
+// Cipher encrypts session blobs with the ring's first key and decrypts with
+// any. Every blob is prefixed with the sealing key's ID (see keyring.Key) so
+// decryption can pick the right key during rotation. AEADs are derived per
+// (master, userKey) on demand.
 type Cipher struct {
-	keys   []*cryptKey
+	ring   *keyring.Ring
 	issuer string
 }
 
-// NewCipher parses base64-encoded 32-byte master keys (the MCP_AUTH_TOKEN_KEYS
-// values) into a session cipher. The first key encrypts new blobs; all keys
-// decrypt, enabling rotation. issuer participates in the AAD so blobs cannot
-// travel between deployments.
-func NewCipher(encodedKeys []string, issuer string) (*Cipher, error) {
-	if len(encodedKeys) == 0 {
-		return nil, fmt.Errorf("sessionstore: no keys provided")
-	}
-	c := &Cipher{issuer: issuer}
-	seen := map[byte]int{}
-	for i, e := range encodedKeys {
-		master, err := decodeMasterKey(e)
-		if err != nil {
-			return nil, fmt.Errorf("sessionstore key %d: %w", i, err)
-		}
-		k := deriveCryptKey(master)
-		if prev, dup := seen[k.id]; dup {
-			return nil, fmt.Errorf("sessionstore keys %d and %d collide on key ID %d: replace one of them", prev, i, k.id)
-		}
-		seen[k.id] = i
-		c.keys = append(c.keys, k)
-	}
-	return c, nil
-}
-
-// decodeMasterKey accepts standard or URL-safe base64, padded or raw.
-func decodeMasterKey(e string) ([]byte, error) {
-	for _, enc := range []*base64.Encoding{
-		base64.StdEncoding, base64.RawStdEncoding,
-		base64.URLEncoding, base64.RawURLEncoding,
-	} {
-		if b, err := enc.DecodeString(e); err == nil {
-			if len(b) != masterKeyLen {
-				return nil, fmt.Errorf("decoded key is %d bytes, want %d", len(b), masterKeyLen)
-			}
-			return b, nil
-		}
-	}
-	return nil, fmt.Errorf("key is not valid base64")
-}
-
-func deriveCryptKey(master []byte) *cryptKey {
-	sum := sha256.Sum256(master)
-	m := make([]byte, len(master))
-	copy(m, master)
-	return &cryptKey{id: sum[0], master: m}
-}
-
-// newGCM builds an AES-256-GCM AEAD from a 32-byte key.
-func newGCM(key []byte) (cipher.AEAD, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, fmt.Errorf("creating AES cipher: %w", err)
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("creating GCM: %w", err)
-	}
-	return aead, nil
+// NewCipher builds a session cipher over the MCP_AUTH_TOKEN_KEYS ring. issuer
+// participates in the AAD so blobs cannot travel between deployments.
+func NewCipher(ring *keyring.Ring, issuer string) *Cipher {
+	return &Cipher{ring: ring, issuer: issuer}
 }
 
 // aeadFor returns the AEAD derived from both the master and per-session key.
-func (c *Cipher) aeadFor(k *cryptKey, userKey []byte) (cipher.AEAD, error) {
+func (c *Cipher) aeadFor(k keyring.Key, userKey []byte) (cipher.AEAD, error) {
 	if len(userKey) != userKeyLen {
 		return nil, fmt.Errorf("sessionstore: session key must be %d bytes, got %d", userKeyLen, len(userKey))
 	}
-	aeadKey, err := hkdf.Key(sha256.New, k.master, userKey, hkdfInfoSession, 32)
+	aeadKey, err := hkdf.Key(sha256.New, k.Master, userKey, hkdfInfoSession, 32)
 	if err != nil {
 		return nil, fmt.Errorf("deriving v3 AEAD key: %w", err)
 	}
-	return newGCM(aeadKey)
+	aead, err := keyring.NewGCM(aeadKey)
+	if err != nil {
+		return nil, fmt.Errorf("session AEAD: %w", err)
+	}
+	return aead, nil
 }
 
 // aad binds a blob to this deployment, format, and user.
@@ -139,7 +79,7 @@ func (c *Cipher) aad(userID tgid.UserID) []byte {
 
 // seal returns version || keyID || nonce || AEAD ciphertext.
 func (c *Cipher) seal(userID tgid.UserID, userKey, plaintext []byte) ([]byte, error) {
-	k := c.keys[0]
+	k := c.ring.Primary()
 	aead, err := c.aeadFor(k, userKey)
 	if err != nil {
 		return nil, err
@@ -150,7 +90,7 @@ func (c *Cipher) seal(userID tgid.UserID, userKey, plaintext []byte) ([]byte, er
 	}
 	buf := make([]byte, 0, 2+len(nonce)+len(plaintext)+aead.Overhead())
 	buf = append(buf, sessionBlobVersion)
-	buf = append(buf, k.id)
+	buf = append(buf, k.ID)
 	buf = append(buf, nonce...)
 	return aead.Seal(buf, nonce, plaintext, c.aad(userID)), nil
 }
@@ -160,15 +100,8 @@ func (c *Cipher) open(userID tgid.UserID, userKey, blob []byte) ([]byte, error) 
 	if len(blob) < 2 || blob[0] != sessionBlobVersion {
 		return nil, fmt.Errorf("%w: unsupported session blob version", ErrCorruptSession)
 	}
-	keyID := blob[1]
-	var key *cryptKey
-	for _, k := range c.keys {
-		if k.id == keyID {
-			key = k
-			break
-		}
-	}
-	if key == nil {
+	key, ok := c.ring.ByID(blob[1])
+	if !ok {
 		return nil, fmt.Errorf("%w: sealed with a key not in the ring", ErrCorruptSession)
 	}
 	aead, err := c.aeadFor(key, userKey)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tolmachov/mcp-telegram/internal/authsrv"
+	"github.com/tolmachov/mcp-telegram/internal/keyring"
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore/sessionstoretest"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
@@ -30,9 +31,13 @@ func testServer(t *testing.T) *Server {
 // session store, the pair the http transport requires.
 func testAuth(t *testing.T, issuer string) (*authsrv.Config, sessionstore.Store) {
 	t.Helper()
-	key := make([]byte, 32)
+	key := make([]byte, keyring.MasterKeyLen)
 	if _, err := rand.Read(key); err != nil {
 		t.Fatalf("generating key: %v", err)
+	}
+	keys, err := keyring.Parse([]string{base64.StdEncoding.EncodeToString(key)})
+	if err != nil {
+		t.Fatalf("parsing key: %v", err)
 	}
 	allow, err := authsrv.ParseAllowlist([]string{"42"})
 	if err != nil {
@@ -41,7 +46,7 @@ func testAuth(t *testing.T, issuer string) (*authsrv.Config, sessionstore.Store)
 	return &authsrv.Config{
 		IssuerURL: issuer,
 		Allow:     allow,
-		TokenKeys: []string{base64.StdEncoding.EncodeToString(key)},
+		Keys:      keys,
 	}, sessionstoretest.NewMemory()
 }
 
@@ -154,6 +159,29 @@ func TestServeHTTPCrossOriginProtection(t *testing.T) {
 	_ = resp2.Body.Close()
 	if resp2.StatusCode != http.StatusOK || !reached {
 		t.Errorf("same-origin POST status = %d (reached handler: %v), want 200 and reached", resp2.StatusCode, reached)
+	}
+}
+
+// TestRunHTTPRejectsInvalidAuthConfig pins that authsrv's configuration
+// validation fails HTTP startup before anything is served: buildAuthOptions
+// leaves it to authsrv.New rather than validating twice.
+func TestRunHTTPRejectsInvalidAuthConfig(t *testing.T) {
+	opts := Options{
+		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
+		Transport: TransportHTTP,
+		HTTPAddr:  freePort(t),
+		Stdin:     strings.NewReader(""),
+		Stdout:    io.Discard,
+		ErrOut:    io.Discard,
+	}
+	opts.Auth, opts.SessionStore = testAuth(t, "http://not-loopback.example.com")
+	srv, err := New(opts)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = srv.Run(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "invalid auth config") {
+		t.Fatalf("Run = %v, want an invalid auth config error", err)
 	}
 }
 
