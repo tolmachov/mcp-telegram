@@ -52,12 +52,12 @@ func TestNewValidatesConfig(t *testing.T) {
 	}{
 		{"sampling", Config{Provider: ProviderSampling, BatchTokens: 1, GeminiAPIKey: unread(t), AnthropicAPIKey: unread(t)}, ""},
 		{"gemini", Config{Provider: ProviderGemini, BatchTokens: 1, GeminiAPIKey: key("test-key"), AnthropicAPIKey: unread(t)}, ""},
-		{"gemini missing key", Config{Provider: ProviderGemini, BatchTokens: 1, GeminiAPIKey: key("")}, "MCP_SUMMARIZE_GEMINI_API_KEY is required"},
+		{"gemini missing key", Config{Provider: ProviderGemini, BatchTokens: 1, GeminiAPIKey: key("")}, "the gemini API key is not set: --summarize-provider=gemini needs MCP_SUMMARIZE_GEMINI_API_KEY"},
 		{"gemini key unreadable", Config{Provider: ProviderGemini, BatchTokens: 1, GeminiAPIKey: func() (string, error) { return "", readErr }}, "keychain access denied"},
 		{"ollama", Config{Provider: ProviderOllama, BatchTokens: 1, OllamaURL: "http://localhost:11434", GeminiAPIKey: unread(t), AnthropicAPIKey: unread(t)}, ""},
 		{"ollama missing url", Config{Provider: ProviderOllama, BatchTokens: 1}, "OLLAMA_URL is required"},
 		{"anthropic", Config{Provider: ProviderAnthropic, BatchTokens: 1, AnthropicAPIKey: key("test-key"), GeminiAPIKey: unread(t)}, ""},
-		{"anthropic missing key", Config{Provider: ProviderAnthropic, BatchTokens: 1, AnthropicAPIKey: key("")}, "MCP_SUMMARIZE_ANTHROPIC_API_KEY is required"},
+		{"anthropic missing key", Config{Provider: ProviderAnthropic, BatchTokens: 1, AnthropicAPIKey: key("")}, "the anthropic API key is not set: --summarize-provider=anthropic needs MCP_SUMMARIZE_ANTHROPIC_API_KEY"},
 		{"empty", Config{BatchTokens: 1}, "invalid summarization provider"},
 		{"unknown", Config{Provider: "openai", BatchTokens: 1}, "invalid summarization provider"},
 		{"zero batch tokens", Config{Provider: ProviderSampling}, "batch-tokens must be positive"},
@@ -246,4 +246,25 @@ func TestPeriod(t *testing.T) {
 	assert.Equal(t, 7*24*time.Hour, d)
 	_, ok = Period("year")
 	assert.False(t, ok)
+}
+
+// TestSummarizeKeyErrorsTellUnsetFromUnreadable pins that a key the store
+// could not read is not reported as a missing key.
+func TestKeyErrorsTellUnsetFromUnreadable(t *testing.T) {
+	keychain := errors.New("reading MCP_SUMMARIZE_ANTHROPIC_API_KEY from the Keychain: querying keychain item: user interaction is not allowed")
+	_, err := New(Config{
+		Provider:        ProviderAnthropic,
+		BatchTokens:     1,
+		AnthropicAPIKey: func() (string, error) { return "", keychain },
+	})
+	require.ErrorIs(t, err, keychain)
+	assert.ErrorContains(t, err, "the anthropic API key is unreadable")
+	assert.NotContains(t, err.Error(), "not set")
+
+	_, err = New(Config{
+		Provider:        ProviderAnthropic,
+		BatchTokens:     1,
+		AnthropicAPIKey: func() (string, error) { return "", nil },
+	})
+	assert.ErrorContains(t, err, "the anthropic API key is not set")
 }

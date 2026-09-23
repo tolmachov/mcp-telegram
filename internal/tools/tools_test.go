@@ -191,7 +191,7 @@ func TestEveryToolHandlerRegisters(t *testing.T) {
 		NewGetForumTopicsHandler(nil),
 		NewUsernameResolveHandler(nil),
 		NewMessageLinkResolveHandler(nil),
-		NewChatSummarizeHandler(nil, nil),
+		NewChatSummarizeHandler(nil, nil, nil),
 		NewMediaGetHandler(nil, 1),
 		NewGetFoldersHandler(nil),
 		NewMessageBackupHandler(tgclient.NewResolver(t.Context(), nil), nil, []string{t.TempDir()}),

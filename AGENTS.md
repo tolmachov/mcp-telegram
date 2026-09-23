@@ -75,15 +75,17 @@ make fmt               # golangci-lint fmt
   golangci-lint v2.12.2).
 - **Manual `run` can hang silently.** A zero-log hang usually means another
   process holds the same Telegram session — kill strays before blaming the change.
-- **Startup failures don't exit over stdio.** A missing configuration, a refused
-  session or an invalid summarisation setting goes through `startBlocked`
-  (`internal/server/server.go`): over stdio it serves a login-required server
-  whose tool explains the problem; over HTTP or on a TTY it exits with the
-  message. Route a new startup check the same way. Once running, a client whose
-  session Telegram refuses stops itself once the home DC confirms the refusal
-  (a single reply is no verdict: a secondary DC can refuse a live session):
-  over stdio every tool call then says why, over HTTP the pool deletes the
-  session and forces a re-login.
+- **Startup failures don't exit over stdio.** Missing API credentials or a
+  refused session go through `startBlocked` (`internal/server/server.go`):
+  over stdio it serves a login-required server whose tool explains the
+  problem; over HTTP or on a TTY it exits with the message. Route a new
+  startup check the same way — unless it only disables an optional feature:
+  an invalid summarisation setting is logged at startup and reported by
+  `SummarizeChat` alone, while every other tool works. Once running, a client
+  whose session Telegram refuses stops itself once the home DC confirms the
+  refusal (a single reply is no verdict: a secondary DC can refuse a live
+  session): over stdio every tool call then says why, over HTTP the pool
+  deletes the session and forces a re-login.
 
 ## Conventions
 

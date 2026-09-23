@@ -12,6 +12,9 @@ import (
 // vault is what actually reads/writes independent generic-password items; this
 // type exists to satisfy the Store interface and translate secret.ErrNotFound
 // into config.ErrNotFound.
+// storeName names the store in errors.
+const storeName = "Keychain"
+
 type keychainStore struct {
 	vault *secret.Vault
 }

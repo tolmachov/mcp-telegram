@@ -97,14 +97,15 @@ func (c Config) providerFor() (func(*mcp.ServerSession) Provider, error) {
 	}
 }
 
-// requiredKey reads provider's API key through read, failing when it is unset.
+// requiredKey reads provider's API key through read, telling a key that is
+// not set apart from one that is stored but could not be read.
 func requiredKey(read func() (string, error), env string, provider ProviderName) (string, error) {
 	key, err := read()
 	if err != nil {
-		return "", fmt.Errorf("reading the %s API key: %w", provider, err)
+		return "", fmt.Errorf("the %s API key is unreadable (%w)", provider, err)
 	}
 	if key == "" {
-		return "", fmt.Errorf("%s is required when using --summarize-provider=%s", env, provider)
+		return "", fmt.Errorf("the %s API key is not set: --summarize-provider=%s needs %s, or the key stored with `mcp-telegram config set %s <key>`", provider, provider, env, provider)
 	}
 	return key, nil
 }

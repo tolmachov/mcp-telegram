@@ -14,6 +14,9 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/xdg"
 )
 
+// storeName names the store in errors.
+const storeName = "config store"
+
 // fileStore uses one atomically replaced 0600 file per key. Independent keys
 // cannot overwrite each other, even when separate processes update them at the
 // same time.

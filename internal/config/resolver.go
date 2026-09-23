@@ -44,7 +44,7 @@ func (r *Resolver) String(flagName, storeKey string) (string, error) {
 		return "", nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("reading %s from secure config store: %w", storeKey, err)
+		return "", fmt.Errorf("reading %s from the %s: %w", storeKey, storeName, err)
 	}
 	return value, nil
 }
@@ -58,7 +58,7 @@ func (r *Resolver) Int(flagName, storeKey string) (int, error) {
 		return 0, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("reading %s from secure config store: %w", storeKey, err)
+		return 0, fmt.Errorf("reading %s from the %s: %w", storeKey, storeName, err)
 	}
 	value, err := strconv.Atoi(raw)
 	if err != nil {

@@ -279,6 +279,13 @@ MCP_SUMMARIZE_PROVIDER=ollama  # or: sampling, gemini, anthropic
 MCP_SUMMARIZE_MODEL=           # provider-specific model name
 ```
 
+Summarisation is optional, so invalid settings — an unknown provider, a missing
+Ollama URL, an API key that is not set or cannot be read from the Keychain /
+config store — never stop the server: they are logged as a warning at startup,
+every other tool works, and `SummarizeChat` answers each call with the exact
+startup error and the fix. The settings are read once, so after fixing them
+reconnect the server (stdio) or restart it (HTTP).
+
 ## Commands
 
 ```bash
@@ -482,7 +489,7 @@ of the client's elicitation capabilities.
 
 ## When Telegram Isn't Authorized
 
-Telegram sessions expire and can be revoked from **Settings → Devices → Active sessions** on any of your devices. When that happens at startup — or when `api-id`/`api-hash` are missing, or the summarisation settings are invalid — the server does **not** fail its MCP connection. Over stdio it comes up in **login-required mode**:
+Telegram sessions expire and can be revoked from **Settings → Devices → Active sessions** on any of your devices. When that happens at startup — or when `api-id`/`api-hash` are missing — the server does **not** fail its MCP connection. Over stdio it comes up in **login-required mode**:
 
 - the host shows the server as connected, exposing a single tool named **`TelegramLoginRequired`** and no Telegram tools at all;
 - the server instructions tell the model Telegram is unavailable and what the fix is, so the first Telegram request you make gets answered with the real reason instead of a generic failure;

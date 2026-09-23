@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -453,54 +452,65 @@ func TestBlockedStartupServesLoginRequiredOverStdio(t *testing.T) {
 		"the reason gotd reported has to reach the model")
 }
 
-// TestSummarizeMisconfigurationBlocksStartup pins that an invalid
-// summarisation setting found at startup goes through the blocked-startup
-// path like every other startup failure: over stdio the host gets the
-// login-required server naming the setting, and its re-check reports a
-// configuration problem without probing Telegram; over HTTP the process
-// fails with the same reason.
-func TestSummarizeMisconfigurationBlocksStartup(t *testing.T) {
-	_, summarizeErr := summarize.New(summarize.Config{
-		Provider:     summarize.ProviderGemini,
-		BatchTokens:  1,
-		GeminiAPIKey: func() (string, error) { return "", nil },
+// TestSummarizeMisconfigurationDisablesOnlySummarizeChat pins that an invalid
+// summarisation setting — an optional feature — is logged at startup but
+// blocks nothing: every tool is served, and SummarizeChat alone fails, with
+// the precise startup error and the fix for the transport.
+func TestSummarizeMisconfigurationDisablesOnlySummarizeChat(t *testing.T) {
+	clientR, serverW := io.Pipe()
+	serverR, clientW := io.Pipe()
+	var logs bytes.Buffer
+	srv, err := New(Options{
+		Config: &tgclient.Config{APIID: 1, APIHash: "hash"},
+		Summarize: summarize.Config{
+			Provider:     summarize.ProviderGemini,
+			BatchTokens:  1,
+			GeminiAPIKey: func() (string, error) { return "", nil },
+		},
+		Version:   "test",
+		Variant:   variantFull,
+		Stdin:     serverR,
+		Stdout:    serverW,
+		ErrOut:    &logs,
+		Transport: TransportStdio,
 	})
-	require.Error(t, summarizeErr)
-
-	cs := connectViaRun(t, &tgclient.Config{APIID: 1, APIHash: "hash"}, func(s *Server) {
-		s.summarizer, s.summarizeErr = nil, summarizeErr
-		s.authProbeFn = func(context.Context) (string, bool, error) {
-			t.Error("a configuration problem must not be re-checked against Telegram")
-			return "", false, nil
-		}
-		s.openLocalSession = func() (session.Storage, error) {
-			t.Error("a configuration problem must not start a Telegram client")
-			return nil, errors.New("unreachable")
-		}
-	})
-	tools, err := cs.ListTools(t.Context(), &mcp.ListToolsParams{})
 	require.NoError(t, err)
-	require.Len(t, tools.Tools, 1)
-	assert.Equal(t, loginRequiredTool, tools.Tools[0].Name)
-	assert.Contains(t, cs.InitializeResult().Instructions, "MCP_SUMMARIZE_GEMINI_API_KEY")
+	assert.Contains(t, logs.String(), "level=WARN")
+	assert.Contains(t, logs.String(), "the gemini API key is not set")
 
-	status := callLoginTool(t, cs)
-	assert.Equal(t, StateNotConfigured, status.State)
-	assert.Contains(t, status.Detail, "MCP_SUMMARIZE_GEMINI_API_KEY")
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.serveAssembly(t.Context(), newFakeClient()) }()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil).
+		Connect(t.Context(), &mcp.IOTransport{Reader: clientR, Writer: clientW}, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = cs.Close()
+		_ = clientW.Close()
+		<-errCh
+	})
 
-	opts := Options{
-		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
-		Transport: TransportHTTP,
-		HTTPAddr:  freePort(t),
-		Summarize: summarize.Config{Provider: summarize.ProviderSampling},
-		Stdin:     strings.NewReader(""),
-		Stdout:    io.Discard,
-		ErrOut:    io.Discard,
+	listed, err := cs.ListTools(t.Context(), &mcp.ListToolsParams{})
+	require.NoError(t, err)
+	names := make([]string, 0, len(listed.Tools))
+	for _, tool := range listed.Tools {
+		names = append(names, tool.Name)
 	}
-	opts.Auth, opts.SessionStore = testAuth(t, "http://"+opts.HTTPAddr)
-	srv, err := New(opts)
+	assert.Contains(t, names, "SummarizeChat", "the tool stays registered to report the problem")
+	assert.Contains(t, names, "GetMe")
+	assert.NotContains(t, names, loginRequiredTool)
+	assert.Equal(t, happyInstructions, cs.InitializeResult().Instructions)
+
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "SummarizeChat", Arguments: map[string]any{"chat_id": 1, "goal": "recap"}})
 	require.NoError(t, err)
-	require.ErrorContains(t, srv.Run(t.Context()), "summarize-batch-tokens must be positive")
+	require.True(t, res.IsError)
+	text := res.Content[0].(*mcp.TextContent).Text
+	assert.Contains(t, text, "Failed to summarize chat: summarisation is not available")
+	assert.Contains(t, text, "the gemini API key is not set")
+	assert.Contains(t, text, "MCP_SUMMARIZE_GEMINI_API_KEY")
+	assert.Contains(t, text, "Reconnect")
+
+	srv.opts.Transport = TransportHTTP
+	assert.ErrorContains(t, srv.summarizeUnavailable(), "restart the server")
 }
 
 // blockingSession parks LoadSession until the client's own context ends, so
