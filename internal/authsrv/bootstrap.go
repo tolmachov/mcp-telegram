@@ -209,7 +209,7 @@ func (a *AuthServer) janitor(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			a.runTick("login janitor", a.sweepExpiredPending)
+			a.runIsolated("login janitor", a.sweepExpiredPending)
 		}
 	}
 }

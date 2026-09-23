@@ -159,12 +159,28 @@ func (panicListStore) List(context.Context) ([]sessionstore.SessionRef, error) {
 	panic("simulated backend panic during List")
 }
 
-// TestSweepSurvivesPanickingBackend pins that a panic from the store during a
-// sweep is recovered, so one bad entry (or a backend bug) cannot unwind the
-// sweeper goroutine and crash the whole auth-server process.
-func TestSweepSurvivesPanickingBackend(t *testing.T) {
-	store := panicListStore{Store: sessionstoretest.New(t)}
+// TestSweepIsolatesPanickingPart pins that a store panicking in one sweep part
+// on every run neither unwinds the sweeper goroutine nor keeps the other parts
+// from reclaiming what they own.
+func TestSweepIsolatesPanickingPart(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store := panicListStore{Store: sessionstoretest.NewWithClock(t, func() time.Time { return base })}
+	const sid = "0123456789abcdef0123456789abcdef"
+	const family = "fedcba9876543210fedcba9876543210"
+	require.NoError(t, store.Revoke(ctx, allowedUser, sid))
+	created, err := sessionstore.RedeemCode(ctx, store, family, sid, base.Add(time.Hour))
+	require.NoError(t, err)
+	require.True(t, created)
+
 	a, _ := newTestServer(t, testConfig(t), store, neverStartLogin)
-	assert.NotPanics(t, func() { a.runTick("test", func() { a.runSweep(context.Background()) }) },
-		"a panicking backend must be recovered, not propagated out of the sweep")
+	a.now = func() time.Time { return base.Add(refreshTokenTTL + sweepMargin + time.Minute) }
+	assert.NotPanics(t, func() { a.runSweep(ctx) })
+
+	revoked, err := store.Revoked(ctx, allowedUser, sid)
+	require.NoError(t, err)
+	assert.False(t, revoked, "the tombstone sweep must run despite the session sweep panicking")
+	_, version, err := store.LoadGrant(ctx, family)
+	require.NoError(t, err)
+	assert.Zero(t, version, "the grant sweep must run despite the session sweep panicking")
 }

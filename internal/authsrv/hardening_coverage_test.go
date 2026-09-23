@@ -89,7 +89,7 @@ func TestAuthLifecycleAndPanicIsolationBranches(t *testing.T) {
 	assert.Error(t, a.Start(t.Context()))
 
 	// A background-tick panic is isolated from its loop.
-	a.runTick("test", func() { panic("tick panic") })
+	a.runIsolated("test", func() { panic("tick panic") })
 
 	// A malicious LoginFlow.Abort cannot unwind the pending-login sweeper.
 	b, err := New(testConfig(t), slog.New(slog.DiscardHandler), sessionstoretest.New(t), neverStartLogin, noInvalidate)
@@ -97,7 +97,7 @@ func TestAuthLifecycleAndPanicIsolationBranches(t *testing.T) {
 	flow := panicAbortFlow{newFakeFlow()}
 	require.NoError(t, b.addPending("request", flow, "127.0.0.1"))
 	b.now = func() time.Time { return time.Now().Add(pendingLoginTTL + time.Minute) }
-	b.runTick("test", b.sweepExpiredPending)
+	b.runIsolated("test", b.sweepExpiredPending)
 	b.Close()
 }
 

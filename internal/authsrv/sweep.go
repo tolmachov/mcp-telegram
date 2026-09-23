@@ -2,6 +2,7 @@ package authsrv
 
 import (
 	"context"
+	"runtime/debug"
 	"time"
 
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
@@ -32,23 +33,24 @@ func (a *AuthServer) sessionSweeper(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			a.runTick("session sweeper", func() { a.runSweep(ctx) })
+			a.runSweep(ctx)
 			t.Reset(sweepInterval)
 		}
 	}
 }
 
-// runTick executes one tick of a background maintenance loop, isolating the
-// loop from a panic (a store backend bug, a misbehaving LoginFlow.Abort): it
-// is logged and the loop survives to the next tick instead of unwinding and
-// crashing the whole auth-server process.
-func (a *AuthServer) runTick(loop string, tick func()) {
+// runIsolated runs one background maintenance task (a janitor tick, one part
+// of a sweep), isolating everything else from its panic — a store backend
+// bug, a misbehaving LoginFlow.Abort. The panic is logged with its stack and
+// the other tasks, and later ticks, still run.
+func (a *AuthServer) runIsolated(task string, run func()) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.logger.Error("auth background tick panicked; recovered", "loop", loop, "panic", recovered)
+			a.logger.Error("auth background task panicked; recovered",
+				"task", task, "panic", recovered, "stack", string(debug.Stack()))
 		}
 	}()
-	tick()
+	run()
 }
 
 // runSweep executes one storage sweep iteration.
@@ -64,12 +66,17 @@ func (a *AuthServer) runTick(loop string, tick func()) {
 // session's LoginAt precedes its revoke time, so once the tombstone is older
 // than the cutoff no refresh token for that session can still be valid — the
 // tombstone has done its job and can go.
+//
+// Each part runs isolated, so a part that panics on every sweep cannot keep
+// the others from running.
 func (a *AuthServer) runSweep(ctx context.Context) {
-	a.sweepRefs(ctx, "sessions", a.store.List, a.store.Delete)
-	a.sweepRefs(ctx, "tombstones", a.store.ListRevoked, a.store.DeleteRevoked)
-	if err := a.store.SweepAuthState(ctx, a.now()); err != nil {
-		a.logger.Error("oauth state sweep failed", "err", err)
-	}
+	a.runIsolated("session sweep", func() { a.sweepRefs(ctx, "sessions", a.store.List, a.store.Delete) })
+	a.runIsolated("tombstone sweep", func() { a.sweepRefs(ctx, "tombstones", a.store.ListRevoked, a.store.DeleteRevoked) })
+	a.runIsolated("grant sweep", func() {
+		if err := a.store.SweepAuthState(ctx, a.now()); err != nil {
+			a.logger.Error("oauth state sweep failed", "err", err)
+		}
+	})
 }
 
 // sweepRefs deletes every entry list returns whose UpdatedAt is older than
