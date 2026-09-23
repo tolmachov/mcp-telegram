@@ -70,14 +70,14 @@ func (f *FS) revokedPath(userID tgid.UserID, sid string) string {
 
 func (f *FS) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {
 	if !ValidSID(sid) {
-		return brokenSession{err: errInvalidStoreSID}
+		return brokenSession{err: ErrInvalidSID}
 	}
 	return fsSession{path: f.path(userID, sid)}
 }
 
 func (f *FS) Exists(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
 	if !ValidSID(sid) {
-		return false, errInvalidStoreSID
+		return false, ErrInvalidSID
 	}
 	p := f.path(userID, sid)
 	info, err := os.Stat(p)
@@ -97,7 +97,7 @@ func (f *FS) Exists(_ context.Context, userID tgid.UserID, sid string) (bool, er
 
 func (f *FS) Delete(_ context.Context, userID tgid.UserID, sid string) error {
 	if !ValidSID(sid) {
-		return errInvalidStoreSID
+		return ErrInvalidSID
 	}
 	p := f.path(userID, sid)
 	err := os.Remove(p)
@@ -151,7 +151,7 @@ func (f *FS) listDir(dir string) ([]SessionRef, error) {
 
 func (f *FS) Revoke(_ context.Context, userID tgid.UserID, sid string) error {
 	if !ValidSID(sid) {
-		return errInvalidStoreSID
+		return ErrInvalidSID
 	}
 	// Tombstone first (source of truth), then remove the blob. A zero-byte file
 	// is enough; its presence is the signal (checked via os.Stat, not read).
@@ -168,7 +168,7 @@ func (f *FS) Revoke(_ context.Context, userID tgid.UserID, sid string) error {
 
 func (f *FS) Revoked(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
 	if !ValidSID(sid) {
-		return false, errInvalidStoreSID
+		return false, ErrInvalidSID
 	}
 	p := f.revokedPath(userID, sid)
 	_, err := os.Stat(p)
@@ -184,7 +184,7 @@ func (f *FS) Revoked(_ context.Context, userID tgid.UserID, sid string) (bool, e
 
 func (f *FS) DeleteRevoked(_ context.Context, userID tgid.UserID, sid string) error {
 	if !ValidSID(sid) {
-		return errInvalidStoreSID
+		return ErrInvalidSID
 	}
 	p := f.revokedPath(userID, sid)
 	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -195,7 +195,7 @@ func (f *FS) DeleteRevoked(_ context.Context, userID tgid.UserID, sid string) er
 
 func (f *FS) RedeemCode(_ context.Context, family, sid string, expiresAt time.Time) (bool, error) {
 	if !ValidSID(family) || !ValidSID(sid) {
-		return false, errInvalidStoreSID
+		return false, ErrInvalidSID
 	}
 	lock := f.grantLock(family)
 	lock.Lock()
@@ -218,7 +218,7 @@ func (f *FS) RedeemCode(_ context.Context, family, sid string, expiresAt time.Ti
 
 func (f *FS) RotateGrant(_ context.Context, family string, generation int64) (GrantRotation, error) {
 	if !ValidSID(family) {
-		return GrantMissing, errInvalidStoreSID
+		return GrantMissing, ErrInvalidSID
 	}
 	lock := f.grantLock(family)
 	lock.Lock()
@@ -257,7 +257,7 @@ func (f *FS) RotateGrant(_ context.Context, family string, generation int64) (Gr
 
 func (f *FS) RevokeGrant(_ context.Context, family string) error {
 	if !ValidSID(family) {
-		return errInvalidStoreSID
+		return ErrInvalidSID
 	}
 	lock := f.grantLock(family)
 	lock.Lock()

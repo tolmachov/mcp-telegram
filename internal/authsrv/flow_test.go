@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
+	"github.com/tolmachov/mcp-telegram/internal/sessionstore/sessionstoretest"
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
@@ -364,7 +365,7 @@ func postToken(t *testing.T, ts *httptest.Server, form url.Values) (*tokenRespon
 }
 
 func TestAuthorizationCodeIsSingleUse(t *testing.T) {
-	store := sessionstore.NewMemory()
+	store := sessionstoretest.NewMemory()
 	flow := newFakeFlow()
 	_, ts := newTestServer(t, testConfig(t), store, startOne(flow))
 	clientID := registerClient(t, ts, testRedirectURI)
@@ -380,7 +381,7 @@ func TestAuthorizationCodeIsSingleUse(t *testing.T) {
 }
 
 func TestRefreshReplayRevokesWholeGrant(t *testing.T) {
-	store := sessionstore.NewMemory()
+	store := sessionstoretest.NewMemory()
 	flow := newFakeFlow()
 	a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
 	clientID := registerClient(t, ts, testRedirectURI)
@@ -400,7 +401,7 @@ func TestRefreshReplayRevokesWholeGrant(t *testing.T) {
 }
 
 func TestMetadataEndpoints(t *testing.T) {
-	_, ts := newTestServer(t, testConfig(t), sessionstore.NewMemory(), neverStartLogin)
+	_, ts := newTestServer(t, testConfig(t), sessionstoretest.NewMemory(), neverStartLogin)
 
 	var prm oauthex.ProtectedResourceMetadata
 	resp, err := http.Get(ts.URL + "/.well-known/oauth-protected-resource")
@@ -433,7 +434,7 @@ func TestMetadataEndpoints(t *testing.T) {
 }
 
 func TestFullAuthorizationFlow(t *testing.T) {
-	store := sessionstore.NewMemory()
+	store := sessionstoretest.NewMemory()
 	flow := newFakeFlow()
 	a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
 	sessionBytes := []byte("gotd-session-bytes")
@@ -523,7 +524,7 @@ func TestFullAuthorizationFlow(t *testing.T) {
 func TestQRPlaceholderUntilTokenReady(t *testing.T) {
 	flow := newFakeFlow()
 	flow.setURL("")
-	_, ts := newTestServer(t, testConfig(t), sessionstore.NewMemory(), startOne(flow))
+	_, ts := newTestServer(t, testConfig(t), sessionstoretest.NewMemory(), startOne(flow))
 	clientID := registerClient(t, ts, testRedirectURI)
 	_, challenge := pkcePair()
 	loginID := startAuthorize(t, ts, clientID, challenge, "state")
@@ -558,7 +559,7 @@ func TestQRPlaceholderUntilTokenReady(t *testing.T) {
 }
 
 func TestAuthorizeRejections(t *testing.T) {
-	_, ts := newTestServer(t, testConfig(t), sessionstore.NewMemory(), startOne(newFakeFlow(), newFakeFlow()))
+	_, ts := newTestServer(t, testConfig(t), sessionstoretest.NewMemory(), startOne(newFakeFlow(), newFakeFlow()))
 	clientID := registerClient(t, ts, testRedirectURI)
 	_, challenge := pkcePair()
 	client := noRedirectClient()
@@ -644,7 +645,7 @@ func TestAuthorizeCapacityLimit(t *testing.T) {
 	}
 	cfg := testConfig(t)
 	cfg.TrustedProxyHops = 1
-	_, ts := newTestServer(t, cfg, sessionstore.NewMemory(), startOne(flows...))
+	_, ts := newTestServer(t, cfg, sessionstoretest.NewMemory(), startOne(flows...))
 	clientID := registerClient(t, ts, testRedirectURI)
 	_, challenge := pkcePair()
 
@@ -681,7 +682,7 @@ func TestAuthorizeCapacityLimit(t *testing.T) {
 }
 
 func TestAddPendingPerIPCap(t *testing.T) {
-	a, _ := newTestServer(t, testConfig(t), sessionstore.NewMemory(), neverStartLogin)
+	a, _ := newTestServer(t, testConfig(t), sessionstoretest.NewMemory(), neverStartLogin)
 
 	// A single IP may hold at most maxPendingLoginsPerIP concurrent slots —
 	// well below the global cap, so one IP cannot lock everyone else out.
@@ -700,7 +701,7 @@ func TestAddPendingPerIPCap(t *testing.T) {
 }
 
 func TestRegisterRejections(t *testing.T) {
-	_, ts := newTestServer(t, testConfig(t), sessionstore.NewMemory(), neverStartLogin)
+	_, ts := newTestServer(t, testConfig(t), sessionstoretest.NewMemory(), neverStartLogin)
 
 	post := func(body string) (*http.Response, *oauthex.ClientRegistrationError) {
 		resp, err := http.Post(ts.URL+"/register", "application/json", strings.NewReader(body))
@@ -738,9 +739,9 @@ func TestRegisterRejections(t *testing.T) {
 func TestLoginEndpoints(t *testing.T) {
 	_, challenge := pkcePair()
 
-	setup := func(t *testing.T, flow *fakeFlow) (*AuthServer, *httptest.Server, *sessionstore.Memory, string, string) {
+	setup := func(t *testing.T, flow *fakeFlow) (*AuthServer, *httptest.Server, *sessionstoretest.Memory, string, string) {
 		t.Helper()
-		store := sessionstore.NewMemory()
+		store := sessionstoretest.NewMemory()
 		a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
 		clientID := registerClient(t, ts, testRedirectURI)
 		loginID := startAuthorize(t, ts, clientID, challenge, "s")
@@ -748,7 +749,7 @@ func TestLoginEndpoints(t *testing.T) {
 	}
 
 	t.Run("unknown login id polls as expired and QR is 404", func(t *testing.T) {
-		_, ts := newTestServer(t, testConfig(t), sessionstore.NewMemory(), neverStartLogin)
+		_, ts := newTestServer(t, testConfig(t), sessionstoretest.NewMemory(), neverStartLogin)
 		assert.Equal(t, "expired", pollLogin(t, ts, strings.Repeat("ab", 16)).Status)
 
 		resp, err := http.Get(ts.URL + "/login/qr?login=" + strings.Repeat("ab", 16))
@@ -835,7 +836,7 @@ func TestLoginEndpoints(t *testing.T) {
 	})
 
 	t.Run("password submit for unknown login is 404", func(t *testing.T) {
-		_, ts := newTestServer(t, testConfig(t), sessionstore.NewMemory(), neverStartLogin)
+		_, ts := newTestServer(t, testConfig(t), sessionstoretest.NewMemory(), neverStartLogin)
 		resp, err := http.PostForm(ts.URL+"/login/password", url.Values{
 			"login": {strings.Repeat("cd", 16)}, "password": {"x"},
 		})
@@ -874,7 +875,7 @@ func TestLoginEndpoints(t *testing.T) {
 func TestTokenRejections(t *testing.T) {
 	verifier, challenge := pkcePair()
 
-	store := sessionstore.NewMemory()
+	store := sessionstoretest.NewMemory()
 	// Enough scripted flows for every fresh code this test needs.
 	flows := make([]*fakeFlow, 8)
 	for i := range flows {
@@ -972,7 +973,7 @@ func TestTokenRejections(t *testing.T) {
 func TestVerifierRejections(t *testing.T) {
 	verifier, challenge := pkcePair()
 	flow := newFakeFlow()
-	a, ts := newTestServer(t, testConfig(t), sessionstore.NewMemory(), startOne(flow))
+	a, ts := newTestServer(t, testConfig(t), sessionstoretest.NewMemory(), startOne(flow))
 	clientID := registerClient(t, ts, testRedirectURI)
 	loginID := startAuthorize(t, ts, clientID, challenge, "s")
 	code, _ := finishLogin(t, ts, loginID, flow,
@@ -1007,7 +1008,7 @@ func TestVerifierRejections(t *testing.T) {
 // oracle) and never touches storage. A recognized token whose tombstone cannot
 // be written is the ONE case that returns non-200 (503, TestRevokeStoreError).
 func TestRevokeUnrecognizedTokenAcknowledged(t *testing.T) {
-	_, ts := newTestServer(t, testConfig(t), sessionstore.NewMemory(), neverStartLogin)
+	_, ts := newTestServer(t, testConfig(t), sessionstoretest.NewMemory(), neverStartLogin)
 
 	for _, token := range []string{"mcp_rt_whatever", "garbage", ""} {
 		resp, err := http.PostForm(ts.URL+"/revoke", url.Values{"token": {token}})
@@ -1049,7 +1050,7 @@ func loginAndRedeem(t *testing.T, a *AuthServer, ts *httptest.Server, flow *fake
 
 func TestRevoke(t *testing.T) {
 	t.Run("refresh token deletes its session and kills the grant", func(t *testing.T) {
-		store := sessionstore.NewMemory()
+		store := sessionstoretest.NewMemory()
 		flow := newFakeFlow()
 		a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
 		clientID := registerClient(t, ts, testRedirectURI)
@@ -1068,7 +1069,7 @@ func TestRevoke(t *testing.T) {
 	})
 
 	t.Run("access token works too, hint is advisory", func(t *testing.T) {
-		store := sessionstore.NewMemory()
+		store := sessionstoretest.NewMemory()
 		flow := newFakeFlow()
 		a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
 		clientID := registerClient(t, ts, testRedirectURI)
@@ -1084,7 +1085,7 @@ func TestRevoke(t *testing.T) {
 	})
 
 	t.Run("invalid token is acknowledged without effect", func(t *testing.T) {
-		store := sessionstore.NewMemory()
+		store := sessionstoretest.NewMemory()
 		flow := newFakeFlow()
 		a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
 		clientID := registerClient(t, ts, testRedirectURI)
@@ -1098,7 +1099,7 @@ func TestRevoke(t *testing.T) {
 	})
 
 	t.Run("client_id mismatch is acknowledged without effect", func(t *testing.T) {
-		store := sessionstore.NewMemory()
+		store := sessionstoretest.NewMemory()
 		flow := newFakeFlow()
 		a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
 		clientID := registerClient(t, ts, testRedirectURI)
@@ -1116,7 +1117,7 @@ func TestRevoke(t *testing.T) {
 
 // failRevokeStore fails every Revoke, to exercise the /revoke store-error path.
 type failRevokeStore struct {
-	*sessionstore.Memory
+	*sessionstoretest.Memory
 }
 
 func (s *failRevokeStore) Revoke(context.Context, tgid.UserID, string) error {
@@ -1127,7 +1128,7 @@ func (s *failRevokeStore) Revoke(context.Context, tgid.UserID, string) error {
 // written yields 503 (temporarily_unavailable), NOT 200 — answering 200 would
 // tell the client the grant is dead while the refresh keeps minting.
 func TestRevokeStoreError(t *testing.T) {
-	store := &failRevokeStore{Memory: sessionstore.NewMemory()}
+	store := &failRevokeStore{Memory: sessionstoretest.NewMemory()}
 	flow := newFakeFlow()
 	a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
 	clientID := registerClient(t, ts, testRedirectURI)
@@ -1143,7 +1144,7 @@ func TestRevokeStoreError(t *testing.T) {
 // failRevokedProbeStore errors from Revoked, simulating a backend blip during
 // the refresh gate's tombstone probe.
 type failRevokedProbeStore struct {
-	*sessionstore.Memory
+	*sessionstoretest.Memory
 }
 
 func (s *failRevokedProbeStore) Revoked(context.Context, tgid.UserID, string) (bool, error) {
@@ -1153,7 +1154,7 @@ func (s *failRevokedProbeStore) Revoked(context.Context, tgid.UserID, string) (b
 // failExistsProbeStore errors from Exists, simulating a backend blip during the
 // refresh gate's session-existence probe.
 type failExistsProbeStore struct {
-	*sessionstore.Memory
+	*sessionstoretest.Memory
 }
 
 func (s *failExistsProbeStore) Exists(context.Context, tgid.UserID, string) (bool, error) {
@@ -1168,8 +1169,8 @@ func TestRefreshStoreErrorIs503(t *testing.T) {
 	const sid = "0123456789abcdef0123456789abcdef"
 	const family = "fedcba9876543210fedcba9876543210"
 	for name, store := range map[string]sessionstore.Store{
-		"revoked probe fails": &failRevokedProbeStore{Memory: sessionstore.NewMemory()},
-		"exists probe fails":  &failExistsProbeStore{Memory: sessionstore.NewMemory()},
+		"revoked probe fails": &failRevokedProbeStore{Memory: sessionstoretest.NewMemory()},
+		"exists probe fails":  &failExistsProbeStore{Memory: sessionstoretest.NewMemory()},
 	} {
 		t.Run(name, func(t *testing.T) {
 			a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
@@ -1200,7 +1201,7 @@ func TestRefreshStoreErrorIs503(t *testing.T) {
 // storage layer as an object-name suffix — a server-minted sid is always valid,
 // so a bad one means a forged/corrupt token.
 func TestVerifierRejectsMalformedSessionID(t *testing.T) {
-	a, _ := newTestServer(t, testConfig(t), sessionstore.NewMemory(), neverStartLogin)
+	a, _ := newTestServer(t, testConfig(t), sessionstoretest.NewMemory(), neverStartLogin)
 	now := a.now()
 	token, err := sealBlob(a.sealer, accessBlob, accessClaims{
 		Subject: allowedUser.String(), Username: "durov", ClientID: "cid",
@@ -1226,7 +1227,7 @@ func TestNewSessionCredsValid(t *testing.T) {
 // client assembly for the token's own session (via the invalidator) before the
 // blob is deleted, so a warm client cannot resurrect it.
 func TestRevokeInvalidatesLiveSession(t *testing.T) {
-	store := sessionstore.NewMemory()
+	store := sessionstoretest.NewMemory()
 	flow := newFakeFlow()
 	var invalidated []string
 	a, ts := newTestServerWithInvalidator(t, testConfig(t), store, startOne(flow), func(userID tgid.UserID, sid string) {
@@ -1243,7 +1244,7 @@ func TestRevokeInvalidatesLiveSession(t *testing.T) {
 // TestRefreshRejectsMalformedSid pins the storage-boundary defense: a token
 // carrying a non-hex sid is rejected before the sid can reach the store.
 func TestRefreshRejectsMalformedSid(t *testing.T) {
-	store := sessionstore.NewMemory()
+	store := sessionstoretest.NewMemory()
 	a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
 	clientID := registerClient(t, ts, testRedirectURI)
 	now := a.now()
@@ -1260,7 +1261,7 @@ func TestRefreshRejectsMalformedSid(t *testing.T) {
 // TestRevokeRejectsMalformedSid pins that revocation rejects a malformed sid
 // before any invalidation or store call — no token-carried string reaches a path.
 func TestRevokeRejectsMalformedSid(t *testing.T) {
-	store := sessionstore.NewMemory()
+	store := sessionstoretest.NewMemory()
 	called := false
 	a, ts := newTestServerWithInvalidator(t, testConfig(t), store, neverStartLogin, func(tgid.UserID, string) { called = true })
 	now := a.now()
@@ -1278,7 +1279,7 @@ func TestRevokeRejectsMalformedSid(t *testing.T) {
 // blob, the revoked refresh token stays rejected — the durable tombstone, not
 // the blob's presence, gates the grant.
 func TestRevokeSurvivesResurrection(t *testing.T) {
-	store := sessionstore.NewMemory()
+	store := sessionstoretest.NewMemory()
 	flow := newFakeFlow()
 	a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
 	clientID := registerClient(t, ts, testRedirectURI)
@@ -1306,7 +1307,7 @@ func TestRevokeSurvivesResurrection(t *testing.T) {
 // key ride verbatim through every refresh, so a refreshed token keeps pointing
 // at (and decrypting) the same session object.
 func TestRefreshCarriesSessionIdentity(t *testing.T) {
-	store := sessionstore.NewMemory()
+	store := sessionstoretest.NewMemory()
 	flow := newFakeFlow()
 	a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
 
@@ -1342,7 +1343,7 @@ func TestRefreshCarriesSessionIdentity(t *testing.T) {
 }
 
 type unavailableGrantStore struct {
-	*sessionstore.Memory
+	*sessionstoretest.Memory
 	failRedeem atomic.Bool
 	failRevoke atomic.Bool
 }
@@ -1362,7 +1363,7 @@ func (s *unavailableGrantStore) RevokeGrant(ctx context.Context, family string) 
 }
 
 func TestGrantStorageFailureAllowsRetryWithoutLosingSession(t *testing.T) {
-	store := &unavailableGrantStore{Memory: sessionstore.NewMemory()}
+	store := &unavailableGrantStore{Memory: sessionstoretest.NewMemory()}
 	store.failRedeem.Store(true)
 	store.failRevoke.Store(true)
 	flow := newFakeFlow()

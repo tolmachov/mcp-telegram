@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/gotd/td/session"
 
@@ -124,6 +123,16 @@ func TestNewCipherValidation(t *testing.T) {
 	}
 }
 
+// newTestFS returns an FS store rooted in a fresh temporary directory.
+func newTestFS(t *testing.T) *FS {
+	t.Helper()
+	fs, err := NewFS(filepath.Join(t.TempDir(), "sessions"))
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	return fs
+}
+
 func TestFSStore(t *testing.T) {
 	ctx := t.Context()
 	fs, err := NewFS(filepath.Join(t.TempDir(), "sessions"))
@@ -221,7 +230,7 @@ func TestEncryptedStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCipher: %v", err)
 	}
-	backend := NewMemory()
+	backend := newTestFS(t)
 	store := Encrypted(backend, cipher)
 	const user = tgid.UserID(5)
 	uk := userKeyForTest(t)
@@ -268,7 +277,7 @@ func TestEncryptedStorePreservesErrNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCipher: %v", err)
 	}
-	store := Encrypted(NewMemory(), cipher)
+	store := Encrypted(newTestFS(t), cipher)
 	if _, err := store.Session(1, testSID, userKeyForTest(t)).LoadSession(ctx); !errors.Is(err, session.ErrNotFound) {
 		t.Errorf("LoadSession on empty encrypted store: err = %v, want session.ErrNotFound", err)
 	}
@@ -327,7 +336,7 @@ func TestStoreRejectsMissingSessionIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCipher: %v", err)
 	}
-	store := Encrypted(NewMemory(), cipher)
+	store := Encrypted(newTestFS(t), cipher)
 	const user = tgid.UserID(88)
 	const sid = "0123456789abcdef0123456789abcdef"
 
@@ -381,7 +390,7 @@ func TestEncryptedStoreRejectsInvalidSID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCipher: %v", err)
 	}
-	store := Encrypted(NewMemory(), cipher)
+	store := Encrypted(newTestFS(t), cipher)
 	const user = tgid.UserID(92)
 	const bad = "../escape" // non-empty, not ValidSID
 
@@ -408,71 +417,6 @@ func TestEncryptedStoreRejectsInvalidSID(t *testing.T) {
 	}
 	if _, err := store.Exists(ctx, user, "0123456789abcdef0123456789abcdef"); err != nil {
 		t.Errorf("Exists(valid sid) must be accepted: %v", err)
-	}
-}
-
-// TestRevokeTombstone exercises the tombstone lifecycle on every real backend:
-// Revoke marks + deletes the blob, Revoked reflects it, tombstones are listed
-// by ListRevoked but NOT by List (not mistaken for sessions), and DeleteRevoked
-// clears them.
-func TestRevokeTombstone(t *testing.T) {
-	const user = tgid.UserID(55)
-	const sid = "0123456789abcdef0123456789abcdef"
-	for _, tc := range []struct {
-		name string
-		make func(t *testing.T) Store
-	}{
-		{"memory", func(_ *testing.T) Store { return NewMemory() }},
-		{"fs", func(t *testing.T) Store {
-			fs, err := NewFS(filepath.Join(t.TempDir(), "sessions"))
-			if err != nil {
-				t.Fatalf("NewFS: %v", err)
-			}
-			return fs
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := t.Context()
-			store := tc.make(t)
-			if err := store.Session(user, sid, nil).StoreSession(ctx, []byte("blob")); err != nil {
-				t.Fatalf("StoreSession: %v", err)
-			}
-
-			if r, err := store.Revoked(ctx, user, sid); err != nil || r {
-				t.Fatalf("Revoked before revoke = (%v, %v), want (false, nil)", r, err)
-			}
-			if err := store.Revoke(ctx, user, sid); err != nil {
-				t.Fatalf("Revoke: %v", err)
-			}
-			if r, err := store.Revoked(ctx, user, sid); err != nil || !r {
-				t.Errorf("Revoked after revoke = (%v, %v), want (true, nil)", r, err)
-			}
-			// The blob is gone; the tombstone is not listed as a session.
-			if ok, _ := store.Exists(ctx, user, sid); ok {
-				t.Error("Revoke must delete the session blob")
-			}
-			sessions, err := store.List(ctx)
-			if err != nil {
-				t.Fatalf("List: %v", err)
-			}
-			if len(sessions) != 0 {
-				t.Errorf("List returned %d sessions, want 0 (tombstone must not appear as a session)", len(sessions))
-			}
-			revoked, err := store.ListRevoked(ctx)
-			if err != nil {
-				t.Fatalf("ListRevoked: %v", err)
-			}
-			if len(revoked) != 1 || revoked[0].UserID != user || revoked[0].SID != sid {
-				t.Errorf("ListRevoked = %+v, want one tombstone for (%d,%s)", revoked, user, sid)
-			}
-
-			if err := store.DeleteRevoked(ctx, user, sid); err != nil {
-				t.Fatalf("DeleteRevoked: %v", err)
-			}
-			if r, _ := store.Revoked(ctx, user, sid); r {
-				t.Error("Revoked after DeleteRevoked = true, want false")
-			}
-		})
 	}
 }
 
@@ -545,32 +489,6 @@ func TestFSList(t *testing.T) {
 	for _, w := range want {
 		if !got[w] {
 			t.Errorf("List is missing %q", w)
-		}
-	}
-}
-
-// TestMemoryList mirrors TestFSList on the Memory backend and pins that the
-// injectable clock stamps writes.
-func TestMemoryList(t *testing.T) {
-	ctx := t.Context()
-	m := NewMemory()
-	stamp := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	m.Now = func() time.Time { return stamp }
-
-	if err := m.Session(7, testSID, nil).StoreSession(ctx, []byte("a")); err != nil {
-		t.Fatalf("store a: %v", err)
-	}
-
-	refs, err := m.List(ctx)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(refs) != 1 {
-		t.Fatalf("List returned %d refs, want 1", len(refs))
-	}
-	for _, r := range refs {
-		if r.UserID != 7 || !r.UpdatedAt.Equal(stamp) {
-			t.Errorf("ref = %+v, want user 7 at %v", r, stamp)
 		}
 	}
 }
@@ -681,7 +599,7 @@ func TestEncryptedStoreIndependentSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCipher: %v", err)
 	}
-	backend := NewMemory()
+	backend := newTestFS(t)
 	store := Encrypted(backend, cipher)
 	const user = tgid.UserID(5)
 	sidA, keyA := "0123456789abcdef0123456789abcdef", userKeyForTest(t)

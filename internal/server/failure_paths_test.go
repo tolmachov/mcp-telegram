@@ -19,6 +19,7 @@ import (
 
 	"github.com/tolmachov/mcp-telegram/internal/authsrv"
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
+	"github.com/tolmachov/mcp-telegram/internal/sessionstore/sessionstoretest"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
@@ -57,7 +58,7 @@ func TestAssemblyStartupPreservesUnavailableSessions(t *testing.T) {
 		{name: "delete failure preserves unauthorized error", loadErr: tgclient.ErrSessionUnauthorized, deleteErr: errors.New("delete failed"), wantDelete: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store := &assemblyLoadFailure{Store: sessionstore.NewMemory(), loadErr: tc.loadErr, deleteErr: tc.deleteErr}
+			store := &assemblyLoadFailure{Store: sessionstoretest.NewMemory(), loadErr: tc.loadErr, deleteErr: tc.deleteErr}
 			s := testServer(t)
 			s.tgConfig = &tgclient.Config{APIID: 1, APIHash: "test"}
 			s.sessionStore = store
@@ -93,7 +94,7 @@ func TestAssemblyStartupClassifiesTelegramErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Inject at the startup boundary without contacting Telegram. Unlike
 			// the sentinel-only tests, these errors have gotd's native types.
-			store := &assemblyLoadFailure{Store: sessionstore.NewMemory(), loadErr: fmt.Errorf("startup: %w", tc.err)}
+			store := &assemblyLoadFailure{Store: sessionstoretest.NewMemory(), loadErr: fmt.Errorf("startup: %w", tc.err)}
 			s := testServer(t)
 			s.tgConfig = &tgclient.Config{APIID: 1, APIHash: "test"}
 			s.sessionStore = store

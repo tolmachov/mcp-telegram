@@ -155,3 +155,12 @@ func parseSessionBase(base string) (userID tgid.UserID, sid string, ok bool) {
 	}
 	return id, sidPart, true
 }
+
+// grantRecord is the persisted refresh-grant state of one authorization-code
+// family.
+type grantRecord struct {
+	SID        string    `json:"sid"`
+	Generation int64     `json:"generation"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	Revoked    bool      `json:"revoked,omitempty"`
+}

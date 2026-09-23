@@ -15,6 +15,7 @@ import (
 
 	"github.com/tolmachov/mcp-telegram/internal/authsrv"
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
+	"github.com/tolmachov/mcp-telegram/internal/sessionstore/sessionstoretest"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
@@ -41,7 +42,7 @@ func testAuth(t *testing.T, issuer string) (*authsrv.Config, sessionstore.Store)
 		IssuerURL: issuer,
 		Allow:     allow,
 		TokenKeys: []string{base64.StdEncoding.EncodeToString(key)},
-	}, sessionstore.NewMemory()
+	}, sessionstoretest.NewMemory()
 }
 
 // freePort reserves an ephemeral port and immediately releases it so

@@ -1,4 +1,6 @@
-package sessionstore
+// Package sessionstoretest provides an in-process sessionstore.Store for tests
+// in other packages.
+package sessionstoretest
 
 import (
 	"context"
@@ -7,6 +9,7 @@ import (
 
 	"github.com/gotd/td/session"
 
+	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
@@ -23,37 +26,38 @@ type memBlob struct {
 }
 
 // Memory is an in-process Store for tests. Now is the write-timestamp clock;
-// tests may override it (before use) to make List/sweep behavior deterministic.
+// tests may override it (before use) to make List/sweep behaviour deterministic.
 type Memory struct {
 	Now func() time.Time
 
 	mu      sync.Mutex
 	blobs   map[memKey]memBlob
 	revoked map[memKey]time.Time
-	grants  map[string]grantRecord
+	grants  map[string]memGrant
 }
 
-type grantRecord struct {
-	SID        string    `json:"sid"`
-	Generation int64     `json:"generation"`
-	ExpiresAt  time.Time `json:"expires_at"`
-	Revoked    bool      `json:"revoked,omitempty"`
+// memGrant is one authorization-code family's refresh-grant state.
+type memGrant struct {
+	SID        string
+	Generation int64
+	ExpiresAt  time.Time
+	Revoked    bool
 }
 
+// NewMemory returns an empty in-memory store stamped by the wall clock.
 func NewMemory() *Memory {
-	return &Memory{Now: time.Now, blobs: map[memKey]memBlob{}, revoked: map[memKey]time.Time{}, grants: map[string]grantRecord{}}
+	return &Memory{Now: time.Now, blobs: map[memKey]memBlob{}, revoked: map[memKey]time.Time{}, grants: map[string]memGrant{}}
 }
 
+// Session returns the blob storage for one session. A malformed sid fails
+// every operation with sessionstore.ErrInvalidSID.
 func (m *Memory) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {
-	if !ValidSID(sid) {
-		return brokenSession{err: errInvalidStoreSID}
-	}
 	return memorySession{store: m, key: memKey{userID, sid}}
 }
 
 func (m *Memory) Exists(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
-	if !ValidSID(sid) {
-		return false, errInvalidStoreSID
+	if !sessionstore.ValidSID(sid) {
+		return false, sessionstore.ErrInvalidSID
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -62,8 +66,8 @@ func (m *Memory) Exists(_ context.Context, userID tgid.UserID, sid string) (bool
 }
 
 func (m *Memory) Delete(_ context.Context, userID tgid.UserID, sid string) error {
-	if !ValidSID(sid) {
-		return errInvalidStoreSID
+	if !sessionstore.ValidSID(sid) {
+		return sessionstore.ErrInvalidSID
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -71,19 +75,19 @@ func (m *Memory) Delete(_ context.Context, userID tgid.UserID, sid string) error
 	return nil
 }
 
-func (m *Memory) List(_ context.Context) ([]SessionRef, error) {
+func (m *Memory) List(_ context.Context) ([]sessionstore.SessionRef, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	refs := make([]SessionRef, 0, len(m.blobs))
+	refs := make([]sessionstore.SessionRef, 0, len(m.blobs))
 	for k, b := range m.blobs {
-		refs = append(refs, SessionRef{UserID: k.userID, SID: k.sid, UpdatedAt: b.updatedAt})
+		refs = append(refs, sessionstore.SessionRef{UserID: k.userID, SID: k.sid, UpdatedAt: b.updatedAt})
 	}
 	return refs, nil
 }
 
 func (m *Memory) Revoke(_ context.Context, userID tgid.UserID, sid string) error {
-	if !ValidSID(sid) {
-		return errInvalidStoreSID
+	if !sessionstore.ValidSID(sid) {
+		return sessionstore.ErrInvalidSID
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -94,8 +98,8 @@ func (m *Memory) Revoke(_ context.Context, userID tgid.UserID, sid string) error
 }
 
 func (m *Memory) Revoked(_ context.Context, userID tgid.UserID, sid string) (bool, error) {
-	if !ValidSID(sid) {
-		return false, errInvalidStoreSID
+	if !sessionstore.ValidSID(sid) {
+		return false, sessionstore.ErrInvalidSID
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -103,19 +107,19 @@ func (m *Memory) Revoked(_ context.Context, userID tgid.UserID, sid string) (boo
 	return ok, nil
 }
 
-func (m *Memory) ListRevoked(_ context.Context) ([]SessionRef, error) {
+func (m *Memory) ListRevoked(_ context.Context) ([]sessionstore.SessionRef, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	refs := make([]SessionRef, 0, len(m.revoked))
+	refs := make([]sessionstore.SessionRef, 0, len(m.revoked))
 	for k, t := range m.revoked {
-		refs = append(refs, SessionRef{UserID: k.userID, SID: k.sid, UpdatedAt: t})
+		refs = append(refs, sessionstore.SessionRef{UserID: k.userID, SID: k.sid, UpdatedAt: t})
 	}
 	return refs, nil
 }
 
 func (m *Memory) DeleteRevoked(_ context.Context, userID tgid.UserID, sid string) error {
-	if !ValidSID(sid) {
-		return errInvalidStoreSID
+	if !sessionstore.ValidSID(sid) {
+		return sessionstore.ErrInvalidSID
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -124,41 +128,41 @@ func (m *Memory) DeleteRevoked(_ context.Context, userID tgid.UserID, sid string
 }
 
 func (m *Memory) RedeemCode(_ context.Context, family, sid string, expiresAt time.Time) (bool, error) {
-	if !ValidSID(family) || !ValidSID(sid) {
-		return false, errInvalidStoreSID
+	if !sessionstore.ValidSID(family) || !sessionstore.ValidSID(sid) {
+		return false, sessionstore.ErrInvalidSID
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, exists := m.grants[family]; exists {
 		return false, nil
 	}
-	m.grants[family] = grantRecord{SID: sid, ExpiresAt: expiresAt}
+	m.grants[family] = memGrant{SID: sid, ExpiresAt: expiresAt}
 	return true, nil
 }
 
-func (m *Memory) RotateGrant(_ context.Context, family string, generation int64) (GrantRotation, error) {
-	if !ValidSID(family) {
-		return GrantMissing, errInvalidStoreSID
+func (m *Memory) RotateGrant(_ context.Context, family string, generation int64) (sessionstore.GrantRotation, error) {
+	if !sessionstore.ValidSID(family) {
+		return sessionstore.GrantMissing, sessionstore.ErrInvalidSID
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	grant, exists := m.grants[family]
 	if !exists || !m.Now().Before(grant.ExpiresAt) {
-		return GrantMissing, nil
+		return sessionstore.GrantMissing, nil
 	}
 	if grant.Revoked || grant.Generation != generation {
 		grant.Revoked = true
 		m.grants[family] = grant
-		return GrantReplay, nil
+		return sessionstore.GrantReplay, nil
 	}
 	grant.Generation++
 	m.grants[family] = grant
-	return GrantRotated, nil
+	return sessionstore.GrantRotated, nil
 }
 
 func (m *Memory) RevokeGrant(_ context.Context, family string) error {
-	if !ValidSID(family) {
-		return errInvalidStoreSID
+	if !sessionstore.ValidSID(family) {
+		return sessionstore.ErrInvalidSID
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -187,6 +191,9 @@ type memorySession struct {
 }
 
 func (s memorySession) LoadSession(_ context.Context) ([]byte, error) {
+	if !sessionstore.ValidSID(s.key.sid) {
+		return nil, sessionstore.ErrInvalidSID
+	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	b, ok := s.store.blobs[s.key]
@@ -199,6 +206,9 @@ func (s memorySession) LoadSession(_ context.Context) ([]byte, error) {
 }
 
 func (s memorySession) StoreSession(_ context.Context, data []byte) error {
+	if !sessionstore.ValidSID(s.key.sid) {
+		return sessionstore.ErrInvalidSID
+	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	cp := make([]byte, len(data))

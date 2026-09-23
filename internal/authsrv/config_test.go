@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
+	"github.com/tolmachov/mcp-telegram/internal/sessionstore/sessionstoretest"
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
@@ -114,7 +114,7 @@ func TestConfigValidate(t *testing.T) {
 
 func TestNewCopiesConfig(t *testing.T) {
 	cfg := validConfig(t)
-	a, err := New(cfg, nil, sessionstore.NewMemory(), neverStartLogin, noInvalidate)
+	a, err := New(cfg, nil, sessionstoretest.NewMemory(), neverStartLogin, noInvalidate)
 	require.NoError(t, err)
 	t.Cleanup(a.Close)
 
@@ -128,10 +128,10 @@ func TestNewRequiresCollaborators(t *testing.T) {
 	_, err := New(validConfig(t), nil, nil, neverStartLogin, noInvalidate)
 	assert.ErrorContains(t, err, "session store")
 
-	_, err = New(validConfig(t), nil, sessionstore.NewMemory(), nil, noInvalidate)
+	_, err = New(validConfig(t), nil, sessionstoretest.NewMemory(), nil, noInvalidate)
 	assert.ErrorContains(t, err, "start-login")
 
-	_, err = New(validConfig(t), nil, sessionstore.NewMemory(), neverStartLogin, nil)
+	_, err = New(validConfig(t), nil, sessionstoretest.NewMemory(), neverStartLogin, nil)
 	assert.ErrorContains(t, err, "session invalidator")
 }
 

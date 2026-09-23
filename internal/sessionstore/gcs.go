@@ -66,14 +66,14 @@ func objectName(userID tgid.UserID, sid string) string {
 
 func (g *GCS) Session(userID tgid.UserID, sid string, _ []byte) session.Storage {
 	if !ValidSID(sid) {
-		return brokenSession{err: errInvalidStoreSID}
+		return brokenSession{err: ErrInvalidSID}
 	}
 	return gcsSession{object: g.bucket.Object(objectName(userID, sid))}
 }
 
 func (g *GCS) Exists(ctx context.Context, userID tgid.UserID, sid string) (bool, error) {
 	if !ValidSID(sid) {
-		return false, errInvalidStoreSID
+		return false, ErrInvalidSID
 	}
 	name := objectName(userID, sid)
 	attrs, err := g.bucket.Object(name).Attrs(ctx)
@@ -94,7 +94,7 @@ func (g *GCS) Exists(ctx context.Context, userID tgid.UserID, sid string) (bool,
 
 func (g *GCS) Delete(ctx context.Context, userID tgid.UserID, sid string) error {
 	if !ValidSID(sid) {
-		return errInvalidStoreSID
+		return ErrInvalidSID
 	}
 	name := objectName(userID, sid)
 	err := g.bucket.Object(name).Delete(ctx)
@@ -144,7 +144,7 @@ func (g *GCS) revokedName(userID tgid.UserID, sid string) string {
 
 func (g *GCS) Revoke(ctx context.Context, userID tgid.UserID, sid string) error {
 	if !ValidSID(sid) {
-		return errInvalidStoreSID
+		return ErrInvalidSID
 	}
 	// Write the tombstone first (source of truth), then delete the blob. A
 	// zero-byte object is enough; its presence is the signal.
@@ -161,7 +161,7 @@ func (g *GCS) Revoke(ctx context.Context, userID tgid.UserID, sid string) error 
 
 func (g *GCS) Revoked(ctx context.Context, userID tgid.UserID, sid string) (bool, error) {
 	if !ValidSID(sid) {
-		return false, errInvalidStoreSID
+		return false, ErrInvalidSID
 	}
 	name := g.revokedName(userID, sid)
 	_, err := g.bucket.Object(name).Attrs(ctx)
@@ -177,7 +177,7 @@ func (g *GCS) Revoked(ctx context.Context, userID tgid.UserID, sid string) (bool
 
 func (g *GCS) DeleteRevoked(ctx context.Context, userID tgid.UserID, sid string) error {
 	if !ValidSID(sid) {
-		return errInvalidStoreSID
+		return ErrInvalidSID
 	}
 	name := g.revokedName(userID, sid)
 	err := g.bucket.Object(name).Delete(ctx)
@@ -196,7 +196,7 @@ func isPreconditionFailed(err error) bool {
 
 func (g *GCS) RedeemCode(ctx context.Context, family, sid string, expiresAt time.Time) (bool, error) {
 	if !ValidSID(family) || !ValidSID(sid) {
-		return false, errInvalidStoreSID
+		return false, ErrInvalidSID
 	}
 	data, _ := json.Marshal(grantRecord{SID: sid, ExpiresAt: expiresAt})
 	object := g.bucket.Object(grantObjectName(family)).If(storage.Conditions{DoesNotExist: true})
@@ -254,7 +254,7 @@ func (g *GCS) storeGrantCAS(ctx context.Context, family string, generation int64
 
 func (g *GCS) RotateGrant(ctx context.Context, family string, expected int64) (GrantRotation, error) {
 	if !ValidSID(family) {
-		return GrantMissing, errInvalidStoreSID
+		return GrantMissing, ErrInvalidSID
 	}
 	for range 4 {
 		grant, generation, err := g.loadGrant(ctx, family)
@@ -284,7 +284,7 @@ func (g *GCS) RotateGrant(ctx context.Context, family string, expected int64) (G
 
 func (g *GCS) RevokeGrant(ctx context.Context, family string) error {
 	if !ValidSID(family) {
-		return errInvalidStoreSID
+		return ErrInvalidSID
 	}
 	for range 4 {
 		grant, generation, err := g.loadGrant(ctx, family)

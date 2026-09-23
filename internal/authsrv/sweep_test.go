@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
+	"github.com/tolmachov/mcp-telegram/internal/sessionstore/sessionstoretest"
 )
 
 // TestSweepOrphanSessions pins the reclamation rule: only sessions whose blob
@@ -17,7 +18,7 @@ import (
 func TestSweepOrphanSessions(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	store := sessionstore.NewMemory()
+	store := sessionstoretest.NewMemory()
 
 	const staleSID = "0123456789abcdef0123456789abcdef"
 	const freshSID = "fedcba9876543210fedcba9876543210"
@@ -54,7 +55,7 @@ func TestSweepOrphanSessions(t *testing.T) {
 func TestSweepSessionCutoffBoundary(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	store := sessionstore.NewMemory()
+	store := sessionstoretest.NewMemory()
 	store.Now = func() time.Time { return base }
 	const sid = "0123456789abcdef0123456789abcdef"
 	require.NoError(t, store.Session(allowedUser, sid, nil).StoreSession(ctx, []byte("s")))
@@ -82,7 +83,7 @@ func TestSweepSessionCutoffBoundary(t *testing.T) {
 func TestSweepExpiredTombstones(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	store := sessionstore.NewMemory()
+	store := sessionstoretest.NewMemory()
 
 	const staleSID = "0123456789abcdef0123456789abcdef"
 	const freshSID = "fedcba9876543210fedcba9876543210"
@@ -116,7 +117,7 @@ func TestSweepExpiredTombstones(t *testing.T) {
 func TestSweepTombstoneCutoffBoundary(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	store := sessionstore.NewMemory()
+	store := sessionstoretest.NewMemory()
 	store.Now = func() time.Time { return base }
 	const sid = "0123456789abcdef0123456789abcdef"
 	require.NoError(t, store.Revoke(ctx, allowedUser, sid))
@@ -143,7 +144,7 @@ func TestSweepTombstoneCutoffBoundary(t *testing.T) {
 // panicListStore panics from List, standing in for a store backend that faults
 // (or hits a bug) mid-sweep.
 type panicListStore struct {
-	*sessionstore.Memory
+	*sessionstoretest.Memory
 }
 
 func (panicListStore) List(context.Context) ([]sessionstore.SessionRef, error) {
@@ -154,7 +155,7 @@ func (panicListStore) List(context.Context) ([]sessionstore.SessionRef, error) {
 // sweep is recovered, so one bad entry (or a backend bug) cannot unwind the
 // sweeper goroutine and crash the whole auth-server process.
 func TestSweepSurvivesPanickingBackend(t *testing.T) {
-	store := panicListStore{Memory: sessionstore.NewMemory()}
+	store := panicListStore{Memory: sessionstoretest.NewMemory()}
 	a, _ := newTestServer(t, testConfig(t), store, neverStartLogin)
 	assert.NotPanics(t, func() { a.runSweep(context.Background()) },
 		"a panicking backend must be recovered, not propagated out of the sweep")
