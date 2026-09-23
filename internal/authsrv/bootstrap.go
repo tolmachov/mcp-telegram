@@ -383,7 +383,7 @@ func (a *AuthServer) finalizeLogin(ctx context.Context, w http.ResponseWriter, p
 
 	now := a.now()
 	code, err := sealBlob(a.sealer, codeBlob, codeClaims{
-		Subject:       user.ID.String(),
+		Subject:       user.ID,
 		Username:      user.Username,
 		ClientID:      sc.ClientID,
 		RedirectURI:   sc.RedirectURI,

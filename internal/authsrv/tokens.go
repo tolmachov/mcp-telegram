@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
+	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
 // Artifact lifetimes. Authorization codes are single-shot by protocol but
@@ -16,6 +17,16 @@ const (
 	accessTokenTTL = 55 * time.Minute
 )
 
+// claims is implemented by every sealed claims struct. sealBlob and openBlob
+// check valid for their issuer, so a blob that seals always opens and a blob
+// that opens is well formed: no handler re-checks the claims it gets. A
+// failure on open means a forged, corrupt or obsolete blob. issuedAt lets
+// openBlob enforce spec TTLs generically.
+type claims interface {
+	valid(issuer string) bool
+	issuedAt() int64
+}
+
 // stateClaims capture a validated /authorize request. They ride sealed
 // through the QR-login page (bound to the pending login server-side) and
 // carry everything needed to mint the authorization code once the Telegram
@@ -25,7 +36,7 @@ type stateClaims struct {
 	RedirectURI   string `json:"ru"`
 	State         string `json:"st,omitempty"`
 	CodeChallenge string `json:"cc"`
-	Resource      string `json:"res,omitempty"`
+	Resource      string `json:"res"`
 	IssuedAt      int64  `json:"iat"`
 }
 
@@ -37,40 +48,39 @@ type stateClaims struct {
 // sealed blobs. Family is the refresh-grant family, the authorization code's
 // random id.
 type grantClaims struct {
-	Resource   string `json:"res,omitempty"`
-	SessionID  string `json:"sid,omitempty"`
-	SessionKey []byte `json:"sk,omitempty"`
+	Resource   string `json:"res"`
+	SessionID  string `json:"sid"`
+	SessionKey []byte `json:"sk"`
 	Family     string `json:"fam"`
 }
 
 // valid reports whether the grant identity is well formed for issuer: the
 // session id and family are storage-safe, the session key has the minted
-// length, and the resource is issuer. A failure means a forged, corrupt or
-// obsolete blob; every token path checks it before the identity reaches
-// storage or a new token.
+// length, and the resource is issuer.
 func (g grantClaims) valid(issuer string) bool {
 	return sessionstore.ValidSID(g.SessionID) && sessionstore.ValidSID(g.Family) &&
-		sessionstore.ValidSessionKey(g.SessionKey) && normalizeResource(g.Resource) == issuer
+		sessionstore.ValidSessionKey(g.SessionKey) && g.Resource == issuer
 }
 
 // codeClaims is the sealed authorization code handed to the client's
-// redirect URI. Subject is the decimal Telegram user ID established by the
-// QR scan; /token can mint our tokens from it without any lookup.
+// redirect URI. Subject is the Telegram user ID established by the QR scan,
+// carried as a decimal string; /token can mint our tokens from it without any
+// lookup.
 type codeClaims struct {
-	Subject       string `json:"sub"`
-	Username      string `json:"un,omitempty"`
-	ClientID      string `json:"cid"`
-	RedirectURI   string `json:"ru"`
-	CodeChallenge string `json:"cc"`
+	Subject       tgid.UserID `json:"sub,string"`
+	Username      string      `json:"un,omitempty"`
+	ClientID      string      `json:"cid"`
+	RedirectURI   string      `json:"ru"`
+	CodeChallenge string      `json:"cc"`
 	grantClaims
 	IssuedAt int64 `json:"iat"`
 }
 
 // accessClaims is the payload of our bearer access token (mcp_at_...).
 type accessClaims struct {
-	Subject  string `json:"sub"`
-	Username string `json:"un,omitempty"`
-	ClientID string `json:"cid"`
+	Subject  tgid.UserID `json:"sub,string"`
+	Username string      `json:"un,omitempty"`
+	ClientID string      `json:"cid"`
 	grantClaims
 	IssuedAt  int64 `json:"iat"`
 	ExpiresAt int64 `json:"exp"`
@@ -82,9 +92,9 @@ type accessClaims struct {
 // grant's lifetime. The grant claims are likewise carried verbatim so every
 // refreshed token keeps pointing at (and decrypting) the same session object.
 type refreshClaims struct {
-	Subject  string `json:"sub"`
-	Username string `json:"un,omitempty"`
-	ClientID string `json:"cid"`
+	Subject  tgid.UserID `json:"sub,string"`
+	Username string      `json:"un,omitempty"`
+	ClientID string      `json:"cid"`
 	grantClaims
 	Generation int64 `json:"gen"`
 	IssuedAt   int64 `json:"iat"`
@@ -105,9 +115,22 @@ func expired(iat int64, ttl time.Duration, now time.Time) bool {
 	return now.After(time.Unix(iat, 0).Add(ttl))
 }
 
-// issuedAtCarrier is implemented by every claims struct so openBlob can
-// enforce spec TTLs generically.
-type issuedAtCarrier interface{ issuedAt() int64 }
+func (c stateClaims) valid(issuer string) bool { return c.Resource == issuer }
+
+func (c codeClaims) valid(issuer string) bool {
+	return c.Subject > 0 && c.grantClaims.valid(issuer)
+}
+
+func (c accessClaims) valid(issuer string) bool {
+	return c.Subject > 0 && c.grantClaims.valid(issuer)
+}
+
+// valid also requires a login that precedes this token's issue, as the
+// refresh TTL counts from it.
+func (c refreshClaims) valid(issuer string) bool {
+	return c.Subject > 0 && c.grantClaims.valid(issuer) &&
+		c.Generation >= 0 && c.LoginAt > 0 && c.LoginAt <= c.IssuedAt
+}
 
 func (c stateClaims) issuedAt() int64   { return c.IssuedAt }
 func (c codeClaims) issuedAt() int64    { return c.IssuedAt }

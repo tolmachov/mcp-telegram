@@ -67,11 +67,6 @@ func (a *AuthServer) tokenFromCode(w http.ResponseWriter, r *http.Request, form 
 		a.tokenError(w, http.StatusBadRequest, "invalid_target", "unknown resource")
 		return
 	}
-	if !cc.valid(a.cfg.IssuerURL) {
-		a.logger.Warn("authorization code rejected: malformed grant identity or foreign resource")
-		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "invalid authorization code")
-		return
-	}
 	redeemed, err := a.store.RedeemCode(r.Context(), cc.Family, now.Add(refreshTokenTTL))
 	if err != nil {
 		a.logger.Error("authorization code state write failed", "err", err)
@@ -105,12 +100,7 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "client_id mismatch")
 		return
 	}
-	userID, err := tgid.Parse(rc.Subject)
-	if err != nil || rc.Generation < 0 || !rc.valid(a.cfg.IssuerURL) {
-		a.logger.Warn("refresh rejected: malformed claims or foreign resource")
-		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "invalid refresh token")
-		return
-	}
+	userID := rc.Subject
 	if !a.cfg.userAllowed(userID) {
 		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "this Telegram account is not allowed")
 		return
@@ -161,25 +151,21 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 }
 
 type mintInput struct {
-	Subject, Username, ClientID string
-	grant                       grantClaims
-	Generation                  int64
-	LoginAt                     int64
+	Subject            tgid.UserID
+	Username, ClientID string
+	grant              grantClaims
+	Generation         int64
+	LoginAt            int64
 }
 
+// mintTokens issues an access and refresh token pair. sealBlob refuses claims
+// that would not open again, which answers 500.
 func (a *AuthServer) mintTokens(w http.ResponseWriter, in mintInput) {
 	now := a.now()
-	if in.LoginAt <= 0 || in.LoginAt > now.Unix() || in.Generation < 0 || !in.grant.valid(a.cfg.IssuerURL) {
-		a.logger.Error("mint rejected: invalid grant state", "subject", in.Subject)
-		a.tokenError(w, http.StatusInternalServerError, "server_error", "internal error")
-		return
-	}
-	grant := in.grant
-	grant.Resource = normalizeResource(grant.Resource)
 	expiresAt := now.Add(accessTokenTTL)
 	accessToken, err := sealBlob(a.sealer, accessBlob, accessClaims{
 		Subject: in.Subject, Username: in.Username, ClientID: in.ClientID,
-		grantClaims: grant, IssuedAt: now.Unix(), ExpiresAt: expiresAt.Unix(),
+		grantClaims: in.grant, IssuedAt: now.Unix(), ExpiresAt: expiresAt.Unix(),
 	})
 	if err != nil {
 		a.logger.Error("sealing access token failed", "err", err)
@@ -188,7 +174,7 @@ func (a *AuthServer) mintTokens(w http.ResponseWriter, in mintInput) {
 	}
 	refreshToken, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
 		Subject: in.Subject, Username: in.Username, ClientID: in.ClientID,
-		grantClaims: grant, Generation: in.Generation, IssuedAt: now.Unix(), LoginAt: in.LoginAt,
+		grantClaims: in.grant, Generation: in.Generation, IssuedAt: now.Unix(), LoginAt: in.LoginAt,
 	})
 	if err != nil {
 		a.logger.Error("sealing refresh token failed", "err", err)
@@ -198,6 +184,9 @@ func (a *AuthServer) mintTokens(w http.ResponseWriter, in mintInput) {
 	a.writeJSON(w, http.StatusOK, &tokenResponse{AccessToken: accessToken, TokenType: "Bearer", ExpiresIn: int64(expiresAt.Sub(now).Seconds()), RefreshToken: refreshToken})
 }
 
+// normalizeResource strips trailing slashes from a resource a client
+// presents, so "https://host/" matches the issuer. Sealed claims always carry
+// the issuer verbatim and are compared exactly.
 func normalizeResource(resource string) string { return strings.TrimRight(resource, "/") }
 
 func verifyPKCE(verifier, challenge string) bool {

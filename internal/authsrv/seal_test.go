@@ -13,6 +13,8 @@ import (
 	"pgregory.net/rapid"
 
 	"github.com/tolmachov/mcp-telegram/internal/keyring"
+	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
+	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
 func testKey(t *testing.T) string {
@@ -41,21 +43,31 @@ func testSealer(t *testing.T, keys ...string) *sealer {
 	}
 	ring, err := newKeyRing(testRing(t, keys...))
 	require.NoError(t, err)
-	return newSealer(ring, "https://issuer.example")
+	return newSealer(ring, testIssuer)
+}
+
+// testGrant returns grant claims valid for testIssuer.
+func testGrant() grantClaims {
+	return grantClaims{
+		Resource: testIssuer, SessionID: sessionstore.NewSID(),
+		SessionKey: sessionstore.NewSessionKey(), Family: sessionstore.NewSID(),
+	}
 }
 
 // TestSealerOpensGoldenBlobs pins the token formats (key ID, nonce, HKDF
-// labels, AAD, MAC input): artifacts issued by an earlier build under fixed
-// keys must still open and verify, so deployed tokens survive refactors.
+// labels, AAD, MAC input, claims JSON): artifacts issued by an earlier build
+// under fixed keys must still decrypt and verify, so deployed tokens survive
+// refactors. The golden access token's claims are not valid for any issuer, so
+// it goes through the format layer, not openBlob.
 func TestSealerOpensGoldenBlobs(t *testing.T) {
 	primary := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x22}, keyring.MasterKeyLen))
 	old := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x11}, keyring.MasterKeyLen))
 	s := testSealer(t, primary, old)
 
 	const access = "mcp_at_nyyIjJlooCsBp3QvMobM_0C5Vt8r4QfK1abHM7NMX58iSaVsMYOFbfUj_JDbRllwWC63kCahu_lNkNSiZdkQ-87p2_6gg0ibhOIUuSNj5poo9Rrk3HSKQp-koyRWiIyesPatjVTPcA"
-	ac, err := openBlob(s, accessBlob, access, time.Unix(1700000000, 0))
+	ac, err := decryptBlob(s, accessBlob, access)
 	require.NoError(t, err)
-	assert.Equal(t, accessClaims{Subject: "123456", ClientID: "cid", grantClaims: grantClaims{Family: "fam"}, IssuedAt: 1700000000, ExpiresAt: 1700003600}, ac)
+	assert.Equal(t, accessClaims{Subject: 123456, ClientID: "cid", grantClaims: grantClaims{Family: "fam"}, IssuedAt: 1700000000, ExpiresAt: 1700003600}, ac)
 
 	const clientID = "mcp_cid_eyJydSI6WyJodHRwOi8vMTI3LjAuMC4xL2NiIl0sImlhdCI6MTcwMDAwMDAwMH0.etkRJef0si75Lq9N1H3Mhqibiw15aAGtTnRLWpTAQK8"
 	var cc clientIDClaims
@@ -66,7 +78,7 @@ func TestSealerOpensGoldenBlobs(t *testing.T) {
 func TestSealOpenRoundtrip(t *testing.T) {
 	s := testSealer(t)
 	now := time.Now()
-	in := accessClaims{Subject: "123456", Username: "durov", ClientID: "cid", ExpiresAt: 42, IssuedAt: now.Unix()}
+	in := accessClaims{Subject: 123456, Username: "durov", ClientID: "cid", grantClaims: testGrant(), ExpiresAt: 42, IssuedAt: now.Unix()}
 	blob, err := sealBlob(s, accessBlob, in)
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(blob, prefixAccess))
@@ -79,7 +91,7 @@ func TestSealOpenRoundtrip(t *testing.T) {
 func TestOpenRejects(t *testing.T) {
 	s := testSealer(t, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0}, keyring.MasterKeyLen)))
 	now := time.Now()
-	blob, err := sealBlob(s, accessBlob, accessClaims{Subject: "1", IssuedAt: now.Unix()})
+	blob, err := sealBlob(s, accessBlob, accessClaims{Subject: 1, grantClaims: testGrant(), IssuedAt: now.Unix()})
 	require.NoError(t, err)
 
 	t.Run("wrong spec (prefix mismatch)", func(t *testing.T) {
@@ -89,6 +101,13 @@ func TestOpenRejects(t *testing.T) {
 	t.Run("wrong kind under stolen prefix", func(t *testing.T) {
 		raw := strings.TrimPrefix(blob, prefixAccess)
 		_, err := openBlob(s, refreshBlob, prefixRefresh+raw, now)
+		assert.ErrorIs(t, err, errInvalidBlob)
+	})
+	t.Run("invalid claims", func(t *testing.T) {
+		invalid, err := encryptBlob(s, accessBlob, accessClaims{Subject: 1, IssuedAt: now.Unix()})
+		require.NoError(t, err)
+		_, err = openBlob(s, accessBlob, invalid, now)
+		assert.ErrorIs(t, err, errInvalidClaims)
 		assert.ErrorIs(t, err, errInvalidBlob)
 	})
 	t.Run("wrong issuer", func(t *testing.T) {
@@ -117,14 +136,14 @@ func TestOpenRejects(t *testing.T) {
 		}
 	})
 	t.Run("expired blob rejected by spec TTL", func(t *testing.T) {
-		stale, err := sealBlob(s, codeBlob, codeClaims{Subject: "1", IssuedAt: now.Add(-2 * codeTTL).Unix()})
+		stale, err := sealBlob(s, codeBlob, codeClaims{Subject: 1, grantClaims: testGrant(), IssuedAt: now.Add(-2 * codeTTL).Unix()})
 		require.NoError(t, err)
 		_, err = openBlob(s, codeBlob, stale, now)
 		assert.ErrorIs(t, err, errBlobExpired)
 		assert.ErrorIs(t, err, errInvalidBlob)
 	})
 	t.Run("future issued-at beyond clock skew rejected", func(t *testing.T) {
-		future, err := sealBlob(s, accessBlob, accessClaims{Subject: "1", IssuedAt: now.Add(31 * time.Second).Unix()})
+		future, err := sealBlob(s, accessBlob, accessClaims{Subject: 1, grantClaims: testGrant(), IssuedAt: now.Add(31 * time.Second).Unix()})
 		require.NoError(t, err)
 		_, err = openBlob(s, accessBlob, future, now)
 		assert.ErrorIs(t, err, errInvalidBlob)
@@ -138,7 +157,7 @@ func TestKeyRotation(t *testing.T) {
 	now := time.Now()
 
 	oldSealer := testSealer(t, oldKey)
-	blob, err := sealBlob(oldSealer, refreshBlob, refreshClaims{Subject: "42", IssuedAt: now.Unix(), LoginAt: now.Unix()})
+	blob, err := sealBlob(oldSealer, refreshBlob, refreshClaims{Subject: 42, grantClaims: testGrant(), IssuedAt: now.Unix(), LoginAt: now.Unix()})
 	require.NoError(t, err)
 	signed, err := oldSealer.signClientID(clientIDClaims{RedirectURIs: []string{"http://localhost/cb"}})
 	require.NoError(t, err)
@@ -147,7 +166,7 @@ func TestKeyRotation(t *testing.T) {
 	rotated := testSealer(t, newKey, oldKey)
 	rc, err := openBlob(rotated, refreshBlob, blob, now)
 	require.NoError(t, err)
-	assert.Equal(t, "42", rc.Subject)
+	assert.Equal(t, tgid.UserID(42), rc.Subject)
 	var cc clientIDClaims
 	require.NoError(t, rotated.verifyClientID(signed, &cc))
 
@@ -193,25 +212,66 @@ func TestExpired(t *testing.T) {
 	assert.True(t, expired(0, time.Minute, now))
 }
 
-func TestSealOpenProperty(t *testing.T) {
+// TestEverySpecChecksItsClaims pins that each blob kind's own rules hold on
+// open, including the ones no handler checked before: the code's subject and
+// the refresh token's generation and login time.
+func TestEverySpecChecksItsClaims(t *testing.T) {
 	s := testSealer(t)
 	now := time.Now()
+	iat := now.Unix()
+	open := map[string]func() error{
+		"code without subject": func() error {
+			return openInvalid(s, codeBlob, codeClaims{grantClaims: testGrant(), IssuedAt: iat}, now)
+		},
+		"code with malformed grant": func() error {
+			return openInvalid(s, codeBlob, codeClaims{Subject: 1, grantClaims: grantClaims{Resource: testIssuer}, IssuedAt: iat}, now)
+		},
+		"refresh with negative generation": func() error {
+			return openInvalid(s, refreshBlob, refreshClaims{Subject: 1, grantClaims: testGrant(), Generation: -1, IssuedAt: iat, LoginAt: iat}, now)
+		},
+		"refresh without login time": func() error {
+			return openInvalid(s, refreshBlob, refreshClaims{Subject: 1, grantClaims: testGrant(), IssuedAt: iat}, now)
+		},
+		"refresh logged in after issue": func() error {
+			return openInvalid(s, refreshBlob, refreshClaims{Subject: 1, grantClaims: testGrant(), IssuedAt: iat, LoginAt: iat + 1}, now)
+		},
+		"state for another resource": func() error {
+			return openInvalid(s, stateBlob, stateClaims{Resource: "https://other.example", IssuedAt: iat}, now)
+		},
+	}
+	for name, run := range open {
+		assert.ErrorIs(t, run(), errInvalidClaims, name)
+	}
+}
+
+// openInvalid seals v without checking it and returns the error of opening it.
+func openInvalid[T claims](s *sealer, spec blobSpec[T], v T, now time.Time) error {
+	blob, err := encryptBlob(s, spec, v)
+	if err != nil {
+		return err
+	}
+	_, err = openBlob(s, spec, blob, now)
+	return err
+}
+
+// TestSealOpenProperty pins that the format layer round-trips any claims.
+func TestSealOpenProperty(t *testing.T) {
+	s := testSealer(t)
 	rapid.Check(t, func(t *rapid.T) {
 		in := codeClaims{
-			Subject:       rapid.String().Draw(t, "sub"),
+			Subject:       tgid.UserID(rapid.Int64().Draw(t, "sub")),
 			Username:      rapid.String().Draw(t, "un"),
 			ClientID:      rapid.String().Draw(t, "cid"),
 			RedirectURI:   rapid.String().Draw(t, "ru"),
 			CodeChallenge: rapid.String().Draw(t, "cc"),
 			grantClaims:   grantClaims{Resource: rapid.String().Draw(t, "res")},
-			// Within the code TTL so openBlob's expiry enforcement passes.
-			IssuedAt: rapid.Int64Range(now.Add(-codeTTL/2).Unix(), now.Unix()).Draw(t, "iat"),
+			IssuedAt:      rapid.Int64().Draw(t, "iat"),
 		}
-		blob, err := sealBlob(s, codeBlob, in)
+		blob, err := encryptBlob(s, codeBlob, in)
 		if err != nil {
 			t.Fatalf("seal: %v", err)
 		}
-		out, err := openBlob(s, codeBlob, blob, now)
+		out, err := decryptBlob(s, codeBlob, blob)
 		if err != nil {
 			t.Fatalf("open: %v", err)
 		}

@@ -39,18 +39,20 @@ const (
 // oracle), but SHOULD log it: the sub-reasons distinguish operational
 // incidents (key rotated away, expired) from garbage or tampering.
 var (
-	errInvalidBlob  = errors.New("invalid sealed blob")
-	errUnknownKeyID = fmt.Errorf("%w: sealed with a key not in the ring (rotated away or foreign deployment)", errInvalidBlob)
-	errBlobExpired  = fmt.Errorf("%w: expired", errInvalidBlob)
+	errInvalidBlob   = errors.New("invalid sealed blob")
+	errUnknownKeyID  = fmt.Errorf("%w: sealed with a key not in the ring (rotated away or foreign deployment)", errInvalidBlob)
+	errBlobExpired   = fmt.Errorf("%w: expired", errInvalidBlob)
+	errInvalidClaims = fmt.Errorf("%w: malformed claims or foreign resource", errInvalidBlob)
 )
 
 // blobSpec fuses everything that must agree for one artifact type: the AAD
 // kind, the public prefix, and (via the type parameter) the claims struct.
-// Mispairing kind/prefix/claims is unrepresentable at call sites. A non-zero
-// ttl makes openBlob enforce expiry itself, so "open then remember to check"
-// cannot be forgotten; specs with ttl 0 carry their expiry inside the claims
-// (access) or derive it from config (refresh) and are checked by the caller.
-type blobSpec[T issuedAtCarrier] struct {
+// Mispairing kind/prefix/claims is unrepresentable at call sites. The claims'
+// own valid method is checked on seal and open, and a non-zero ttl makes
+// openBlob enforce expiry itself, so "open then remember to check" cannot be
+// forgotten; specs with ttl 0 carry their expiry inside the claims (access)
+// or derive it from config (refresh) and are checked by the caller.
+type blobSpec[T claims] struct {
 	kind   blobKind
 	prefix string
 	ttl    time.Duration
@@ -80,8 +82,18 @@ func (s *sealer) aad(kind blobKind) []byte {
 	return []byte(s.issuer + "|" + string(kind))
 }
 
-// sealBlob JSON-encodes v and returns prefix + base64url(keyID || nonce || ciphertext).
-func sealBlob[T issuedAtCarrier](s *sealer, spec blobSpec[T], v T) (string, error) {
+// sealBlob seals v after checking it is valid for this issuer, so the server
+// never issues a blob openBlob would reject.
+func sealBlob[T claims](s *sealer, spec blobSpec[T], v T) (string, error) {
+	if !v.valid(s.issuer) {
+		return "", fmt.Errorf("sealing %s: %w", spec.kind, errInvalidClaims)
+	}
+	return encryptBlob(s, spec, v)
+}
+
+// encryptBlob JSON-encodes v and returns prefix + base64url(keyID || nonce ||
+// ciphertext). It is the format layer under sealBlob and checks nothing.
+func encryptBlob[T claims](s *sealer, spec blobSpec[T], v T) (string, error) {
 	payload, err := json.Marshal(v)
 	if err != nil {
 		return "", fmt.Errorf("encoding %s payload: %w", spec.kind, err)
@@ -98,9 +110,30 @@ func sealBlob[T issuedAtCarrier](s *sealer, spec blobSpec[T], v T) (string, erro
 	return spec.prefix + base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-// openBlob reverses sealBlob and enforces the spec's TTL. Every failure
-// unwraps to errInvalidBlob; the concrete reason is for server-side logs only.
-func openBlob[T issuedAtCarrier](s *sealer, spec blobSpec[T], blob string, now time.Time) (T, error) {
+// openBlob reverses sealBlob: it decrypts the blob, checks the claims are
+// valid for this issuer and not issued in the future, and enforces the spec's
+// TTL. Every failure unwraps to errInvalidBlob; the concrete reason is for
+// server-side logs only.
+func openBlob[T claims](s *sealer, spec blobSpec[T], blob string, now time.Time) (T, error) {
+	v, err := decryptBlob(s, spec, blob)
+	if err != nil {
+		return v, err
+	}
+	if !v.valid(s.issuer) {
+		return v, errInvalidClaims
+	}
+	if v.issuedAt() > now.Add(30*time.Second).Unix() {
+		return v, errInvalidBlob
+	}
+	if spec.ttl > 0 && expired(v.issuedAt(), spec.ttl, now) {
+		return v, errBlobExpired
+	}
+	return v, nil
+}
+
+// decryptBlob reverses encryptBlob. It is the format layer under openBlob and
+// checks nothing about the claims.
+func decryptBlob[T claims](s *sealer, spec blobSpec[T], blob string) (T, error) {
 	var v T
 	raw, ok := strings.CutPrefix(blob, spec.prefix)
 	if !ok {
@@ -124,12 +157,6 @@ func openBlob[T issuedAtCarrier](s *sealer, spec blobSpec[T], blob string, now t
 	}
 	if err := json.Unmarshal(payload, &v); err != nil {
 		return v, errInvalidBlob
-	}
-	if v.issuedAt() > now.Add(30*time.Second).Unix() {
-		return v, errInvalidBlob
-	}
-	if spec.ttl > 0 && expired(v.issuedAt(), spec.ttl, now) {
-		return v, errBlobExpired
 	}
 	return v, nil
 }

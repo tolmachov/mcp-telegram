@@ -1181,7 +1181,7 @@ func TestRefreshStoreErrorIs503(t *testing.T) {
 			require.NoError(t, err)
 			require.True(t, redeemed)
 			refresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
-				Subject: allowedUser.String(), ClientID: clientID,
+				Subject: allowedUser, ClientID: clientID,
 				grantClaims: grantClaims{Resource: a.cfg.IssuerURL, SessionID: sid, SessionKey: make([]byte, 32), Family: family},
 				IssuedAt:    now.Unix(), LoginAt: now.Unix(),
 			})
@@ -1202,8 +1202,8 @@ func TestRefreshStoreErrorIs503(t *testing.T) {
 func TestVerifierRejectsMalformedSessionID(t *testing.T) {
 	a, _ := newTestServer(t, testConfig(t), sessionstoretest.New(t), neverStartLogin)
 	now := a.now()
-	token, err := sealBlob(a.sealer, accessBlob, accessClaims{
-		Subject: allowedUser.String(), Username: "durov", ClientID: "cid",
+	token, err := encryptBlob(a.sealer, accessBlob, accessClaims{
+		Subject: allowedUser, Username: "durov", ClientID: "cid",
 		grantClaims: grantClaims{SessionID: "not-a-valid-session-id", SessionKey: []byte("k")},
 		IssuedAt:    now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
 	})
@@ -1237,8 +1237,8 @@ func TestRefreshRejectsMalformedSid(t *testing.T) {
 	a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
 	clientID := registerClient(t, ts, testRedirectURI)
 	now := a.now()
-	bad, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
-		Subject: allowedUser.String(), ClientID: clientID,
+	bad, err := encryptBlob(a.sealer, refreshBlob, refreshClaims{
+		Subject: allowedUser, ClientID: clientID,
 		grantClaims: grantClaims{SessionID: "../../etc/passwd"}, IssuedAt: now.Unix(), LoginAt: now.Unix(),
 	})
 	require.NoError(t, err)
@@ -1254,8 +1254,8 @@ func TestRevokeRejectsMalformedSid(t *testing.T) {
 	called := false
 	a, ts := newTestServerWithInvalidator(t, testConfig(t), store, neverStartLogin, func(tgid.UserID, string) { called = true })
 	now := a.now()
-	bad, err := sealBlob(a.sealer, accessBlob, accessClaims{
-		Subject: allowedUser.String(), grantClaims: grantClaims{SessionID: "../evil"},
+	bad, err := encryptBlob(a.sealer, accessBlob, accessClaims{
+		Subject: allowedUser, grantClaims: grantClaims{SessionID: "../evil"},
 		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
 	})
 	require.NoError(t, err)

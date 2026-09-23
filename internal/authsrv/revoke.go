@@ -43,7 +43,7 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		ok()
 		return
 	}
-	sub, sid, family, clientID, opened := a.openRevocationTarget(token, r.PostForm.Get("token_type_hint"))
+	userID, sid, family, clientID, opened := a.openRevocationTarget(token, r.PostForm.Get("token_type_hint"))
 	if !opened {
 		a.logger.Debug("revocation of an unrecognised token acknowledged")
 		ok()
@@ -51,12 +51,6 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	if cid := r.PostForm.Get("client_id"); cid != "" && cid != clientID {
 		a.logger.Warn("revocation ignored: client_id mismatch")
-		ok()
-		return
-	}
-	userID, err := tgid.Parse(sub)
-	if err != nil {
-		a.logger.Warn("revocation ignored: malformed subject", "err", err)
 		ok()
 		return
 	}
@@ -93,23 +87,23 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 // openRevocationTarget opens a token presented for revocation and returns its
 // subject, session id, family and client id. Per RFC 7009 §2.1 token_type_hint
 // only orders the attempts: the hinted kind is tried first, then the other
-// kind. A token with a malformed grant identity (forged or corrupt) counts as
-// unrecognised, so revocation never touches storage with it.
-func (a *AuthServer) openRevocationTarget(token, hint string) (sub, sid, family, clientID string, ok bool) {
+// kind. A token with malformed claims (forged or corrupt) does not open, so it
+// counts as unrecognised and revocation never touches storage with it.
+func (a *AuthServer) openRevocationTarget(token, hint string) (userID tgid.UserID, sid, family, clientID string, ok bool) {
 	tryRefresh := func() bool {
 		rc, err := openBlob(a.sealer, refreshBlob, token, a.now())
-		if err != nil || !rc.valid(a.cfg.IssuerURL) {
+		if err != nil {
 			return false
 		}
-		sub, sid, family, clientID = rc.Subject, rc.SessionID, rc.Family, rc.ClientID
+		userID, sid, family, clientID = rc.Subject, rc.SessionID, rc.Family, rc.ClientID
 		return true
 	}
 	tryAccess := func() bool {
 		ac, err := openBlob(a.sealer, accessBlob, token, a.now())
-		if err != nil || !ac.valid(a.cfg.IssuerURL) {
+		if err != nil {
 			return false
 		}
-		sub, sid, family, clientID = ac.Subject, ac.SessionID, ac.Family, ac.ClientID
+		userID, sid, family, clientID = ac.Subject, ac.SessionID, ac.Family, ac.ClientID
 		return true
 	}
 	if hint == "access_token" {
@@ -117,5 +111,5 @@ func (a *AuthServer) openRevocationTarget(token, hint string) (sub, sid, family,
 	} else {
 		ok = tryRefresh() || tryAccess()
 	}
-	return sub, sid, family, clientID, ok
+	return userID, sid, family, clientID, ok
 }

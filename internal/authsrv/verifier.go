@@ -36,21 +36,13 @@ func (a *AuthServer) Verifier() auth.TokenVerifier {
 		if !now.Before(time.Unix(c.ExpiresAt, 0)) {
 			return nil, fmt.Errorf("%w: token expired", auth.ErrInvalidToken)
 		}
-		userID, err := tgid.Parse(c.Subject)
-		if err != nil {
-			a.logger.Warn("access token rejected: malformed subject", "reason", err)
-			return nil, fmt.Errorf("%w: not a valid access token", auth.ErrInvalidToken)
-		}
+		userID := c.Subject
 		// Re-check the allowlist at use time: this is the enforcement point
 		// that cuts off already-issued tokens after a user is removed from
 		// the allowlist (and the server redeployed).
 		if !a.cfg.userAllowed(userID) {
 			a.logger.Warn("access token rejected: user no longer allowed", "user_id", userID)
 			return nil, fmt.Errorf("%w: user not allowed", auth.ErrInvalidToken)
-		}
-		if !c.valid(a.cfg.IssuerURL) {
-			a.logger.Warn("access token rejected: malformed grant identity or foreign resource", "user_id", userID)
-			return nil, fmt.Errorf("%w: not a valid access token", auth.ErrInvalidToken)
 		}
 		u := UserIdentity{ID: userID, Username: c.Username, SessionID: c.SessionID, SessionKey: c.SessionKey}
 		return &auth.TokenInfo{

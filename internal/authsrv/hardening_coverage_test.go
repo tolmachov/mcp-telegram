@@ -90,7 +90,6 @@ func TestAuthLifecycleAndPanicIsolationBranches(t *testing.T) {
 
 	// A background-tick panic is isolated from its loop.
 	a.runIsolated("test", func() { panic("tick panic") })
-
 }
 
 // TestPanickingAbortSparesOtherExpiredLogins pins that a LoginFlow.Abort that
@@ -403,7 +402,7 @@ func TestVerifierRejectsMalformedSubjectAndForeignResource(t *testing.T) {
 	a, _ := newTestServer(t, testConfig(t), sessionstoretest.New(t), neverStartLogin)
 	now := a.now()
 	base := accessClaims{
-		Subject: allowedUser.String(), ClientID: "client",
+		Subject: allowedUser, ClientID: "client",
 		grantClaims: grantClaims{
 			Resource:   a.cfg.IssuerURL,
 			SessionID:  "0123456789abcdef0123456789abcdef",
@@ -416,20 +415,48 @@ func TestVerifierRejectsMalformedSubjectAndForeignResource(t *testing.T) {
 		name   string
 		mutate func(*accessClaims)
 	}{
-		{name: "malformed subject", mutate: func(c *accessClaims) { c.Subject = "not-a-user" }},
+		{name: "zero subject", mutate: func(c *accessClaims) { c.Subject = 0 }},
+		{name: "negative subject", mutate: func(c *accessClaims) { c.Subject = -5 }},
 		{name: "foreign resource", mutate: func(c *accessClaims) { c.Resource = "https://other.example" }},
+		{name: "resource with trailing slash", mutate: func(c *accessClaims) { c.Resource += "/" }},
 	}
+	valid, err := sealBlob(a.sealer, accessBlob, base)
+	require.NoError(t, err)
+	_, err = a.Verifier()(t.Context(), valid, nil)
+	require.NoError(t, err, "the unmutated claims must verify")
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			claims := base
 			tt.mutate(&claims)
-			token, err := sealBlob(a.sealer, accessBlob, claims)
+			_, err := sealBlob(a.sealer, accessBlob, claims)
+			require.ErrorIs(t, err, errInvalidClaims, "the server must not seal claims it would not open")
+			token, err := encryptBlob(a.sealer, accessBlob, claims)
 			require.NoError(t, err)
 			_, err = a.Verifier()(t.Context(), token, nil)
 			assert.ErrorIs(t, err, auth.ErrInvalidToken)
 		})
 	}
+	t.Run("non-numeric subject", func(t *testing.T) {
+		forged := blobSpec[stringSubjectClaims]{kind: kindAccess, prefix: prefixAccess}
+		token, err := encryptBlob(a.sealer, forged, stringSubjectClaims{
+			Subject: "not-a-user", grantClaims: base.grantClaims, IssuedAt: base.IssuedAt, ExpiresAt: base.ExpiresAt,
+		})
+		require.NoError(t, err)
+		_, err = a.Verifier()(t.Context(), token, nil)
+		assert.ErrorIs(t, err, auth.ErrInvalidToken)
+	})
 }
+
+// stringSubjectClaims mirrors accessClaims with a free-form subject, to forge
+// a token whose "sub" is not a user ID.
+type stringSubjectClaims struct {
+	Subject string `json:"sub"`
+	grantClaims
+	IssuedAt  int64 `json:"iat"`
+	ExpiresAt int64 `json:"exp"`
+}
+
+func (c stringSubjectClaims) issuedAt() int64 { return c.IssuedAt }
 
 func TestLoginHandlersCoverConcurrentAndImpossibleStates(t *testing.T) {
 	a, _ := newTestServer(t, testConfig(t), sessionstoretest.New(t), neverStartLogin)
