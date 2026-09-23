@@ -18,6 +18,7 @@ package sessionstore
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"strings"
@@ -193,6 +194,10 @@ type GrantRecord struct {
 	Generation int64     `json:"generation"`
 	ExpiresAt  time.Time `json:"expires_at"`
 	Revoked    bool      `json:"revoked,omitempty"`
+	// WriteID is a random id every grant write stamps on the record it
+	// stores, so a write whose response was lost recognises its own record on
+	// re-read instead of taking it for a concurrent writer's.
+	WriteID string `json:"write_id,omitempty"`
 }
 
 // Expired reports whether the grant is past its expiry at now. A zero
@@ -222,14 +227,11 @@ const grantCASAttempts = 4
 // family is the authorization code's random jti, so an existing record means
 // the code was already redeemed and false is returned.
 func RedeemCode(ctx context.Context, s Store, family, sid string, expiresAt time.Time) (bool, error) {
-	err := s.StoreGrant(ctx, family, GrantRecord{SID: sid, ExpiresAt: expiresAt}, 0)
-	if errors.Is(err, ErrGrantConflict) {
-		return false, nil
-	}
+	created, err := writeGrant(ctx, s, family, GrantRecord{SID: sid, ExpiresAt: expiresAt}, 0)
 	if err != nil {
 		return false, fmt.Errorf("creating grant: %w", err)
 	}
-	return true, nil
+	return created, nil
 }
 
 // RotateGrant performs generation N -> N+1 at now. Presenting any stale
@@ -271,7 +273,8 @@ var errGrantAbsent = errors.New("sessionstore: grant not found")
 // updateGrant is the one compare-and-swap loop over a grant record: it loads
 // the record, applies change, and stores the result unless another writer got
 // there first, in which case it retries on the fresh record. change reports
-// whether anything should be written.
+// whether anything should be written; its last call is the one whose record
+// was stored.
 func updateGrant(ctx context.Context, s Store, family string, change func(GrantRecord) (GrantRecord, bool)) error {
 	for range grantCASAttempts {
 		grant, version, err := s.LoadGrant(ctx, family)
@@ -285,14 +288,34 @@ func updateGrant(ctx context.Context, s Store, family string, change func(GrantR
 		if !write {
 			return nil
 		}
-		err = s.StoreGrant(ctx, family, next, version)
-		if errors.Is(err, ErrGrantConflict) {
-			continue
-		}
+		stored, err := writeGrant(ctx, s, family, next, version)
 		if err != nil {
-			return fmt.Errorf("storing grant: %w", err)
+			return err
 		}
-		return nil
+		if stored {
+			return nil
+		}
 	}
 	return fmt.Errorf("%w: gave up after %d attempts", ErrGrantConflict, grantCASAttempts)
+}
+
+// writeGrant stores grant at version under a fresh WriteID and reports
+// whether it is now the stored record; false means another writer got there
+// first. A failed write is settled by re-reading: a write can land and still
+// report failure (a GCS retry of a request whose response was lost answers
+// 412, a transport error can follow a committed upload), and finding its own
+// WriteID in the store is what tells that apart from a lost race.
+func writeGrant(ctx context.Context, s Store, family string, grant GrantRecord, version int64) (bool, error) {
+	grant.WriteID = rand.Text()
+	err := s.StoreGrant(ctx, family, grant, version)
+	if err == nil {
+		return true, nil
+	}
+	if stored, _, loadErr := s.LoadGrant(ctx, family); loadErr == nil && stored.WriteID == grant.WriteID {
+		return true, nil
+	}
+	if errors.Is(err, ErrGrantConflict) {
+		return false, nil
+	}
+	return false, fmt.Errorf("storing grant: %w", err)
 }

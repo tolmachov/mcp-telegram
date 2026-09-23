@@ -62,6 +62,7 @@ linters:
         - marshalling
         - minimise
         - recognised
+        - recognises
         - sanitise
         - serialises
         - serialising

@@ -178,7 +178,8 @@ const writerChunkSize = 256 << 10
 // precondition — the conditional grant writes — and leaves unconditioned
 // session and tombstone writes to fail to the caller. A grant retry that
 // follows a lost success gets 412, which StoreGrant reports as
-// ErrGrantConflict and the compare-and-swap loop settles by re-reading.
+// ErrGrantConflict; writeGrant then finds its own WriteID in the stored
+// record and counts the write as done.
 func newWriter(ctx context.Context, object *storage.ObjectHandle) *storage.Writer {
 	w := object.NewWriter(ctx)
 	w.ChunkSize = writerChunkSize

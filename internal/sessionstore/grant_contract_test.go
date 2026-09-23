@@ -55,7 +55,9 @@ func (s *alwaysConflicting) StoreGrant(context.Context, string, GrantRecord, int
 }
 
 // TestUpdateGrantGivesUp pins that a grant under constant contention fails
-// with ErrGrantConflict after four rounds instead of spinning.
+// with ErrGrantConflict after four rounds instead of spinning. Each round
+// loads once to compute the write and once to check whether the refused write
+// landed after all.
 func TestUpdateGrantGivesUp(t *testing.T) {
 	ctx := t.Context()
 	inner := Encrypted(newTestFS(t), newCipher(t, testIssuer, newKey(t)))
@@ -66,6 +68,6 @@ func TestUpdateGrantGivesUp(t *testing.T) {
 	store := &alwaysConflicting{Store: inner}
 	_, err = RotateGrant(ctx, store, testGrantFamily, 0, time.Now())
 	require.ErrorIs(t, err, ErrGrantConflict)
-	assert.Equal(t, 4, store.loads)
+	assert.Equal(t, 8, store.loads)
 	assert.Equal(t, 4, store.stores)
 }

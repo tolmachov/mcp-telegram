@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -137,7 +138,8 @@ func TestGrantStoreRotateAndRevokeContract(t *testing.T) {
 			grant, version, err := store.LoadGrant(ctx, testGrantFamily)
 			require.NoError(t, err)
 			assert.NotZero(t, version)
-			assert.Equal(t, sessionstore.GrantRecord{SID: testSID, Generation: 3, ExpiresAt: grant.ExpiresAt}, grant)
+			assert.NotEmpty(t, grant.WriteID, "every grant write stamps its record")
+			assert.Equal(t, sessionstore.GrantRecord{SID: testSID, Generation: 3, ExpiresAt: grant.ExpiresAt, WriteID: grant.WriteID}, grant)
 
 			require.NoError(t, sessionstore.RevokeGrant(ctx, store, testGrantFamily))
 			result, err := sessionstore.RotateGrant(ctx, store, testGrantFamily, 3, now)
@@ -149,6 +151,62 @@ func TestGrantStoreRotateAndRevokeContract(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, sessionstore.GrantMissing, result)
 		})
+	}
+}
+
+// lostResponse lands the first grant write it is given, then reports that
+// write as failed with err, the way a write whose response never arrived does.
+type lostResponse struct {
+	sessionstore.Store
+	err  error
+	lost bool
+}
+
+func (s *lostResponse) StoreGrant(ctx context.Context, family string, grant sessionstore.GrantRecord, version int64) error {
+	if err := s.Store.StoreGrant(ctx, family, grant, version); err != nil {
+		return err //nolint:wrapcheck // passes the backend's outcome through unchanged
+	}
+	if s.lost {
+		return nil
+	}
+	s.lost = true
+	return s.err
+}
+
+// TestGrantWriteSurvivesLostResponse pins that a grant write which landed but
+// reported failure — a GCS retry answered 412 after the first attempt
+// committed, or a transport error after the commit — counts as done, instead
+// of reading the advanced record as someone else's and revoking the family.
+func TestGrantWriteSurvivesLostResponse(t *testing.T) {
+	failures := map[string]error{
+		"conflict":  sessionstore.ErrGrantConflict,
+		"transport": errors.New("connection reset by peer"),
+	}
+	for failure, failErr := range failures {
+		for name, store := range stores(t) {
+			t.Run(failure+"/"+name, func(t *testing.T) {
+				ctx := t.Context()
+				now := time.Now()
+				lost := func() sessionstore.Store { return &lostResponse{Store: store, err: failErr} }
+
+				created, err := sessionstore.RedeemCode(ctx, lost(), testGrantFamily, testSID, now.Add(time.Hour))
+				require.NoError(t, err)
+				assert.True(t, created, "the code's own landed write is a redemption, not a reuse")
+
+				result, err := sessionstore.RotateGrant(ctx, lost(), testGrantFamily, 0, now)
+				require.NoError(t, err)
+				assert.Equal(t, sessionstore.GrantRotated, result, "the rotation's own landed write is not a replay")
+
+				result, err = sessionstore.RotateGrant(ctx, store, testGrantFamily, 1, now)
+				require.NoError(t, err)
+				assert.Equal(t, sessionstore.GrantRotated, result, "the family must survive the lost response")
+
+				require.NoError(t, sessionstore.RevokeGrant(ctx, lost(), testGrantFamily))
+				result, err = sessionstore.RotateGrant(ctx, store, testGrantFamily, 2, now)
+				require.NoError(t, err)
+				assert.Equal(t, sessionstore.GrantReplay, result, "a revocation whose response was lost still revokes")
+			})
+		}
 	}
 }
 
