@@ -13,6 +13,7 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/messages"
 	"github.com/tolmachov/mcp-telegram/internal/presentation"
 	telegramfake "github.com/tolmachov/mcp-telegram/internal/testutil/telegram"
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 func TestPaginationThroughMCP(t *testing.T) {
@@ -110,7 +111,7 @@ func TestPaginationThroughMCP(t *testing.T) {
 					return nil
 				}), page(false), page(true),
 			)
-			provider := messages.NewProviderWithRate(tg.NewClient(inv), 100_000)
+			provider := messages.NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
 			cs := connectToolClient(t, func(s *mcp.Server) {
 				switch name {
 				case "GetMessages":

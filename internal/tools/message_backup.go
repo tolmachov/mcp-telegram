@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
@@ -32,55 +31,6 @@ var telegramLaunchDate = time.Date(2013, 8, 14, 0, 0, 0, 0, time.UTC)
 // (Path-sandbox helpers — DefaultBackupDir, sanitizeFilename, isPathAllowed,
 // resolveSymlinks — live in backup_path.go.)
 
-// getChatName returns the display name of the chat and whether the name was
-// successfully resolved. Falls back to "chat_%d" when the Telegram API call
-// fails; resolved=false lets callers surface the fallback to users. Failures
-// are logged at Warn so operators can diagnose unexpected fallback filenames.
-func getChatName(ctx context.Context, raw *tg.Client, peer tg.InputPeerClass, chatID int64) (name string, resolved bool) {
-	fallback := fmt.Sprintf("chat_%d", chatID)
-
-	var (
-		chats tg.MessagesChatsClass
-		err   error
-	)
-	switch p := peer.(type) {
-	case *tg.InputPeerUser:
-		users, err := raw.UsersGetUsers(ctx, []tg.InputUserClass{
-			&tg.InputUser{UserID: p.UserID, AccessHash: p.AccessHash},
-		})
-		if err != nil {
-			slog.Warn("getChatName: user lookup failed; using fallback chat_<id>", "chat_id", chatID, "err", err)
-			return fallback, false
-		}
-		for _, u := range users {
-			if user, ok := u.(*tg.User); ok {
-				return tgdata.ChatInfoFromUser(user).Name, true
-			}
-		}
-		slog.Debug("getChatName: no user entity in API response", "chat_id", chatID)
-		return fallback, false
-	case *tg.InputPeerChat:
-		chats, err = raw.MessagesGetChats(ctx, []int64{p.ChatID})
-	case *tg.InputPeerChannel:
-		chats, err = raw.ChannelsGetChannels(ctx, []tg.InputChannelClass{
-			&tg.InputChannel{ChannelID: p.ChannelID, AccessHash: p.AccessHash},
-		})
-	default:
-		return fallback, false
-	}
-	if err != nil {
-		slog.Warn("getChatName: chat lookup failed; using fallback chat_<id>", "chat_id", chatID, "err", err)
-		return fallback, false
-	}
-	for _, c := range chats.GetChats() {
-		if info, ok := tgdata.ChatInfoFromChat(c); ok {
-			return info.Name, true
-		}
-	}
-	slog.Debug("getChatName: no chat entity in API response", "chat_id", chatID)
-	return fallback, false
-}
-
 // partialNote describes the partial messages a failed save was carrying, or
 // is empty when the fetch completed.
 func partialNote(count int, partialErr error) string {
@@ -92,15 +42,15 @@ func partialNote(count int, partialErr error) string {
 
 // MessageBackupHandler handles the BackupMessages tool.
 type MessageBackupHandler struct {
-	client       *tg.Client
+	peers        *tgclient.Resolver
 	provider     *messages.Provider
 	allowedPaths []string
 }
 
 // NewMessageBackupHandler creates a new MessageBackupHandler.
-func NewMessageBackupHandler(client *tg.Client, provider *messages.Provider, allowedPaths []string) *MessageBackupHandler {
+func NewMessageBackupHandler(peers *tgclient.Resolver, provider *messages.Provider, allowedPaths []string) *MessageBackupHandler {
 	return &MessageBackupHandler{
-		client:       client,
+		peers:        peers,
 		provider:     provider,
 		allowedPaths: allowedPaths,
 	}
@@ -345,9 +295,10 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 		count = 1000
 	}
 
-	// Resolve the peer for chat name lookup.
+	// Resolve the peer up front: it validates the chat before any file work
+	// and carries the entity that names the backup file.
 	op := fmt.Sprintf("back up chat %d", in.ChatID)
-	peer, err := tgclient.ResolvePeer(ctx, h.client, in.ChatID)
+	peer, err := h.peers.Resolve(ctx, in.ChatID)
 	if err != nil {
 		return nil, nil, failed(op, err)
 	}
@@ -361,14 +312,7 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 		if len(allowedPaths) == 0 {
 			return errResult("no allowed paths configured for backup. Pass --allowed-paths / MCP_TELEGRAM_ALLOWED_PATHS."), nil, nil
 		}
-		chatName, nameOK := getChatName(ctx, h.client, peer, in.ChatID)
-		if !nameOK {
-			mcpLog(ctx, req.Session, logLevelWarning, "BackupMessages", map[string]any{
-				"action":  "chat_name_fallback",
-				"chat_id": in.ChatID,
-				"note":    "could not resolve chat display name; filename uses numeric ID",
-			})
-		}
+		chatName := tgdata.ChatInfoFromPeer(peer).Name
 		filename := fmt.Sprintf("%s-%s.txt", sanitizeFilename(chatName), time.Now().Format("2006-01-02_15-04-05"))
 		targetPath = filepath.Join(allowedPaths[0], filename)
 	}

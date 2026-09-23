@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	telegramfake "github.com/tolmachov/mcp-telegram/internal/testutil/telegram"
+
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 func resolveMessageChannelStep(t *testing.T, id, hash int64) telegramfake.InvokeFunc {
@@ -52,7 +54,7 @@ func TestFetchRefreshesStalePeerExactlyOnce(t *testing.T) {
 			return nil
 		}),
 	)
-	p := NewProviderWithRate(tg.NewClient(inv), 100_000)
+	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
 
 	got, err := p.Fetch(t.Context(), channelID, FetchOptions{Limit: 10})
 	require.NoError(t, err)
@@ -84,7 +86,7 @@ func TestFetchAllContinuesServiceOnlyPageAndPreservesPartialResult(t *testing.T)
 				return nil
 			}),
 		)
-		p := NewProviderWithRate(tg.NewClient(inv), 100_000)
+		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
 		got, err := p.FetchAll(t.Context(), channelID, FetchOptions{Limit: 1}, nil)
 		require.NoError(t, err)
 		require.Len(t, got.Messages, 1)
@@ -104,7 +106,7 @@ func TestFetchAllContinuesServiceOnlyPageAndPreservesPartialResult(t *testing.T)
 				return tgerr.New(500, "INTERNAL")
 			}),
 		)
-		p := NewProviderWithRate(tg.NewClient(inv), 100_000)
+		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
 		got, err := p.FetchAll(t.Context(), channelID, FetchOptions{Limit: 1}, nil)
 		require.Error(t, err)
 		require.NotNil(t, got)
@@ -128,7 +130,7 @@ func TestFetchContextIncludesAnchorWhenAfterZero(t *testing.T) {
 			return nil
 		}),
 	)
-	p := NewProviderWithRate(tg.NewClient(inv), 100_000)
+	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
 	got, err := p.FetchContext(t.Context(), channelID, 20, 1, 0)
 	require.NoError(t, err)
 	require.Len(t, got.Messages, 2)
@@ -146,7 +148,7 @@ func TestFetchScheduledIsUnpaginated(t *testing.T) {
 			return nil
 		}),
 	)
-	p := NewProviderWithRate(tg.NewClient(inv), 100_000)
+	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
 	got, err := p.FetchScheduled(t.Context(), channelID)
 	require.NoError(t, err)
 	require.Len(t, got.Messages, 1)
@@ -172,7 +174,7 @@ func TestSearchAndRepliesBuildTelegramRequests(t *testing.T) {
 				return nil
 			}),
 		)
-		p := NewProviderWithRate(tg.NewClient(inv), 100_000)
+		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
 		got, err := p.Search(t.Context(), channelID, SearchOptions{Query: "needle", MinDate: from, MaxDate: to})
 		require.NoError(t, err)
 		require.Len(t, got.Messages, 1)
@@ -191,7 +193,7 @@ func TestSearchAndRepliesBuildTelegramRequests(t *testing.T) {
 				return nil
 			}),
 		)
-		p := NewProviderWithRate(tg.NewClient(inv), 100_000)
+		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
 		got, err := p.FetchReplies(t.Context(), channelID, 55, FetchOptions{Limit: 20})
 		require.NoError(t, err)
 		require.Len(t, got.Messages, 1)
@@ -211,7 +213,7 @@ func TestSearchGlobalAndForumTopicsBuildTelegramRequests(t *testing.T) {
 				return nil
 			}),
 		)
-		p := NewProviderWithRate(tg.NewClient(inv), 100_000)
+		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
 		got, err := p.SearchGlobal(t.Context(), GlobalSearchOptions{Query: "needle", Limit: 10})
 		require.NoError(t, err)
 		require.Len(t, got.Messages, 1)
@@ -234,7 +236,7 @@ func TestSearchGlobalAndForumTopicsBuildTelegramRequests(t *testing.T) {
 				return nil
 			}),
 		)
-		p := NewProviderWithRate(tg.NewClient(inv), 100_000)
+		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
 		got, err := p.FetchForumTopics(t.Context(), channelID, "release", 25, 0, 0, 0, 0)
 		require.NoError(t, err)
 		require.Len(t, got.Topics, 1)
@@ -244,7 +246,7 @@ func TestSearchGlobalAndForumTopicsBuildTelegramRequests(t *testing.T) {
 }
 
 func TestProviderPublicValidation(t *testing.T) {
-	p := NewProviderWithRate(nil, 1)
+	p := NewProvider(tgclient.NewResolver(nil, 1))
 	_, err := p.Search(t.Context(), 1, SearchOptions{})
 	assert.ErrorContains(t, err, "search query is required")
 	_, err = p.Search(t.Context(), 1, SearchOptions{
@@ -277,7 +279,7 @@ func TestFetchUnreadUsesDialogReadBoundary(t *testing.T) {
 			return nil
 		}),
 	)
-	p := NewProviderWithRate(tg.NewClient(inv), 100_000)
+	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
 	got, err := p.Fetch(t.Context(), channelID, FetchOptions{UnreadOnly: true})
 	require.NoError(t, err)
 	require.Len(t, got.Messages, 1)
@@ -316,7 +318,7 @@ func TestForumPaginationCountsOnlyThroughLiveAnchor(t *testing.T) {
 			return nil
 		}),
 	)
-	p := NewProviderWithRate(tg.NewClient(inv), 100_000)
+	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
 	offset := ForumTopicsOffset{}
 	var ids []int
 	for range 3 {
@@ -344,7 +346,7 @@ func TestForumPaginationRejectsRepeatedAnchorEvenAtReportedEnd(t *testing.T) {
 			return nil
 		}),
 	)
-	p := NewProviderWithRate(tg.NewClient(inv), 100_000)
+	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
 	got, err := p.FetchForumTopics(t.Context(), 85, "", 2, 7, 70, 100, 1)
 	require.ErrorContains(t, err, "did not advance")
 	assert.Nil(t, got)
@@ -382,7 +384,7 @@ func TestFetchPreservesMediaAndMetadataForBackup(t *testing.T) {
 			return nil
 		}),
 	)
-	p := NewProviderWithRate(tg.NewClient(inv), 100_000)
+	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
 	got, err := p.Fetch(t.Context(), 86, DefaultFetchOptions())
 	require.NoError(t, err)
 	require.Len(t, got.Messages, 3)

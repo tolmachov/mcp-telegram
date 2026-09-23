@@ -34,11 +34,12 @@ const deleteRightsHint = "Deleting other members' messages needs admin rights wi
 // MessageDeleteHandler handles the DeleteMessages tool.
 type MessageDeleteHandler struct {
 	client *tg.Client
+	peers  *tgclient.Resolver
 }
 
 // NewMessageDeleteHandler creates a new MessageDeleteHandler.
-func NewMessageDeleteHandler(client *tg.Client) *MessageDeleteHandler {
-	return &MessageDeleteHandler{client: client}
+func NewMessageDeleteHandler(peers *tgclient.Resolver) *MessageDeleteHandler {
+	return &MessageDeleteHandler{client: peers.Client(), peers: peers}
 }
 
 // DeleteMessagesInput is the input for the DeleteMessages tool.
@@ -109,19 +110,14 @@ func (h *MessageDeleteHandler) handle(ctx context.Context, _ *mcp.CallToolReques
 		return errRes, nil, nil
 	}
 
-	peer, err := tgclient.ResolvePeer(ctx, h.client, in.ChatID)
+	statuses, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, nil, nil, func(p tgclient.Peer) (map[int]string, error) {
+		if scheduled {
+			return h.deleteScheduled(ctx, p.Input, ids)
+		}
+		return h.deleteRegular(ctx, p.Input, ids)
+	})
 	if err != nil {
 		return nil, nil, failed(fmt.Sprintf("delete messages in chat %d", in.ChatID), err)
-	}
-
-	var statuses map[int]string
-	if scheduled {
-		statuses, err = h.deleteScheduled(ctx, peer, ids)
-	} else {
-		statuses, err = h.deleteRegular(ctx, peer, ids)
-	}
-	if err != nil {
-		return nil, nil, err
 	}
 
 	res := &DeleteMessagesResult{Status: statusCompleted, ChatID: in.ChatID}
@@ -151,7 +147,7 @@ func (h *MessageDeleteHandler) handle(ctx context.Context, _ *mcp.CallToolReques
 func (h *MessageDeleteHandler) deleteRegular(ctx context.Context, peer tg.InputPeerClass, ids []int) (map[int]string, error) {
 	msgs, chats, err := h.getRegular(ctx, peer, ids)
 	if err != nil {
-		return nil, failed("read the messages to delete", err)
+		return nil, fmt.Errorf("reading the messages to delete: %w", err)
 	}
 	canDeleteOthers := canDeleteOthersMessages(peer, chats)
 
@@ -186,7 +182,7 @@ func (h *MessageDeleteHandler) deleteRegular(ctx context.Context, peer tg.InputP
 
 	left, _, err := h.getRegular(ctx, peer, toDelete)
 	if err != nil {
-		return nil, failedHint("re-read the messages after Telegram accepted the deletion", err, "Check with GetMessages which of them are gone.")
+		return nil, withHint(fmt.Errorf("re-reading the messages after Telegram accepted the deletion: %w", err), "Check with GetMessages which of them are gone.")
 	}
 	markVerified(statuses, toDelete, left)
 	return statuses, nil
@@ -197,7 +193,7 @@ func (h *MessageDeleteHandler) deleteRegular(ctx context.Context, peer tg.InputP
 func (h *MessageDeleteHandler) deleteScheduled(ctx context.Context, peer tg.InputPeerClass, ids []int) (map[int]string, error) {
 	msgs, err := h.getScheduled(ctx, peer, ids)
 	if err != nil {
-		return nil, failed("read the scheduled messages to delete", err)
+		return nil, fmt.Errorf("reading the scheduled messages to delete: %w", err)
 	}
 	statuses := make(map[int]string, len(ids))
 	var toDelete []int
@@ -218,7 +214,7 @@ func (h *MessageDeleteHandler) deleteScheduled(ctx context.Context, peer tg.Inpu
 
 	left, err := h.getScheduled(ctx, peer, toDelete)
 	if err != nil {
-		return nil, failedHint("re-read the schedule queue after Telegram accepted the cancellation", err, "Check with GetMessages include_scheduled=true which of them are gone.")
+		return nil, withHint(fmt.Errorf("re-reading the schedule queue after Telegram accepted the cancellation: %w", err), "Check with GetMessages include_scheduled=true which of them are gone.")
 	}
 	markVerified(statuses, toDelete, left)
 	return statuses, nil
@@ -334,7 +330,7 @@ func canDeleteOthersMessages(peer tg.InputPeerClass, chats []tg.ChatClass) bool 
 // adding the rights hint when Telegram refused on permission grounds.
 func deleteFailure(err error) error {
 	if tgerr.Is(err, "MESSAGE_DELETE_FORBIDDEN", "CHAT_ADMIN_REQUIRED") {
-		return failedHint("delete messages", err, deleteRightsHint)
+		return withHint(err, deleteRightsHint)
 	}
-	return failed("delete messages", err)
+	return err
 }

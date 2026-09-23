@@ -51,12 +51,12 @@ type FolderSkippedChat struct {
 // non-empty reason string so batch callers can skip that one and keep going. A
 // systemic failure (rate limit, cancellation, dead session) is returned as a
 // non-nil fatal error so callers abort the whole batch instead of masking it.
-func resolvePeerRef(ctx context.Context, client *tg.Client, ref string) (peer tg.InputPeerClass, reason string, fatal error) {
+func resolvePeerRef(ctx context.Context, peers *tgclient.Resolver, ref string) (peer tg.InputPeerClass, reason string, fatal error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return nil, "empty chat reference", nil
 	}
-	peer, err := resolveChatRef(ctx, client, ref)
+	peer, err := resolveChatRef(ctx, peers, ref)
 	switch {
 	case err == nil:
 		return peer, "", nil
@@ -75,12 +75,12 @@ func resolvePeerRef(ctx context.Context, client *tg.Client, ref string) (peer tg
 // caller surfaces it rather than masking it as a successful no-op. Peers that
 // resolve to a form without a bare ID are skipped, so every returned peer is
 // safe to identify with peerBareID.
-func resolveChatRefs(ctx context.Context, client *tg.Client, refs []string) (peers []tg.InputPeerClass, skipped []FolderSkippedChat, fatal error) {
+func resolveChatRefs(ctx context.Context, resolver *tgclient.Resolver, refs []string) (peers []tg.InputPeerClass, skipped []FolderSkippedChat, fatal error) {
 	for _, ref := range refs {
 		if err := ctx.Err(); err != nil {
 			return nil, skipped, err
 		}
-		peer, reason, ferr := resolvePeerRef(ctx, client, ref)
+		peer, reason, ferr := resolvePeerRef(ctx, resolver, ref)
 		if ferr != nil {
 			return nil, skipped, ferr
 		}
@@ -281,11 +281,12 @@ func (h *GetFoldersHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, 
 // CreateFolderHandler handles the CreateFolder tool.
 type CreateFolderHandler struct {
 	client *tg.Client
+	peers  *tgclient.Resolver
 }
 
 // NewCreateFolderHandler creates a new CreateFolderHandler.
-func NewCreateFolderHandler(client *tg.Client) *CreateFolderHandler {
-	return &CreateFolderHandler{client: client}
+func NewCreateFolderHandler(peers *tgclient.Resolver) *CreateFolderHandler {
+	return &CreateFolderHandler{client: peers.Client(), peers: peers}
 }
 
 // CreateFolderInput is the input for the CreateFolder tool.
@@ -344,7 +345,7 @@ func (h *CreateFolderHandler) handle(ctx context.Context, _ *mcp.CallToolRequest
 	}
 	id := nextFolderID(folderIDs(filters))
 
-	peers, skipped, ferr := resolveChatRefs(ctx, h.client, in.Chats)
+	peers, skipped, ferr := resolveChatRefs(ctx, h.peers, in.Chats)
 	if ferr != nil {
 		return nil, nil, failed(op, ferr)
 	}
@@ -452,12 +453,12 @@ func (h *DeleteFolderHandler) handle(ctx context.Context, _ *mcp.CallToolRequest
 
 // AddChatsToFolderHandler handles the AddChatsToFolder tool.
 type AddChatsToFolderHandler struct {
-	client *tg.Client
+	peers *tgclient.Resolver
 }
 
 // NewAddChatsToFolderHandler creates a new AddChatsToFolderHandler.
-func NewAddChatsToFolderHandler(client *tg.Client) *AddChatsToFolderHandler {
-	return &AddChatsToFolderHandler{client: client}
+func NewAddChatsToFolderHandler(peers *tgclient.Resolver) *AddChatsToFolderHandler {
+	return &AddChatsToFolderHandler{peers: peers}
 }
 
 // AddChatsToFolderInput is the input for the AddChatsToFolder tool.
@@ -491,7 +492,7 @@ func (h *AddChatsToFolderHandler) handle(ctx context.Context, _ *mcp.CallToolReq
 		return errResult("chats is required: one or more @usernames or numeric chat IDs to add."), nil, nil
 	}
 
-	added, present, skipped, err := editFolderChats(ctx, h.client, in.FolderID, in.Chats, "added to", applyAdditions)
+	added, present, skipped, err := editFolderChats(ctx, h.peers, in.FolderID, in.Chats, "added to", applyAdditions)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -504,12 +505,12 @@ func (h *AddChatsToFolderHandler) handle(ctx context.Context, _ *mcp.CallToolReq
 
 // RemoveChatsFromFolderHandler handles the RemoveChatsFromFolder tool.
 type RemoveChatsFromFolderHandler struct {
-	client *tg.Client
+	peers *tgclient.Resolver
 }
 
 // NewRemoveChatsFromFolderHandler creates a new RemoveChatsFromFolderHandler.
-func NewRemoveChatsFromFolderHandler(client *tg.Client) *RemoveChatsFromFolderHandler {
-	return &RemoveChatsFromFolderHandler{client: client}
+func NewRemoveChatsFromFolderHandler(peers *tgclient.Resolver) *RemoveChatsFromFolderHandler {
+	return &RemoveChatsFromFolderHandler{peers: peers}
 }
 
 // RemoveChatsFromFolderInput is the input for the RemoveChatsFromFolder tool.
@@ -543,7 +544,7 @@ func (h *RemoveChatsFromFolderHandler) handle(ctx context.Context, _ *mcp.CallTo
 		return errResult("chats is required: one or more @usernames or numeric chat IDs to remove."), nil, nil
 	}
 
-	removed, absent, skipped, err := editFolderChats(ctx, h.client, in.FolderID, in.Chats, "removed from", applyRemovals)
+	removed, absent, skipped, err := editFolderChats(ctx, h.peers, in.FolderID, in.Chats, "removed from", applyRemovals)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -556,24 +557,24 @@ func (h *RemoveChatsFromFolderHandler) handle(ctx context.Context, _ *mcp.CallTo
 // words the error for a call where every reference was skipped.
 func editFolderChats(
 	ctx context.Context,
-	client *tg.Client,
+	peers *tgclient.Resolver,
 	folderID int,
 	chats []string,
 	verb string,
 	apply func(*tg.DialogFilter, []tg.InputPeerClass) (changed, unchanged []int64),
 ) (changed, unchanged []int64, skipped []FolderSkippedChat, err error) {
 	op := fmt.Sprintf("update folder %d", folderID)
-	filter, err := findEditableFolder(ctx, client, folderID, op)
+	filter, err := findEditableFolder(ctx, peers.Client(), folderID, op)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	peers, skipped, ferr := resolveChatRefs(ctx, client, chats)
+	resolved, skipped, ferr := resolveChatRefs(ctx, peers, chats)
 	if ferr != nil {
 		return nil, nil, nil, failed(op, ferr)
 	}
 
-	changed, unchanged = apply(filter, peers)
+	changed, unchanged = apply(filter, resolved)
 	if len(changed) == 0 {
 		// Nothing changed. Distinguish a benign no-op (every chat already in the
 		// wanted state) from a total failure (every reference skipped) so the
@@ -590,7 +591,7 @@ func editFolderChats(
 
 	updReq := &tg.MessagesUpdateDialogFilterRequest{ID: folderID}
 	updReq.SetFilter(filter)
-	if _, err := client.MessagesUpdateDialogFilter(ctx, updReq); err != nil {
+	if _, err := peers.Client().MessagesUpdateDialogFilter(ctx, updReq); err != nil {
 		return nil, nil, nil, failed(op, err)
 	}
 	return changed, unchanged, skipped, nil

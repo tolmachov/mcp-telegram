@@ -6,6 +6,8 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 func TestChatInfoFromUser(t *testing.T) {
@@ -29,4 +31,10 @@ func TestChatInfoFromChat(t *testing.T) {
 
 	_, ok = ChatInfoFromChat(&tg.ChatForbidden{ID: 5})
 	assert.False(t, ok)
+}
+
+func TestChatInfoFromPeer(t *testing.T) {
+	assert.Equal(t, "@alice", ChatInfoFromPeer(tgclient.Peer{User: &tg.User{ID: 1, FirstName: "Alice", Username: "alice"}}).Name)
+	assert.Equal(t, ChatInfo{ID: 3, Type: ChatTypeSupergroup, Name: "Talk"},
+		ChatInfoFromPeer(tgclient.Peer{Chat: &tg.Channel{ID: 3, Title: "Talk", Megagroup: true}}))
 }

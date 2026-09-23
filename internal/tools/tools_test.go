@@ -50,6 +50,11 @@ func TestFailureText(t *testing.T) {
 		assert.Equal(t, "Failed to get forum topics: boom. Check the chat is a forum.", failureText("GetForumTopics", err))
 	})
 
+	t.Run("inner hint surfaces under the outer op", func(t *testing.T) {
+		err := failed("delete messages in chat 5", fmt.Errorf("deleting: %w", withHint(errors.New("forbidden"), "Ask an admin.")))
+		assert.Equal(t, "Failed to delete messages in chat 5: deleting: forbidden. Ask an admin.", failureText("DeleteMessages", err))
+	})
+
 	t.Run("plain error names the tool", func(t *testing.T) {
 		assert.Equal(t, "Failed to run GetMe: boom.", failureText("GetMe", errors.New("boom")))
 	})
@@ -133,7 +138,7 @@ func TestEveryToolHandlerRegisters(t *testing.T) {
 		NewMeGetHandler(nil),
 		NewChatsGetHandler(cache),
 		NewChatsSearchHandler(nil, cache),
-		NewChatInfoGetHandler(nil),
+		NewChatInfoGetHandler(tgclient.NewResolver(nil, 100_000)),
 		NewMessagesGetHandler(nil),
 		NewMessagesSearchHandler(nil),
 		NewMessagesSearchGlobalHandler(nil),
@@ -145,20 +150,20 @@ func TestEveryToolHandlerRegisters(t *testing.T) {
 		NewChatSummarizeHandler(nil, summarize.Config{}),
 		NewMediaGetHandler(nil, 1),
 		NewGetFoldersHandler(nil),
-		NewMessageBackupHandler(nil, nil, []string{t.TempDir()}),
-		NewMessageSendHandler(nil),
-		NewMessageReadHandler(nil),
-		NewMessageEditHandler(nil),
-		NewMessageDeleteHandler(nil),
-		NewMessageForwardHandler(nil),
-		NewSetReactionHandler(nil),
-		NewJoinChatHandler(nil),
-		NewLeaveChatHandler(nil),
-		NewChatMuteHandler(nil),
-		NewCreateFolderHandler(nil),
+		NewMessageBackupHandler(tgclient.NewResolver(nil, 100_000), nil, []string{t.TempDir()}),
+		NewMessageSendHandler(tgclient.NewResolver(nil, 100_000)),
+		NewMessageReadHandler(tgclient.NewResolver(nil, 100_000)),
+		NewMessageEditHandler(tgclient.NewResolver(nil, 100_000)),
+		NewMessageDeleteHandler(tgclient.NewResolver(nil, 100_000)),
+		NewMessageForwardHandler(tgclient.NewResolver(nil, 100_000)),
+		NewSetReactionHandler(tgclient.NewResolver(nil, 100_000)),
+		NewJoinChatHandler(tgclient.NewResolver(nil, 100_000)),
+		NewLeaveChatHandler(tgclient.NewResolver(nil, 100_000)),
+		NewChatMuteHandler(tgclient.NewResolver(nil, 100_000)),
+		NewCreateFolderHandler(tgclient.NewResolver(nil, 100_000)),
 		NewDeleteFolderHandler(nil),
-		NewAddChatsToFolderHandler(nil),
-		NewRemoveChatsFromFolderHandler(nil),
+		NewAddChatsToFolderHandler(tgclient.NewResolver(nil, 100_000)),
+		NewRemoveChatsFromFolderHandler(tgclient.NewResolver(nil, 100_000)),
 	}
 	RegisterTools(server, handlers)
 }

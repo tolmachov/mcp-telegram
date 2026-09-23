@@ -12,6 +12,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // callTool registers tools on a fresh server, connects an in-memory client,
@@ -129,14 +131,18 @@ func TestConfirmGatedToolsFailClosed(t *testing.T) {
 		args     map[string]any
 	}{
 		{
-			name:     "DeleteMessages",
-			register: func(s *mcp.Server, c *tg.Client) { NewMessageDeleteHandler(c).Register(s) },
-			args:     map[string]any{"chat_id": testBasicChatID, "message_ids": []string{"559966"}},
+			name: "DeleteMessages",
+			register: func(s *mcp.Server, c *tg.Client) {
+				NewMessageDeleteHandler(tgclient.NewResolver(c, 100_000)).Register(s)
+			},
+			args: map[string]any{"chat_id": testBasicChatID, "message_ids": []string{"559966"}},
 		},
 		{
-			name:     "ForwardMessage",
-			register: func(s *mcp.Server, c *tg.Client) { NewMessageForwardHandler(c).Register(s) },
-			args:     map[string]any{"from_chat_id": -11, "message_id": "5", "to_chat_id": -12},
+			name: "ForwardMessage",
+			register: func(s *mcp.Server, c *tg.Client) {
+				NewMessageForwardHandler(tgclient.NewResolver(c, 100_000)).Register(s)
+			},
+			args: map[string]any{"from_chat_id": -11, "message_id": "5", "to_chat_id": -12},
 		},
 		{
 			name:     "DeleteFolder",
@@ -145,7 +151,7 @@ func TestConfirmGatedToolsFailClosed(t *testing.T) {
 		},
 		{
 			name:     "LeaveChat",
-			register: func(s *mcp.Server, c *tg.Client) { NewLeaveChatHandler(c).Register(s) },
+			register: func(s *mcp.Server, c *tg.Client) { NewLeaveChatHandler(tgclient.NewResolver(c, 100_000)).Register(s) },
 			args:     map[string]any{"chat": "@channel"},
 		},
 	}

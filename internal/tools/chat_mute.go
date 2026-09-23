@@ -20,11 +20,12 @@ const muteForeverUntil = 2147483647
 // ChatMuteHandler handles the SetChatMute tool.
 type ChatMuteHandler struct {
 	client *tg.Client
+	peers  *tgclient.Resolver
 }
 
 // NewChatMuteHandler creates a new ChatMuteHandler.
-func NewChatMuteHandler(client *tg.Client) *ChatMuteHandler {
-	return &ChatMuteHandler{client: client}
+func NewChatMuteHandler(peers *tgclient.Resolver) *ChatMuteHandler {
+	return &ChatMuteHandler{client: peers.Client(), peers: peers}
 }
 
 // SetChatMuteInput is the input for the SetChatMute tool. Muted selects
@@ -66,43 +67,28 @@ func (h *ChatMuteHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in
 		return errResult("duration_seconds must be >= 0 (0 = mute forever)"), nil, nil
 	}
 
-	peer, err := tgclient.ResolvePeer(ctx, h.client, in.ChatID)
-	if err != nil {
-		return nil, nil, failed(fmt.Sprintf("change notification settings of chat %d", in.ChatID), err)
-	}
-
-	notifyPeer, ok := toInputNotifyPeer(peer)
-	if !ok {
-		return errResult("Unsupported peer type"), nil, nil
-	}
-
-	// Unmute path: mute_until=0 restores default settings.
-	if !in.Muted {
-		if _, err := h.client.AccountUpdateNotifySettings(ctx, &tg.AccountUpdateNotifySettingsRequest{
-			Peer:     notifyPeer,
-			Settings: tg.InputPeerNotifySettings{MuteUntil: 0},
-		}); err != nil {
-			return nil, nil, failed(fmt.Sprintf("unmute chat %d", in.ChatID), err)
-		}
-		return nil, &SetChatMuteResult{
-			Status: "unmuted",
-			ChatID: in.ChatID,
-		}, nil
-	}
-
-	// Mute path: either forever (sentinel) or a relative duration from now.
+	// mute_until=0 restores default settings (unmute); otherwise mute either
+	// forever (sentinel) or for a relative duration from now.
 	var muteUntil int
-	if in.DurationSeconds == 0 {
+	op := fmt.Sprintf("mute chat %d", in.ChatID)
+	switch {
+	case !in.Muted:
+		op = fmt.Sprintf("unmute chat %d", in.ChatID)
+	case in.DurationSeconds == 0:
 		muteUntil = muteForeverUntil
-	} else {
+	default:
 		muteUntil = int(time.Now().Unix()) + in.DurationSeconds
 	}
-
-	if _, err := h.client.AccountUpdateNotifySettings(ctx, &tg.AccountUpdateNotifySettingsRequest{
-		Peer:     notifyPeer,
-		Settings: tg.InputPeerNotifySettings{MuteUntil: muteUntil},
+	if _, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, nil, nil, func(p tgclient.Peer) (bool, error) {
+		return h.client.AccountUpdateNotifySettings(ctx, &tg.AccountUpdateNotifySettingsRequest{
+			Peer:     &tg.InputNotifyPeer{Peer: p.Input},
+			Settings: tg.InputPeerNotifySettings{MuteUntil: muteUntil},
+		})
 	}); err != nil {
-		return nil, nil, failed(fmt.Sprintf("mute chat %d", in.ChatID), err)
+		return nil, nil, failed(op, err)
+	}
+	if !in.Muted {
+		return nil, &SetChatMuteResult{Status: "unmuted", ChatID: in.ChatID}, nil
 	}
 
 	res := &SetChatMuteResult{
@@ -116,25 +102,4 @@ func (h *ChatMuteHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in
 		res.MutedUntil = formatUnixRFC3339(muteUntil)
 	}
 	return nil, res, nil
-}
-
-// toInputNotifyPeer converts an InputPeer into the InputNotifyPeer wrapper
-// expected by AccountUpdateNotifySettings.
-func toInputNotifyPeer(peer tg.InputPeerClass) (tg.InputNotifyPeerClass, bool) {
-	switch p := peer.(type) {
-	case *tg.InputPeerUser:
-		return &tg.InputNotifyPeer{
-			Peer: &tg.InputPeerUser{UserID: p.UserID, AccessHash: p.AccessHash},
-		}, true
-	case *tg.InputPeerChat:
-		return &tg.InputNotifyPeer{
-			Peer: &tg.InputPeerChat{ChatID: p.ChatID},
-		}, true
-	case *tg.InputPeerChannel:
-		return &tg.InputNotifyPeer{
-			Peer: &tg.InputPeerChannel{ChannelID: p.ChannelID, AccessHash: p.AccessHash},
-		}, true
-	default:
-		return nil, false
-	}
 }

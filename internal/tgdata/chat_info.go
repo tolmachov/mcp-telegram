@@ -10,13 +10,14 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
-// GetChatInfo retrieves detailed information about a specific chat
-func GetChatInfo(ctx context.Context, client *tg.Client, chatID int64) (*ChatFullInfo, error) {
-	peer, err := tgclient.ResolvePeer(ctx, client, chatID)
-	if err != nil {
-		return nil, fmt.Errorf("resolving peer: %w", err)
-	}
+// GetChatInfo retrieves detailed information about a specific chat.
+func GetChatInfo(ctx context.Context, peers *tgclient.Resolver, chatID int64) (*ChatFullInfo, error) {
+	return tgclient.WithPeer(ctx, peers, chatID, nil, nil, func(p tgclient.Peer) (*ChatFullInfo, error) {
+		return chatInfo(ctx, peers.Client(), chatID, p.Input)
+	})
+}
 
+func chatInfo(ctx context.Context, client *tg.Client, chatID int64, peer tg.InputPeerClass) (*ChatFullInfo, error) {
 	var info ChatFullInfo
 	now := time.Now().Unix()
 

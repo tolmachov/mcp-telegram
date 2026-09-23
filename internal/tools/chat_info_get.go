@@ -3,20 +3,20 @@ package tools
 import (
 	"context"
 
-	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
 // ChatInfoGetHandler handles the GetChatInfo tool.
 type ChatInfoGetHandler struct {
-	client *tg.Client
+	peers *tgclient.Resolver
 }
 
 // NewChatInfoGetHandler creates a new ChatInfoGetHandler.
-func NewChatInfoGetHandler(client *tg.Client) *ChatInfoGetHandler {
-	return &ChatInfoGetHandler{client: client}
+func NewChatInfoGetHandler(peers *tgclient.Resolver) *ChatInfoGetHandler {
+	return &ChatInfoGetHandler{peers: peers}
 }
 
 // GetChatInfoInput is the input for the GetChatInfo tool.
@@ -38,7 +38,7 @@ func (h *ChatInfoGetHandler) handle(ctx context.Context, _ *mcp.CallToolRequest,
 		return errChatIDRequired(), nil, nil
 	}
 
-	info, err := tgdata.GetChatInfo(ctx, h.client, in.ChatID)
+	info, err := tgdata.GetChatInfo(ctx, h.peers, in.ChatID)
 	if err != nil {
 		return nil, nil, failed("get chat info", err)
 	}

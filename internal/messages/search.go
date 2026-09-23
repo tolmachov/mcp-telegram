@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
+
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // Search runs a substring search inside a single chat via messages.search.
@@ -28,8 +30,8 @@ func (p *Provider) Search(ctx context.Context, chatID int64, opts SearchOptions)
 	if opts.FromSenderID != 0 {
 		related = append(related, opts.FromSenderID)
 	}
-	return withPeerRetry(ctx, p, chatID, related, nil, func(peer tg.InputPeerClass) (*FetchResult, error) {
-		return p.searchWithPeer(ctx, chatID, peer, opts)
+	return tgclient.WithPeer(ctx, p.peers, chatID, related, nil, func(peer tgclient.Peer) (*FetchResult, error) {
+		return p.searchWithPeer(ctx, chatID, peer.Input, opts)
 	})
 }
 
@@ -66,7 +68,7 @@ func (p *Provider) searchWithPeer(ctx context.Context, chatID int64, peer tg.Inp
 		req.SetTopMsgID(opts.TopMsgID)
 	}
 	if opts.FromSenderID != 0 {
-		fromPeer, err := p.peers.Resolve(ctx, p.client, opts.FromSenderID)
+		fromPeer, err := p.peers.Resolve(ctx, opts.FromSenderID)
 		if err != nil {
 			return nil, fmt.Errorf("resolving from_sender %d: %w", opts.FromSenderID, err)
 		}
@@ -74,13 +76,13 @@ func (p *Provider) searchWithPeer(ctx context.Context, chatID int64, peer tg.Inp
 		// Basic-chat peers (legacy InputPeerChat) are silently dropped by
 		// Telegram, turning what the caller framed as a sender filter into
 		// an un-filtered search. Reject loudly instead.
-		if _, isBasicChat := fromPeer.(*tg.InputPeerChat); isBasicChat {
+		if _, isBasicChat := fromPeer.Input.(*tg.InputPeerChat); isBasicChat {
 			return nil, fmt.Errorf("from_sender_id %d resolves to a legacy basic chat, which cannot be used as a message sender; pass a user ID or a channel/supergroup ID", opts.FromSenderID)
 		}
-		req.SetFromID(fromPeer)
+		req.SetFromID(fromPeer.Input)
 	}
 
-	if err := p.wait(ctx); err != nil {
+	if err := p.peers.Wait(ctx); err != nil {
 		return nil, err
 	}
 
@@ -130,7 +132,7 @@ func (p *Provider) SearchGlobal(ctx context.Context, opts GlobalSearchOptions) (
 		req.MaxDate = telegramBefore(opts.MaxDate)
 	}
 
-	if err := p.wait(ctx); err != nil {
+	if err := p.peers.Wait(ctx); err != nil {
 		return nil, err
 	}
 

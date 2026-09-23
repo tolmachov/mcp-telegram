@@ -13,7 +13,7 @@ import (
 )
 
 // fakeInvoker dispatches MTProto calls to per-request-type handlers so
-// ResolvePeer can be exercised without a network connection. A nil handler
+// resolvePeer can be exercised without a network connection. A nil handler
 // behaves as "not found" for that peer type, so each test sets only the
 // handlers it cares about.
 type fakeInvoker struct {
@@ -79,9 +79,10 @@ func TestResolvePeer(t *testing.T) {
 			},
 		})
 
-		peer, err := ResolvePeer(ctx, client, 1555091578)
+		peer, err := resolvePeer(ctx, client, 1555091578)
 		require.NoError(t, err)
-		assert.Equal(t, &tg.InputPeerChannel{ChannelID: 1555091578, AccessHash: 999}, peer)
+		assert.Equal(t, &tg.InputPeerChannel{ChannelID: 1555091578, AccessHash: 999}, peer.Input)
+		assert.Equal(t, &tg.Channel{ID: 1555091578, AccessHash: 999}, peer.Chat)
 		assert.Equal(t, int64(1555091578), gotChannelID, "bare id must reach channels.getChannels unchanged")
 	})
 
@@ -93,7 +94,7 @@ func TestResolvePeer(t *testing.T) {
 			},
 		})
 		for _, id := range []int64{-1001555091578, -500, 0} {
-			_, err := ResolvePeer(ctx, client, id)
+			_, err := resolvePeer(ctx, client, id)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "positive ID", "id %d", id)
 		}
@@ -110,9 +111,10 @@ func TestResolvePeer(t *testing.T) {
 			},
 		})
 
-		peer, err := ResolvePeer(ctx, client, 42)
+		peer, err := resolvePeer(ctx, client, 42)
 		require.NoError(t, err)
-		assert.Equal(t, &tg.InputPeerUser{UserID: 42, AccessHash: 111}, peer)
+		assert.Equal(t, &tg.InputPeerUser{UserID: 42, AccessHash: 111}, peer.Input)
+		assert.Equal(t, &tg.User{ID: 42, AccessHash: 111}, peer.User)
 	})
 
 	t.Run("basic chat id resolves as chat after channel falls through", func(t *testing.T) {
@@ -123,15 +125,16 @@ func TestResolvePeer(t *testing.T) {
 			},
 		})
 
-		peer, err := ResolvePeer(ctx, client, 500)
+		peer, err := resolvePeer(ctx, client, 500)
 		require.NoError(t, err)
-		assert.Equal(t, &tg.InputPeerChat{ChatID: 500}, peer)
+		assert.Equal(t, &tg.InputPeerChat{ChatID: 500}, peer.Input)
+		assert.Equal(t, &tg.Chat{ID: 500}, peer.Chat)
 	})
 
 	t.Run("unknown id returns a friendly error without MTProto codes", func(t *testing.T) {
 		client := tg.NewClient(fakeInvoker{}) // all probes report not-found
 
-		_, err := ResolvePeer(ctx, client, 12345)
+		_, err := resolvePeer(ctx, client, 12345)
 		require.Error(t, err)
 		assert.NotContains(t, err.Error(), "-100")
 		assert.NotContains(t, err.Error(), "CHANNEL_INVALID")
@@ -149,7 +152,7 @@ func TestResolvePeer(t *testing.T) {
 			},
 		})
 
-		_, err := ResolvePeer(ctx, client, 1906423222)
+		_, err := resolvePeer(ctx, client, 1906423222)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "ResolveUsername")
 		assert.NotContains(t, err.Error(), "CHAT_ID_INVALID", "raw MTProto code must not leak")
@@ -166,7 +169,7 @@ func TestResolvePeer(t *testing.T) {
 			},
 		})
 
-		_, err := ResolvePeer(ctx, client, 42)
+		_, err := resolvePeer(ctx, client, 42)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "access_hash")
 	})
@@ -186,7 +189,7 @@ func TestResolvePeer(t *testing.T) {
 			},
 		})
 
-		_, err := ResolvePeer(ctx, client, 1555091578)
+		_, err := resolvePeer(ctx, client, 1555091578)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "FLOOD_WAIT", "the real error must surface, not a misattributed one")
 	})
@@ -202,7 +205,7 @@ func TestResolvePeer(t *testing.T) {
 			},
 		})
 
-		_, err := ResolvePeer(ctx, client, 1555091578)
+		_, err := resolvePeer(ctx, client, 1555091578)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "ResolveUsername")
 		assert.NotContains(t, err.Error(), "CHANNEL_PRIVATE", "raw MTProto code must not leak")

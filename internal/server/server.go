@@ -305,13 +305,16 @@ func (s *Server) buildAssembly(client *telegram.Client) (*assembly, error) {
 		CompletionHandler: completion.Handler(chatsCache),
 	}
 
-	// The RPS ceiling is configurable (--tg-rate-limit-rps) so
-	// operators can loosen it when tools bottleneck on the shared limiter.
-	// Raising it too high will trip Telegram's FLOOD_WAIT which the tgclient
-	// waiter wrapper reports via onFloodWait.
-	msgProvider := messages.NewProviderWithRate(api, s.opts.TGRateLimitRPS)
+	// One peer resolver — cache, stale-hash retry and rate limiter — shared by
+	// every tool, resource and the message provider. The RPS ceiling is
+	// configurable (--tg-rate-limit-rps) so operators can loosen it when tools
+	// bottleneck on the shared limiter. Raising it too high will trip
+	// Telegram's FLOOD_WAIT which the tgclient waiter wrapper reports via
+	// onFloodWait.
+	peers := tgclient.NewResolver(api, s.opts.TGRateLimitRPS)
+	msgProvider := messages.NewProvider(peers)
 
-	fullHandlers, researchHandlers := s.buildHandlers(api, msgProvider, chatsCache)
+	fullHandlers, researchHandlers := s.buildHandlers(api, peers, msgProvider, chatsCache)
 
 	// Resources, chat template, and prompts are read-only and identical across
 	// variants, so register them on every inner server through one closure.
@@ -320,7 +323,7 @@ func (s *Server) buildAssembly(client *telegram.Client) (*assembly, error) {
 			resources.NewMeHandler(api),
 			resources.NewChatsHandler(chatsCache),
 		})
-		resources.RegisterChatTemplate(srv, api)
+		resources.RegisterChatTemplate(srv, peers)
 		prompts.Register(srv)
 	}
 
@@ -409,12 +412,12 @@ func (s *Server) runHappy(ctx context.Context, client *telegram.Client) error {
 // The remaining 13 mutate state (send, edit, delete, forward, react,
 // mark-as-read, join/leave, mute, and the four folder edits) and are excluded
 // from the research variant.
-func (s *Server) buildHandlers(api *tg.Client, msgProvider *messages.Provider, chatsCache *tgdata.ChatsCache) (full, research []tools.Handler) {
+func (s *Server) buildHandlers(api *tg.Client, peers *tgclient.Resolver, msgProvider *messages.Provider, chatsCache *tgdata.ChatsCache) (full, research []tools.Handler) {
 	research = []tools.Handler{
 		tools.NewMeGetHandler(api),
 		tools.NewChatsGetHandler(chatsCache),
 		tools.NewChatsSearchHandler(api, chatsCache),
-		tools.NewChatInfoGetHandler(api),
+		tools.NewChatInfoGetHandler(peers),
 		tools.NewMessagesGetHandler(msgProvider),
 		tools.NewMessagesSearchHandler(msgProvider),
 		tools.NewMessagesSearchGlobalHandler(msgProvider),
@@ -428,24 +431,24 @@ func (s *Server) buildHandlers(api *tg.Client, msgProvider *messages.Provider, c
 		tools.NewGetFoldersHandler(api),
 	}
 	mutating := []tools.Handler{
-		tools.NewMessageSendHandler(api),
-		tools.NewMessageReadHandler(api),
-		tools.NewMessageEditHandler(api),
-		tools.NewMessageDeleteHandler(api),
-		tools.NewMessageForwardHandler(api),
-		tools.NewSetReactionHandler(api),
-		tools.NewJoinChatHandler(api),
-		tools.NewLeaveChatHandler(api),
-		tools.NewChatMuteHandler(api),
-		tools.NewCreateFolderHandler(api),
+		tools.NewMessageSendHandler(peers),
+		tools.NewMessageReadHandler(peers),
+		tools.NewMessageEditHandler(peers),
+		tools.NewMessageDeleteHandler(peers),
+		tools.NewMessageForwardHandler(peers),
+		tools.NewSetReactionHandler(peers),
+		tools.NewJoinChatHandler(peers),
+		tools.NewLeaveChatHandler(peers),
+		tools.NewChatMuteHandler(peers),
+		tools.NewCreateFolderHandler(peers),
 		tools.NewDeleteFolderHandler(api),
-		tools.NewAddChatsToFolderHandler(api),
-		tools.NewRemoveChatsFromFolderHandler(api),
+		tools.NewAddChatsToFolderHandler(peers),
+		tools.NewRemoveChatsFromFolderHandler(peers),
 	}
 	full = make([]tools.Handler, 0, len(research)+len(mutating)+1)
 	full = append(full, research...)
 	if s.opts.Transport != TransportHTTP {
-		full = append(full, tools.NewMessageBackupHandler(api, msgProvider, s.opts.AllowedPaths))
+		full = append(full, tools.NewMessageBackupHandler(peers, msgProvider, s.opts.AllowedPaths))
 	}
 	full = append(full, mutating...)
 	return full, research

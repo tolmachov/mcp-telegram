@@ -8,14 +8,25 @@ import (
 	"github.com/gotd/td/tgerr"
 )
 
-// peerProbe attempts to resolve a bare MTProto ID as one specific peer type.
-// It returns (peer, nil) on a match, (nil, nil) when the ID is definitively not
-// that type (the caller falls through to the next probe), or (nil, err) for a
-// genuine/terminal failure that must abort the whole sweep.
-type peerProbe func(ctx context.Context, client *tg.Client, id int64) (tg.InputPeerClass, error)
+// Peer is a chat ID resolved to the InputPeer MTProto calls take, together
+// with the entity it was resolved from: User for a user, otherwise Chat — a
+// *tg.Chat for a basic group or a *tg.Channel for a channel or supergroup.
+type Peer struct {
+	Input tg.InputPeerClass
+	User  *tg.User
+	Chat  tg.ChatClass
+}
 
-// ResolvePeer resolves a chat ID to an InputPeerClass, fetching the access_hash
-// MTProto requires for users and channels.
+// peerProbe attempts to resolve a bare MTProto ID as one specific peer type.
+// It returns (peer, true, nil) on a match, (_, false, nil) when the ID is
+// definitively not that type (the caller falls through to the next probe), or
+// (_, false, err) for a genuine/terminal failure that must abort the whole
+// sweep.
+type peerProbe func(ctx context.Context, client *tg.Client, id int64) (Peer, bool, error)
+
+// resolvePeer resolves a chat ID to a Peer, fetching the access_hash MTProto
+// requires for users and channels. Resolver is its only caller: it caches the
+// result and owns the stale-hash retry.
 //
 // The canonical input is a bare MTProto ID: the positive number the official
 // Telegram clients display (e.g. 1555091578 for a channel). Users, basic chats
@@ -28,17 +39,17 @@ type peerProbe func(ctx context.Context, client *tg.Client, id int64) (tg.InputP
 //
 // Non-positive IDs, including Bot-API "-100…" marked IDs, are rejected. Every
 // failure is a *PeerError.
-func ResolvePeer(ctx context.Context, client *tg.Client, dialogID int64) (tg.InputPeerClass, error) {
+func resolvePeer(ctx context.Context, client *tg.Client, dialogID int64) (Peer, error) {
 	peer, err := probePeer(ctx, client, dialogID)
 	if err != nil {
-		return nil, &PeerError{ID: dialogID, Err: err}
+		return Peer{}, &PeerError{ID: dialogID, Err: err}
 	}
 	return peer, nil
 }
 
-func probePeer(ctx context.Context, client *tg.Client, dialogID int64) (tg.InputPeerClass, error) {
+func probePeer(ctx context.Context, client *tg.Client, dialogID int64) (Peer, error) {
 	if dialogID <= 0 {
-		return nil, fmt.Errorf("chat id %d is invalid: pass the positive ID Telegram clients show (Bot-API \"-100…\" IDs are not accepted)", dialogID)
+		return Peer{}, fmt.Errorf("chat id %d is invalid: pass the positive ID Telegram clients show (Bot-API \"-100…\" IDs are not accepted)", dialogID)
 	}
 
 	// Probe each candidate type in order. A match returns immediately; a
@@ -47,38 +58,38 @@ func probePeer(ctx context.Context, client *tg.Client, dialogID int64) (tg.Input
 	// live calls into a rate-limit window); only a (nil, nil) "not this type"
 	// result falls through to the next probe.
 	for _, probe := range []peerProbe{resolveUser, resolveChannel, resolveBasicChat} {
-		peer, err := probe(ctx, client, dialogID)
+		peer, ok, err := probe(ctx, client, dialogID)
 		if err != nil {
-			return nil, err
+			return Peer{}, err
 		}
-		if peer != nil {
+		if ok {
 			return peer, nil
 		}
 	}
-	return nil, fmt.Errorf("id %d is not a reachable user, chat, or channel; verify it with ResolveUsername (by @handle) or SearchChats (by title)", dialogID)
+	return Peer{}, fmt.Errorf("id %d is not a reachable user, chat, or channel; verify it with ResolveUsername (by @handle) or SearchChats (by title)", dialogID)
 }
 
-// resolveUser probes users.getUsers. It returns (nil, nil) when the ID is not a
+// resolveUser probes users.getUsers. It reports no match when the ID is not a
 // reachable user, so the caller falls through to the next type. A known user
 // without an access_hash is a hard error that aborts the sweep: no shared dialog
 // means no valid InputPeerUser can be built, and the specific diagnostic is more
 // useful than the generic "not reachable" message the fall-through would yield.
-func resolveUser(ctx context.Context, client *tg.Client, id int64) (tg.InputPeerClass, error) {
+func resolveUser(ctx context.Context, client *tg.Client, id int64) (Peer, bool, error) {
 	users, err := client.UsersGetUsers(ctx, []tg.InputUserClass{&tg.InputUser{UserID: id}})
 	if err != nil {
-		return nil, fmt.Errorf("resolving user %d: %w", id, err)
+		return Peer{}, false, fmt.Errorf("resolving user %d: %w", id, err)
 	}
 	if len(users) == 0 {
-		return nil, nil
+		return Peer{}, false, nil
 	}
 	user, ok := users[0].(*tg.User)
 	if !ok {
-		return nil, nil // *tg.UserEmpty — not a user
+		return Peer{}, false, nil // *tg.UserEmpty — not a user
 	}
 	if user.AccessHash == 0 {
-		return nil, fmt.Errorf("user %d resolved but missing access_hash; no shared dialog", id)
+		return Peer{}, false, fmt.Errorf("user %d resolved but missing access_hash; no shared dialog", id)
 	}
-	return &tg.InputPeerUser{UserID: id, AccessHash: user.AccessHash}, nil
+	return Peer{Input: &tg.InputPeerUser{UserID: id, AccessHash: user.AccessHash}, User: user}, true, nil
 }
 
 // resolveChannel probes channels.getChannels.
@@ -89,32 +100,32 @@ func resolveUser(ctx context.Context, client *tg.Client, id int64) (tg.InputPeer
 // this session can't access (e.g. a public channel it hasn't joined, exactly the
 // access_hash==0 case here), so it returns an actionable error pointing at
 // ResolveUsername instead of pretending the channel doesn't exist.
-func resolveChannel(ctx context.Context, client *tg.Client, id int64) (tg.InputPeerClass, error) {
+func resolveChannel(ctx context.Context, client *tg.Client, id int64) (Peer, bool, error) {
 	channels, err := client.ChannelsGetChannels(ctx, []tg.InputChannelClass{&tg.InputChannel{ChannelID: id}})
 	if err != nil {
 		switch {
 		case tgerr.Is(err, "CHANNEL_INVALID", "PEER_ID_INVALID"):
-			return nil, nil
+			return Peer{}, false, nil
 		case tgerr.Is(err, "CHANNEL_PRIVATE"):
-			return nil, fmt.Errorf("channel %d exists but is inaccessible from this account; resolve it by @username with ResolveUsername (and join it if needed)", id)
+			return Peer{}, false, fmt.Errorf("channel %d exists but is inaccessible from this account; resolve it by @username with ResolveUsername (and join it if needed)", id)
 		default:
-			return nil, fmt.Errorf("resolving channel %d: %w", id, err)
+			return Peer{}, false, fmt.Errorf("resolving channel %d: %w", id, err)
 		}
 	}
 	chats, ok := channels.(*tg.MessagesChats)
 	if !ok || len(chats.Chats) == 0 {
-		return nil, nil
+		return Peer{}, false, nil
 	}
 	channel, ok := chats.Chats[0].(*tg.Channel)
 	if !ok {
-		return nil, nil
+		return Peer{}, false, nil
 	}
-	return &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash}, nil
+	return Peer{Input: &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash}, Chat: channel}, true, nil
 }
 
 // resolveBasicChat probes messages.getChats for a legacy basic group, which
-// needs no access_hash. Returns (nil, nil) when the ID is not a basic chat.
-func resolveBasicChat(ctx context.Context, client *tg.Client, id int64) (tg.InputPeerClass, error) {
+// needs no access_hash. Reports no match when the ID is not a basic chat.
+func resolveBasicChat(ctx context.Context, client *tg.Client, id int64) (Peer, bool, error) {
 	chats, err := client.MessagesGetChats(ctx, []int64{id})
 	if err != nil {
 		// CHAT_ID_INVALID / PEER_ID_INVALID mean "not a basic chat" — fall
@@ -125,16 +136,17 @@ func resolveBasicChat(ctx context.Context, client *tg.Client, id int64) (tg.Inpu
 		// access_hash: it isn't a basic chat, so the actionable answer is
 		// "resolve it by @username", not "CHAT_ID_INVALID".
 		if tgerr.Is(err, "CHAT_ID_INVALID", "PEER_ID_INVALID") {
-			return nil, nil
+			return Peer{}, false, nil
 		}
-		return nil, fmt.Errorf("resolving basic chat %d: %w", id, err)
+		return Peer{}, false, fmt.Errorf("resolving basic chat %d: %w", id, err)
 	}
 	msgChats, ok := chats.(*tg.MessagesChats)
 	if !ok || len(msgChats.Chats) == 0 {
-		return nil, nil
+		return Peer{}, false, nil
 	}
-	if _, ok := msgChats.Chats[0].(*tg.Chat); !ok {
-		return nil, nil // chatEmpty / not a basic chat
+	chat, ok := msgChats.Chats[0].(*tg.Chat)
+	if !ok {
+		return Peer{}, false, nil // chatEmpty / not a basic chat
 	}
-	return &tg.InputPeerChat{ChatID: id}, nil
+	return Peer{Input: &tg.InputPeerChat{ChatID: id}, Chat: chat}, true, nil
 }

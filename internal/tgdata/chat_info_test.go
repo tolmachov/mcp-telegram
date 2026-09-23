@@ -9,10 +9,12 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // chatInfoInvoker fakes the MTProto calls GetChatInfo makes for a channel:
-// ResolvePeer's probes (users.getUsers → channels.getChannels), then
+// the resolver's probes (users.getUsers → channels.getChannels), then
 // channels.getFullChannel and messages.getPeerDialogs. Only fullChannelChats is
 // configurable — the entity list channels.getFullChannel echoes back; every
 // other call returns a fixed benign "not found"/empty value.
@@ -57,7 +59,7 @@ func TestGetChatInfoMatchesEntityByID(t *testing.T) {
 		},
 	})
 
-	info, err := GetChatInfo(context.Background(), client, 555)
+	info, err := GetChatInfo(context.Background(), tgclient.NewResolver(client, 1), 555)
 	require.NoError(t, err)
 	assert.Equal(t, int64(555), info.ID, "ID must come from the resolved peer, not the echoed argument")
 	assert.Equal(t, "Correct Supergroup", info.Name, "must match the entity by ID, not take the first")
@@ -77,7 +79,7 @@ func TestGetChatInfoNoMatchingEntityErrors(t *testing.T) {
 		},
 	})
 
-	_, err := GetChatInfo(context.Background(), client, 555)
+	_, err := GetChatInfo(context.Background(), tgclient.NewResolver(client, 1), 555)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "555")
 }

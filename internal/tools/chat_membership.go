@@ -36,21 +36,23 @@ const (
 // JoinChatHandler handles the JoinChat tool.
 type JoinChatHandler struct {
 	client *tg.Client
+	peers  *tgclient.Resolver
 }
 
 // NewJoinChatHandler creates a new JoinChatHandler.
-func NewJoinChatHandler(client *tg.Client) *JoinChatHandler {
-	return &JoinChatHandler{client: client}
+func NewJoinChatHandler(peers *tgclient.Resolver) *JoinChatHandler {
+	return &JoinChatHandler{client: peers.Client(), peers: peers}
 }
 
 // LeaveChatHandler handles the LeaveChat tool.
 type LeaveChatHandler struct {
 	client *tg.Client
+	peers  *tgclient.Resolver
 }
 
 // NewLeaveChatHandler creates a new LeaveChatHandler.
-func NewLeaveChatHandler(client *tg.Client) *LeaveChatHandler {
-	return &LeaveChatHandler{client: client}
+func NewLeaveChatHandler(peers *tgclient.Resolver) *LeaveChatHandler {
+	return &LeaveChatHandler{client: peers.Client(), peers: peers}
 }
 
 // JoinChatInput is the input for the JoinChat tool.
@@ -157,24 +159,30 @@ func (h *JoinChatHandler) joinByID(ctx context.Context, chat, value string) (*mc
 	if err != nil {
 		return errResult(fmt.Sprintf("invalid chat reference %q: expected a public @username, a numeric chat ID, or an invite link.", chat)), nil, nil
 	}
-	peer, err := tgclient.ResolvePeer(ctx, h.client, id)
+	peer, err := h.peers.Resolve(ctx, id)
 	if err != nil {
 		return nil, nil, failed(fmt.Sprintf("join %q", chat), err)
 	}
-	ch, ok := peer.(*tg.InputPeerChannel)
+	channel, ok := peer.Chat.(*tg.Channel)
 	if !ok {
 		return errResult(fmt.Sprintf("chat %d is not a channel or supergroup. Only channels/supergroups can be joined by ID; basic groups and private chats require an invite link.", id)), nil, nil
 	}
-	input := &tg.InputChannel{ChannelID: ch.ChannelID, AccessHash: ch.AccessHash}
-	known := &JoinChatResult{Status: statusAlreadyMember, Chat: chat, ChatID: ch.ChannelID}
+	known := &JoinChatResult{Status: statusAlreadyMember, Chat: chat}
+	fillJoinResultFromChannel(known, channel)
 
-	res, err := h.client.ChannelsJoinChannel(ctx, input)
+	res, err := tgclient.WithPeer(ctx, h.peers, id, nil, nil, func(p tgclient.Peer) (tg.MessagesChatInviteJoinResultClass, error) {
+		ch, ok := p.Input.(*tg.InputPeerChannel)
+		if !ok {
+			return nil, fmt.Errorf("chat %d no longer resolves to a channel", id)
+		}
+		return h.client.ChannelsJoinChannel(ctx, &tg.InputChannel{ChannelID: ch.ChannelID, AccessHash: ch.AccessHash})
+	})
 	if err != nil {
 		return joinError(chat, known, err)
 	}
 	out := joinResultFrom(chat, statusJoined, res)
 	if out.ChatID == 0 {
-		out.ChatID = ch.ChannelID
+		fillJoinResultFromChannel(out, channel)
 	}
 	return nil, out, nil
 }
@@ -203,7 +211,7 @@ func (h *LeaveChatHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, i
 		return errRes, nil, nil
 	}
 
-	peer, err := resolveChatRef(ctx, h.client, chat)
+	peer, err := resolveChatRef(ctx, h.peers, chat)
 	if errors.Is(err, errInviteChatRef) {
 		return errResult("LeaveChat does not accept invite links. Pass the chat's @username or numeric ID instead (find it with GetChats or SearchChats)."), nil, nil
 	}
@@ -281,7 +289,7 @@ func classifyChatRef(s string) (kind, value string) {
 	if username, ok := strings.CutPrefix(s, "@"); ok {
 		return chatRefUsername, username
 	}
-	// Numeric ID. A negative one stays numeric so ResolvePeer rejects it with
+	// Numeric ID. A negative one stays numeric so the resolver rejects it with
 	// a clear error instead of it being looked up as a username.
 	if _, err := strconv.ParseInt(s, 10, 64); err == nil {
 		return chatRefID, s
@@ -297,13 +305,18 @@ var errInviteChatRef = errors.New("invite links name no chat until joined")
 // resolveChatRef resolves a chat reference — a public @username or t.me link,
 // or a numeric chat ID — to the InputPeer of whatever it names: a user, basic
 // group or channel. Invite links are rejected with errInviteChatRef.
-func resolveChatRef(ctx context.Context, client *tg.Client, ref string) (tg.InputPeerClass, error) {
+//
+// A numeric ID yields the resolver's cached peer without the stale-hash retry
+// of tgclient.WithPeer: callers (LeaveChat, the folder tools) mix it with
+// username resolutions, and the non-min access hashes the resolver hands out
+// only go stale when the chat itself is gone, where a retry fails the same way.
+func resolveChatRef(ctx context.Context, peers *tgclient.Resolver, ref string) (tg.InputPeerClass, error) {
 	kind, value := classifyChatRef(ref)
 	switch kind {
 	case chatRefInvite:
 		return nil, errInviteChatRef
 	case chatRefUsername:
-		resolved, err := resolvePublicUsername(ctx, client, value)
+		resolved, err := resolvePublicUsername(ctx, peers.Client(), value)
 		if err != nil {
 			return nil, err
 		}
@@ -317,11 +330,11 @@ func resolveChatRef(ctx context.Context, client *tg.Client, ref string) (tg.Inpu
 		if err != nil {
 			return nil, fmt.Errorf("invalid chat reference %q: expected a public @username or a numeric chat ID", ref)
 		}
-		peer, err := tgclient.ResolvePeer(ctx, client, id)
+		peer, err := peers.Resolve(ctx, id)
 		if err != nil {
-			return nil, fmt.Errorf("resolving chat %d: %w", id, err)
+			return nil, err
 		}
-		return peer, nil
+		return peer.Input, nil
 	}
 }
 

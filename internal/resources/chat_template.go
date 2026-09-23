@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yosida95/uritemplate/v3"
 
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
@@ -30,7 +30,7 @@ var chatInfoTemplate = uritemplate.MustNew("telegram://chats/{chat_id}/info")
 // decides when to call it), while the resource is application-controlled
 // (the host UI can let users browse chats from a sidebar without Claude's
 // involvement).
-func RegisterChatTemplate(s *mcp.Server, client *tg.Client) {
+func RegisterChatTemplate(s *mcp.Server, peers *tgclient.Resolver) {
 	s.AddResourceTemplate(&mcp.ResourceTemplate{
 		URITemplate: chatInfoTemplate.Raw(),
 		Name:        "Telegram Chat Info",
@@ -42,7 +42,7 @@ func RegisterChatTemplate(s *mcp.Server, client *tg.Client) {
 			return nil, err
 		}
 
-		info, err := tgdata.GetChatInfo(ctx, client, chatID)
+		info, err := tgdata.GetChatInfo(ctx, peers, chatID)
 		if err != nil {
 			return nil, fmt.Errorf("getting chat info for %d: %w", chatID, err)
 		}

@@ -13,6 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	telegramfake "github.com/tolmachov/mcp-telegram/internal/testutil/telegram"
+
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // staticErrInvoker fails every MTProto call with the same error, so MarkAsRead's
@@ -30,7 +32,7 @@ func (f *staticErrInvoker) Invoke(_ context.Context, _ bin.Encoder, _ bin.Decode
 func TestMarkAsReadFloodWaitStopsBatch(t *testing.T) {
 	flood := &tgerr.Error{Code: 420, Message: "FLOOD_WAIT_30", Type: "FLOOD_WAIT", Argument: 30}
 	inv := &staticErrInvoker{err: flood}
-	h := NewMessageReadHandler(tg.NewClient(inv))
+	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000))
 
 	errRes, out, err := h.handle(context.Background(), &mcp.CallToolRequest{}, MarkAsReadInput{
 		ChatIDs: []int64{100, 200, 300},
@@ -50,7 +52,7 @@ func TestMarkAsReadFloodWaitStopsBatch(t *testing.T) {
 
 func TestMarkAsReadNonFloodErrorContinuesBatch(t *testing.T) {
 	inv := &staticErrInvoker{err: errors.New("boom")}
-	h := NewMessageReadHandler(tg.NewClient(inv))
+	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000))
 
 	errRes, out, err := h.handle(context.Background(), &mcp.CallToolRequest{}, MarkAsReadInput{
 		ChatIDs: []int64{100, 200, 300},
@@ -71,9 +73,9 @@ func TestMarkAsReadChannelUsesCurrentTopMessage(t *testing.T) {
 			out.Chats = &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Channel{ID: channelID, AccessHash: 123}}}
 			return nil
 		}),
-		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
-			assert.Equal(t, 1, req.Limit)
-			out.Messages = &tg.MessagesChannelMessages{Messages: []tg.MessageClass{&tg.MessageService{ID: 77}}}
+		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetPeerDialogsRequest, out *tg.MessagesPeerDialogs) error {
+			require.Len(t, req.Peers, 1)
+			out.Dialogs = []tg.DialogClass{&tg.Dialog{Peer: &tg.PeerChannel{ChannelID: channelID}, TopMessage: 77}}
 			return nil
 		}),
 		telegramfake.Typed(func(_ context.Context, req *tg.ChannelsReadHistoryRequest, out *tg.BoolBox) error {
@@ -82,7 +84,7 @@ func TestMarkAsReadChannelUsesCurrentTopMessage(t *testing.T) {
 			return nil
 		}),
 	)
-	h := NewMessageReadHandler(tg.NewClient(inv))
+	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000))
 
 	errRes, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, MarkAsReadInput{
 		ChatIDs: []int64{channelID},
@@ -91,5 +93,52 @@ func TestMarkAsReadChannelUsesCurrentTopMessage(t *testing.T) {
 	require.Nil(t, errRes)
 	require.NotNil(t, out)
 	assert.Equal(t, 1, out.Successful)
+	assert.Zero(t, inv.Remaining())
+}
+
+// TestMarkAsReadLooksUpChannelTopsInOneCall verifies every channel's top
+// message comes from a single messages.getPeerDialogs call, a channel without
+// a dialog is left alone, and a basic group is read without one.
+func TestMarkAsReadLooksUpChannelTopsInOneCall(t *testing.T) {
+	const firstID, secondID, groupID = int64(91), int64(92), int64(93)
+	inv := telegramfake.New(
+		notUserStep(t, firstID),
+		resolveChannelStep(t, firstID, 1),
+		notUserStep(t, secondID),
+		resolveChannelStep(t, secondID, 2),
+		notUserStep(t, groupID),
+		telegramfake.Typed(func(_ context.Context, _ *tg.ChannelsGetChannelsRequest, _ *tg.MessagesChatsBox) error {
+			return tgerr.New(400, "CHANNEL_INVALID")
+		}),
+		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetChatsRequest, out *tg.MessagesChatsBox) error {
+			out.Chats = &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Chat{ID: groupID}}}
+			return nil
+		}),
+		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetPeerDialogsRequest, out *tg.MessagesPeerDialogs) error {
+			require.Len(t, req.Peers, 2)
+			// Only the first channel has a dialog.
+			out.Dialogs = []tg.DialogClass{&tg.Dialog{Peer: &tg.PeerChannel{ChannelID: firstID}, TopMessage: 5}}
+			return nil
+		}),
+		telegramfake.Typed(func(_ context.Context, req *tg.ChannelsReadHistoryRequest, out *tg.BoolBox) error {
+			assert.Equal(t, firstID, req.Channel.(*tg.InputChannel).ChannelID)
+			assert.Equal(t, 5, req.MaxID)
+			out.Bool = &tg.BoolTrue{}
+			return nil
+		}),
+		telegramfake.Typed(func(_ context.Context, req *tg.MessagesReadHistoryRequest, out *tg.MessagesAffectedMessages) error {
+			assert.Equal(t, &tg.InputPeerChat{ChatID: groupID}, req.Peer)
+			return nil
+		}),
+	)
+	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+
+	errRes, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, MarkAsReadInput{
+		ChatIDs: []int64{firstID, secondID, groupID},
+	})
+	require.NoError(t, err)
+	require.Nil(t, errRes)
+	require.NotNil(t, out)
+	assert.Equal(t, 3, out.Successful)
 	assert.Zero(t, inv.Remaining())
 }

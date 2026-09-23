@@ -78,9 +78,9 @@ func buildTestHandlers(t *testing.T) (full, research []tools.Handler) {
 	t.Helper()
 	api := tg.NewClient(noopInvoker{})
 	s := &Server{opts: Options{SummarizeCfg: summarize.Config{BatchTokens: 8000}, MediaMaxBytes: 1024}}
-	msgProvider := messages.NewProviderWithRate(api, 100_000)
+	peers := tgclient.NewResolver(api, 100_000)
 	chatsCache := tgdata.NewChatsCache(nil)
-	return s.buildHandlers(api, msgProvider, chatsCache)
+	return s.buildHandlers(api, peers, messages.NewProvider(peers), chatsCache)
 }
 
 func TestVariantHandlerSplit(t *testing.T) {

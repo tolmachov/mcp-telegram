@@ -14,11 +14,12 @@ import (
 // MessageReactionHandler handles the SetReaction tool.
 type MessageReactionHandler struct {
 	client *tg.Client
+	peers  *tgclient.Resolver
 }
 
 // NewSetReactionHandler creates a new MessageReactionHandler.
-func NewSetReactionHandler(client *tg.Client) *MessageReactionHandler {
-	return &MessageReactionHandler{client: client}
+func NewSetReactionHandler(peers *tgclient.Resolver) *MessageReactionHandler {
+	return &MessageReactionHandler{client: peers.Client(), peers: peers}
 }
 
 // SetReactionInput is the input for the SetReaction tool.
@@ -65,14 +66,7 @@ func (h *MessageReactionHandler) handle(ctx context.Context, _ *mcp.CallToolRequ
 		return errRes, nil, nil
 	}
 
-	op := fmt.Sprintf("set reaction on message %s in chat %d", in.MessageID, in.ChatID)
-	peer, err := tgclient.ResolvePeer(ctx, h.client, in.ChatID)
-	if err != nil {
-		return nil, nil, failed(op, err)
-	}
-
 	sendReq := &tg.MessagesSendReactionRequest{
-		Peer:  peer,
 		MsgID: msgID,
 		Big:   in.Big,
 	}
@@ -98,8 +92,11 @@ func (h *MessageReactionHandler) handle(ctx context.Context, _ *mcp.CallToolRequ
 	// When no reactions are set the Reaction flag stays clear, which tells
 	// Telegram to remove all of the current user's reactions from the message.
 
-	if _, err := h.client.MessagesSendReaction(ctx, sendReq); err != nil {
-		return nil, nil, failed(op, err)
+	if _, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, nil, nil, func(p tgclient.Peer) (tg.UpdatesClass, error) {
+		sendReq.Peer = p.Input
+		return h.client.MessagesSendReaction(ctx, sendReq)
+	}); err != nil {
+		return nil, nil, failed(fmt.Sprintf("set reaction on message %s in chat %d", in.MessageID, in.ChatID), err)
 	}
 
 	return nil, &SetReactionResult{

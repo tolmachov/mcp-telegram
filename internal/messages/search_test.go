@@ -7,6 +7,8 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // newTestMessage builds a minimal *tg.Message suitable for processGlobalHistory.
@@ -290,9 +292,9 @@ func TestProcessGlobalHistoryNotModified(t *testing.T) {
 
 // TestSearchDateInversion verifies that Search returns an error when MinDate
 // is after MaxDate without making any Telegram API call (nil client is safe
-// because the guard fires before ResolvePeer).
+// because the guard fires before peer resolution).
 func TestSearchDateInversion(t *testing.T) {
-	p := NewProviderWithRate(nil, 1)
+	p := NewProvider(tgclient.NewResolver(nil, 1))
 	later := time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC)
 	earlier := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 
@@ -308,7 +310,7 @@ func TestSearchDateInversion(t *testing.T) {
 
 // TestSearchGlobalDateInversion verifies the same guard in SearchGlobal.
 func TestSearchGlobalDateInversion(t *testing.T) {
-	p := NewProviderWithRate(nil, 1)
+	p := NewProvider(tgclient.NewResolver(nil, 1))
 	later := time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC)
 	earlier := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 

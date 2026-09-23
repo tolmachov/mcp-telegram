@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -13,11 +14,12 @@ import (
 // MessageEditHandler handles the EditMessage tool.
 type MessageEditHandler struct {
 	client *tg.Client
+	peers  *tgclient.Resolver
 }
 
 // NewMessageEditHandler creates a new MessageEditHandler.
-func NewMessageEditHandler(client *tg.Client) *MessageEditHandler {
-	return &MessageEditHandler{client: client}
+func NewMessageEditHandler(peers *tgclient.Resolver) *MessageEditHandler {
+	return &MessageEditHandler{client: peers.Client(), peers: peers}
 }
 
 // EditMessageInput is the input for the EditMessage tool.
@@ -98,15 +100,12 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		return errResult("schedule_at is only valid when editing a scheduled message (\"s:...\"). To reschedule a pending delivery, pass the scheduled handle instead."), nil, nil
 	}
 
-	peer, err := tgclient.ResolvePeer(ctx, h.client, in.ChatID)
+	updates, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, nil, nil, func(p tgclient.Peer) (tg.UpdatesClass, error) {
+		editReq.Peer = p.Input
+		return h.client.MessagesEditMessage(ctx, editReq)
+	})
 	if err != nil {
-		return nil, nil, failed("edit message", err)
-	}
-	editReq.Peer = peer
-
-	updates, err := h.client.MessagesEditMessage(ctx, editReq)
-	if err != nil {
-		return nil, nil, failed("edit message", err)
+		return nil, nil, failed(fmt.Sprintf("edit message %s in chat %d", in.MessageID, in.ChatID), err)
 	}
 
 	editedMsgID, date := extractEditedMessageID(updates)

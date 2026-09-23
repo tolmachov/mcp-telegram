@@ -16,6 +16,7 @@ import (
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
 	telegramfake "github.com/tolmachov/mcp-telegram/internal/testutil/telegram"
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 type providerFunc func(context.Context, Request) (string, error)
@@ -153,7 +154,7 @@ func TestSummarizeDetailedCountsCompletedBatches(t *testing.T) {
 				}
 				return strings.TrimSpace(summary), nil
 			})
-			s := NewSummarizer(llm, messages.NewProviderWithRate(tg.NewClient(inv), 100_000), max(tc.batchTokens, 1))
+			s := NewSummarizer(llm, messages.NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000)), max(tc.batchTokens, 1))
 			got, err := s.SummarizeDetailed(t.Context(), 77, "summarize", time.Time{}, 100, nil)
 			if tc.failBatch > 0 {
 				require.ErrorIs(t, err, assert.AnError)

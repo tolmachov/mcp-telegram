@@ -217,14 +217,20 @@ func AddContentTool[In any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In,
 
 // failure is a tool call that failed past input validation — a Telegram RPC
 // or another runtime error. Handlers return it as their Go error and
-// toolFailure renders it as "Failed to <op>: <err>" plus the optional hint.
+// toolFailure renders it as "Failed to <op>: <err>" plus the hint. A failure
+// without an op only carries a hint for an outer failure to render.
 type failure struct {
 	op   string
 	hint string
 	err  error
 }
 
-func (f *failure) Error() string { return f.op + ": " + f.err.Error() }
+func (f *failure) Error() string {
+	if f.op == "" {
+		return f.err.Error()
+	}
+	return f.op + ": " + f.err.Error()
+}
 
 func (f *failure) Unwrap() error { return f.err }
 
@@ -237,6 +243,11 @@ func failed(op string, err error) error {
 // failedHint is failed with a recovery hint the model can act on.
 func failedHint(op string, err error, hint string) error {
 	return &failure{op: op, hint: hint, err: err}
+}
+
+// withHint attaches a recovery hint to err for the failure that wraps it.
+func withHint(err error, hint string) error {
+	return &failure{hint: hint, err: err}
 }
 
 // peerHint follows a failure to resolve a chat ID.
@@ -259,10 +270,21 @@ func toolFailure(ctx context.Context, req *mcp.CallToolRequest, tool string, err
 // anything else shows the error itself, followed by the failure's own hint or,
 // lacking one, the peer hint when a chat ID failed to resolve.
 func failureText(tool string, err error) string {
+	// The outermost op names what failed; the outermost hint wins.
 	op, hint, cause := "run "+tool, "", err
-	var f *failure
-	if errors.As(err, &f) {
-		op, hint, cause = f.op, f.hint, f.err
+	named := false
+	for e := err; ; {
+		var f *failure
+		if !errors.As(e, &f) {
+			break
+		}
+		if !named && f.op != "" {
+			op, cause, named = f.op, f.err, true
+		}
+		if hint == "" {
+			hint = f.hint
+		}
+		e = f.err
 	}
 	var what string
 	var pe *tgclient.PeerError

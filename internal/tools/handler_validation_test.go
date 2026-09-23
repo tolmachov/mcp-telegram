@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // TestMessageSendHandlerValidation covers the input-validation layer of
@@ -434,7 +436,7 @@ func TestSearchMessagesGlobalDateInversionValidation(t *testing.T) {
 // MessageReadHandler.handle. Client is nil — safe because every test case
 // returns before any Telegram API call.
 func TestMarkAsReadHandlerValidation(t *testing.T) {
-	h := NewMessageReadHandler(nil)
+	h := NewMessageReadHandler(tgclient.NewResolver(nil, 100_000))
 	ctx := context.Background()
 
 	cases := []struct {
@@ -469,7 +471,7 @@ func TestMarkAsReadHandlerValidation(t *testing.T) {
 // an inverted date window before making any Telegram API call. to_date is
 // exclusive, so an equal or earlier to_date yields an empty window.
 func TestBackupMessagesDateInversionValidation(t *testing.T) {
-	h := NewMessageBackupHandler(nil, nil, nil)
+	h := NewMessageBackupHandler(tgclient.NewResolver(nil, 100_000), nil, nil)
 	ctx := context.Background()
 
 	errRes, _, err := h.handle(ctx, nil, BackupMessagesInput{

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
@@ -137,7 +138,7 @@ func (f *leaveChatInvoker) Invoke(_ context.Context, input bin.Encoder, output b
 func TestLeaveChatConfirmBypassesElicitation(t *testing.T) {
 	newHandler := func() (*LeaveChatHandler, *leaveChatInvoker) {
 		inv := &leaveChatInvoker{channelID: 555, accessHash: 999}
-		return NewLeaveChatHandler(tg.NewClient(inv)), inv
+		return NewLeaveChatHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000)), inv
 	}
 
 	t.Run("confirm true leaves without elicitation", func(t *testing.T) {

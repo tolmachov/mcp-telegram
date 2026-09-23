@@ -48,6 +48,16 @@ func ChatInfoFromChat(c tg.ChatClass) (ChatInfo, bool) {
 	}
 }
 
+// ChatInfoFromPeer builds the identity part of ChatInfo for a resolved peer
+// from the entity it was resolved from.
+func ChatInfoFromPeer(p tgclient.Peer) ChatInfo {
+	if p.User != nil {
+		return ChatInfoFromUser(p.User)
+	}
+	info, _ := ChatInfoFromChat(p.Chat) // a resolved Chat is always a *tg.Chat or *tg.Channel
+	return info
+}
+
 func basicGroupInfo(c *tg.Chat) ChatInfo {
 	return ChatInfo{ID: c.ID, Type: ChatTypeGroup, Name: c.Title}
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // fakeChat is a minimal pinned chat: a user peer with an ID and display name.
@@ -102,7 +103,7 @@ func quietLogger() *slog.Logger {
 
 func newTestProvider(inv *pinnedInvoker, logger *slog.Logger, nServers int) (*PinnedChatsProvider, []*mcp.Server) {
 	api := tg.NewClient(inv)
-	msgProvider := messages.NewProviderWithRate(api, 100_000)
+	msgProvider := messages.NewProvider(tgclient.NewResolver(api, 100_000))
 	servers := make([]*mcp.Server, nServers)
 	for i := range servers {
 		servers[i] = mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
@@ -266,7 +267,7 @@ func TestNewPinnedChatsProviderWarnsWithoutServers(t *testing.T) {
 	var buf syncBuffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	api := tg.NewClient(&pinnedInvoker{})
-	msgProvider := messages.NewProviderWithRate(api, 100_000)
+	msgProvider := messages.NewProvider(tgclient.NewResolver(api, 100_000))
 
 	NewPinnedChatsProvider(api, msgProvider, logger) // no servers
 

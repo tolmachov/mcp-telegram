@@ -14,11 +14,12 @@ import (
 // MessageForwardHandler handles the ForwardMessage tool.
 type MessageForwardHandler struct {
 	client *tg.Client
+	peers  *tgclient.Resolver
 }
 
 // NewMessageForwardHandler creates a new MessageForwardHandler.
-func NewMessageForwardHandler(client *tg.Client) *MessageForwardHandler {
-	return &MessageForwardHandler{client: client}
+func NewMessageForwardHandler(peers *tgclient.Resolver) *MessageForwardHandler {
+	return &MessageForwardHandler{client: peers.Client(), peers: peers}
 }
 
 // ForwardMessageInput is the input for the ForwardMessage tool.
@@ -74,24 +75,17 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	}
 
 	// A bad chat ID surfaces as a resolve error before the mutation is issued.
-	op := fmt.Sprintf("forward message %s from chat %d to chat %d", in.MessageID, in.FromChatID, in.ToChatID)
-	fromPeer, err := tgclient.ResolvePeer(ctx, h.client, in.FromChatID)
-	if err != nil {
-		return nil, nil, failed(op, err)
-	}
-	toPeer, err := tgclient.ResolvePeer(ctx, h.client, in.ToChatID)
-	if err != nil {
-		return nil, nil, failed(op, err)
-	}
-
-	updates, err := h.client.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
-		FromPeer: fromPeer,
-		ID:       []int{msgID},
-		ToPeer:   toPeer,
-		RandomID: []int64{cryptoRandInt64()},
+	randomID := cryptoRandInt64()
+	updates, err := tgclient.WithPeers(ctx, h.peers, []int64{in.FromChatID, in.ToChatID}, nil, nil, func(p []tgclient.Peer) (tg.UpdatesClass, error) {
+		return h.client.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+			FromPeer: p[0].Input,
+			ID:       []int{msgID},
+			ToPeer:   p[1].Input,
+			RandomID: []int64{randomID},
+		})
 	})
 	if err != nil {
-		return nil, nil, failed(op, err)
+		return nil, nil, failed(fmt.Sprintf("forward message %s from chat %d to chat %d", in.MessageID, in.FromChatID, in.ToChatID), err)
 	}
 
 	forwardedMsgID, date := extractSentMessageID(updates)

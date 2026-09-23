@@ -6,6 +6,8 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 func TestBuildForumTopicsResult(t *testing.T) {
@@ -156,7 +158,7 @@ func TestExtractReplies(t *testing.T) {
 }
 
 func TestExtractMessagesPopulatesReplies(t *testing.T) {
-	p := NewProviderWithRate(nil, 1)
+	p := NewProvider(tgclient.NewResolver(nil, 1))
 
 	withReplies := &tg.Message{ID: 1, Message: "post"}
 	replies := tg.MessageReplies{Comments: true, Replies: 7}

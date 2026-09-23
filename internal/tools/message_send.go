@@ -45,11 +45,12 @@ const (
 // MessageSendHandler handles the SendMessage tool.
 type MessageSendHandler struct {
 	client *tg.Client
+	peers  *tgclient.Resolver
 }
 
 // NewMessageSendHandler creates a new MessageSendHandler.
-func NewMessageSendHandler(client *tg.Client) *MessageSendHandler {
-	return &MessageSendHandler{client: client}
+func NewMessageSendHandler(peers *tgclient.Resolver) *MessageSendHandler {
+	return &MessageSendHandler{client: peers.Client(), peers: peers}
 }
 
 // SendMessageInput is the input for the SendMessage tool.
@@ -160,27 +161,18 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		return errResult(fmt.Sprintf("schedule_at is only valid when mode=\"schedule\" (got mode=%q). Set mode=\"schedule\" or remove schedule_at.", mode)), nil, nil
 	}
 
-	op := fmt.Sprintf("send message to chat %d", in.ChatID)
-	if mode == sendModeDraft {
-		op = fmt.Sprintf("save draft in chat %d", in.ChatID)
-	}
-	peer, err := tgclient.ResolvePeer(ctx, h.client, in.ChatID)
-	if err != nil {
-		return nil, nil, failed(op, err)
-	}
-
 	// Draft mode: messages.saveDraft supports reply_to_msg_id but does not
 	// return a message ID, so the response has no MessageID.
 	if mode == sendModeDraft {
-		draftReq := &tg.MessagesSaveDraftRequest{
-			Peer:    peer,
-			Message: in.Message,
-		}
+		draftReq := &tg.MessagesSaveDraftRequest{Message: in.Message}
 		if replyToID > 0 {
 			draftReq.ReplyTo = &tg.InputReplyToMessage{ReplyToMsgID: replyToID}
 		}
-		if _, err := h.client.MessagesSaveDraft(ctx, draftReq); err != nil {
-			return nil, nil, failed(op, err)
+		if _, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, nil, nil, func(p tgclient.Peer) (bool, error) {
+			draftReq.Peer = p.Input
+			return h.client.MessagesSaveDraft(ctx, draftReq)
+		}); err != nil {
+			return nil, nil, failed(fmt.Sprintf("save draft in chat %d", in.ChatID), err)
 		}
 		return nil, &SendMessageResult{
 			Status:             "drafted",
@@ -192,7 +184,6 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 
 	// Send or schedule path.
 	sendReq := &tg.MessagesSendMessageRequest{
-		Peer:     peer,
 		Message:  in.Message,
 		RandomID: cryptoRandInt64(),
 	}
@@ -203,9 +194,12 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		sendReq.ScheduleDate = scheduleUnix
 	}
 
-	updates, err := h.client.MessagesSendMessage(ctx, sendReq)
+	updates, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, nil, nil, func(p tgclient.Peer) (tg.UpdatesClass, error) {
+		sendReq.Peer = p.Input
+		return h.client.MessagesSendMessage(ctx, sendReq)
+	})
 	if err != nil {
-		return nil, nil, failed(op, err)
+		return nil, nil, failed(fmt.Sprintf("send message to chat %d", in.ChatID), err)
 	}
 
 	res := &SendMessageResult{
