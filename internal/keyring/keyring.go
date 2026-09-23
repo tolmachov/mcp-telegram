@@ -1,7 +1,8 @@
 // Package keyring parses the MCP_AUTH_TOKEN_KEYS master keys shared by the
-// OAuth token sealer (authsrv) and the session cipher (sessionstore). It only
-// decodes and identifies keys; each consumer derives its own subkeys with its
-// own HKDF labels, so neither can open the other's blobs.
+// OAuth token sealer (authsrv) and the session cipher (sessionstore). It
+// decodes and identifies the keys and builds the AES-GCM AEAD both use; each
+// consumer derives its own subkeys with its own HKDF labels, so neither can
+// open the other's blobs.
 package keyring
 
 import (
@@ -11,6 +12,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"iter"
+	"slices"
 )
 
 // MasterKeyLen is the required length of a decoded master key.
@@ -25,7 +28,8 @@ type Key struct {
 }
 
 // Ring holds all accepted master keys. The first key seals new blobs; every
-// key opens existing ones.
+// key opens existing ones. Obtain a Ring from Parse, which guarantees at least
+// one key; the zero Ring holds none and is not usable.
 type Ring struct {
 	keys []Key
 }
@@ -70,8 +74,8 @@ func decodeMasterKey(e string) ([]byte, error) {
 	return nil, errors.New("key is not valid base64")
 }
 
-// Keys returns every key, the sealing key first.
-func (r *Ring) Keys() []Key { return r.keys }
+// Keys yields every key with its position, the sealing key first.
+func (r *Ring) Keys() iter.Seq2[int, Key] { return slices.All(r.keys) }
 
 // Primary returns the key that seals new blobs.
 func (r *Ring) Primary() Key { return r.keys[0] }

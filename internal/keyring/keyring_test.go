@@ -67,5 +67,9 @@ func TestKeyIDs(t *testing.T) {
 	assert.Equal(t, old, k.Master)
 	_, ok = ring.ByID(0x00)
 	assert.False(t, ok)
-	assert.Len(t, ring.Keys(), 2)
+	var ids []byte
+	for _, k := range ring.Keys() {
+		ids = append(ids, k.ID)
+	}
+	assert.Equal(t, []byte{0x9f, 0x02}, ids, "Keys yields the sealing key first")
 }
