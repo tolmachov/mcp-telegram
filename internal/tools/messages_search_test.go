@@ -39,7 +39,7 @@ func TestSearchMessagesHandleValidation(t *testing.T) {
 		{
 			name:      "invalid before_message_id",
 			input:     SearchMessagesInput{ChatID: 1, Query: "hi", BeforeMessageID: "abc"},
-			errSubstr: "invalid message_id",
+			errSubstr: "invalid before_message_id",
 		},
 		{
 			name:      "scheduled before_message_id rejected",

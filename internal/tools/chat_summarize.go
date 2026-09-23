@@ -32,7 +32,7 @@ type SummarizeChatInput struct {
 	MaxMessages int    `json:"max_messages,omitempty" jsonschema:"Maximum messages sent to the summarizer (default 2000, hard maximum 10000)."`
 	ChatID      int64  `json:"chat_id" jsonschema:"The chat ID to summarize"`
 	Goal        string `json:"goal" jsonschema:"What you want from the summary. Examples: 'key points and decisions'\\, 'extract all action items and deadlines'\\, 'analyze sentiment and mood'\\, 'identify top 5 discussed topics'\\, 'create meeting minutes'"`
-	Period      string `json:"period,omitempty" jsonschema:"Time period: 'day'\\, 'week'\\, or 'month' (default: 'month')"`
+	Period      string `json:"period,omitempty" jsonschema:"Time period to look back over (default: 'month')"`
 	Since       string `json:"since,omitempty" jsonschema:"Date in YYYY-MM-DD or RFC3339 format to start from (alternative to period\\, e.g.\\, '2024-01-15')"`
 }
 
@@ -72,8 +72,8 @@ func (h *ChatSummarizeHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "SummarizeChat",
 		Description: "Use this whenever the user asks to summarize, digest, recap, or 'catch up on' a Telegram chat. Prefer it over fetching messages with GetMessages and summarizing them yourself: it performs rolling/incremental summarization server-side, so it handles long histories (weeks/months, hundreds of messages) without loading every message into the conversation context. Specify a goal (e.g. 'key decisions', 'action items', 'what did I miss') and a time period (day/week/month) or a since date.",
-		InputSchema: inputSchemaWithEnums[SummarizeChatInput](map[string][]any{
-			"period": {"day", "week", "month"},
+		InputSchema: inputSchemaWithEnums[SummarizeChatInput](map[string][]string{
+			"period": summarize.PeriodNames(),
 		}),
 		// Note: ReadOnlyHint is intentionally NOT set. The tool calls out
 		// to external LLM providers (sampling, Gemini, Ollama, Anthropic)
@@ -184,32 +184,18 @@ func (h *ChatSummarizeHandler) buildDetailedResult(in SummarizeChatInput, since,
 
 func (h *ChatSummarizeHandler) parseSinceTime(in SummarizeChatInput) (time.Time, error) {
 	if in.Since != "" {
-		// Try parsing ISO 8601 date.
-		t, err := time.Parse("2006-01-02", in.Since)
-		if err != nil {
-			t, err = time.Parse(time.RFC3339, in.Since)
-			if err != nil {
-				return time.Time{}, fmt.Errorf("invalid since format, use ISO 8601 (e.g., '2024-01-15' or '2024-01-15T00:00:00Z')")
-			}
-		}
-		return t, nil
+		return parseDate(in.Since)
 	}
 
 	period := in.Period
 	if period == "" {
 		period = "month"
 	}
-	now := time.Now()
-	switch period {
-	case "day":
-		return now.Add(-24 * time.Hour), nil
-	case "week":
-		return now.Add(-7 * 24 * time.Hour), nil
-	case "month":
-		return now.Add(-30 * 24 * time.Hour), nil
-	default:
-		return time.Time{}, fmt.Errorf("invalid period: %s (use 'day', 'week', or 'month')", period)
+	d, ok := summarize.Periods[period]
+	if !ok {
+		return time.Time{}, fmt.Errorf("invalid period: %s (use one of: %s)", period, strings.Join(summarize.PeriodNames(), ", "))
 	}
+	return time.Now().Add(-d), nil
 }
 
 func (h *ChatSummarizeHandler) createProvider(session *mcp.ServerSession) (summarize.Provider, error) {

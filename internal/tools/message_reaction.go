@@ -59,12 +59,9 @@ func (h *MessageReactionHandler) handle(ctx context.Context, req *mcp.CallToolRe
 	if in.ChatID == 0 {
 		return errChatIDRequired(), nil, nil
 	}
-	ref, err := presentation.ParseMessageRef(in.MessageID)
-	if err != nil {
-		return errInvalidMessageID(in.MessageID, err), nil, nil
-	}
-	if ref.Scheduled {
-		return errCannotOnScheduled("react to"), nil, nil
+	msgID, errRes := parseRegularRef("message_id", in.MessageID, "react to")
+	if errRes != nil {
+		return errRes, nil, nil
 	}
 
 	peer, err := tgclient.ResolvePeer(ctx, h.client, in.ChatID)
@@ -74,7 +71,7 @@ func (h *MessageReactionHandler) handle(ctx context.Context, req *mcp.CallToolRe
 
 	sendReq := &tg.MessagesSendReactionRequest{
 		Peer:  peer,
-		MsgID: ref.ID,
+		MsgID: msgID,
 		Big:   in.Big,
 	}
 
@@ -111,7 +108,7 @@ func (h *MessageReactionHandler) handle(ctx context.Context, req *mcp.CallToolRe
 	return nil, &SetReactionResult{
 		Status:    status,
 		ChatID:    in.ChatID,
-		MessageID: ref.Format(),
+		MessageID: presentation.FormatRegularRef(msgID),
 		Emojis:    emojis,
 	}, nil
 }

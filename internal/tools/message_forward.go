@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"time"
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -62,12 +61,9 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	if in.FromChatID == 0 {
 		return errResult("from_chat_id is required. Use SearchChats or GetChats to find the source chat ID."), nil, nil
 	}
-	ref, err := presentation.ParseMessageRef(in.MessageID)
-	if err != nil {
-		return errInvalidMessageID(in.MessageID, err), nil, nil
-	}
-	if ref.Scheduled {
-		return errCannotOnScheduled("forward"), nil, nil
+	msgID, errRes := parseRegularRef("message_id", in.MessageID, "forward")
+	if errRes != nil {
+		return errRes, nil, nil
 	}
 	if in.ToChatID == 0 {
 		return errResult("to_chat_id is required. Use SearchChats or GetChats to find the destination chat ID."), nil, nil
@@ -88,7 +84,7 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 
 	updates, err := h.client.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
 		FromPeer: fromPeer,
-		ID:       []int{ref.ID},
+		ID:       []int{msgID},
 		ToPeer:   toPeer,
 		RandomID: []int64{cryptoRandInt64()},
 	})
@@ -97,7 +93,7 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 			"action":  "forward_failed",
 			"from_id": in.FromChatID,
 			"to_id":   in.ToChatID,
-			"msg_id":  ref.ID,
+			"msg_id":  msgID,
 			"error":   err.Error(),
 		})
 		return telegramErrResult("forward message", err), nil, nil
@@ -113,7 +109,7 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	res := &ForwardMessageResult{
 		Status:            statusForwarded,
 		FromChatID:        in.FromChatID,
-		OriginalMessageID: ref.Format(),
+		OriginalMessageID: presentation.FormatRegularRef(msgID),
 		ToChatID:          in.ToChatID,
 	}
 	if forwardedMsgID > 0 {
@@ -122,7 +118,7 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 		res.Note = "new_message_id unavailable: Telegram returned an unrecognised update type"
 	}
 	if date > 0 {
-		res.Date = time.Unix(int64(date), 0).UTC().Format(time.RFC3339)
+		res.Date = formatUnixRFC3339(date)
 	}
 	return nil, res, nil
 }

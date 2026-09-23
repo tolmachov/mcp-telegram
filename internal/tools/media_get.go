@@ -164,7 +164,7 @@ func (h *MediaGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest, 
 	dl := downloader.NewDownloader()
 	var buf bytes.Buffer
 	token := requestProgressToken(req)
-	session := requestSession(req)
+	session := req.Session
 
 	mcpLog(ctx, session, logLevelInfo, "GetMedia", map[string]any{
 		"media_id":   mediaID,

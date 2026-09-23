@@ -102,7 +102,7 @@ func (h *MessageSendHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "SendMessage",
 		Description: "Send a message to a chat. Modes (mutually exclusive): \"send\" (default) delivers immediately; \"schedule\" stores on Telegram's servers and delivers at schedule_at (RFC3339, must be in future; delays < ~10s are sent immediately); \"draft\" saves locally in the Telegram app without sending. reply_to_message_id (opaque handle) works with any mode for threaded replies. Returns status: sent | scheduled | sent_immediate | drafted.",
-		InputSchema: inputSchemaWithEnums[SendMessageInput](map[string][]any{
+		InputSchema: inputSchemaWithEnums[SendMessageInput](map[string][]string{
 			"mode": {"send", "schedule", "draft"},
 		}),
 		Annotations: &mcp.ToolAnnotations{OpenWorldHint: new(true)},
@@ -134,15 +134,12 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	var replyToID int
 	var replyHandle string
 	if in.ReplyToMessageID != "" {
-		ref, err := presentation.ParseMessageRef(in.ReplyToMessageID)
-		if err != nil {
-			return errInvalidMessageID(in.ReplyToMessageID, err), nil, nil
+		var errRes *mcp.CallToolResult
+		replyToID, errRes = parseRegularRef("reply_to_message_id", in.ReplyToMessageID, "reply to")
+		if errRes != nil {
+			return errRes, nil, nil
 		}
-		if ref.Scheduled {
-			return errCannotOnScheduled("reply to"), nil, nil
-		}
-		replyToID = ref.ID
-		replyHandle = ref.Format()
+		replyHandle = presentation.FormatRegularRef(replyToID)
 	}
 
 	// Schedule-specific validation: ScheduleAt required for mode=schedule,
@@ -153,12 +150,9 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		if in.ScheduleAt == "" {
 			return errResult("schedule_at is required when mode=\"schedule\". Provide an RFC3339 timestamp in the future (e.g. 2026-04-10T15:30:00Z)."), nil, nil
 		}
-		t, err := time.Parse(time.RFC3339, in.ScheduleAt)
-		if err != nil {
-			return errResult(fmt.Sprintf("invalid schedule_at %q: %v. Expected RFC3339 format like \"2026-04-10T15:30:00Z\".", in.ScheduleAt, err)), nil, nil
-		}
-		if !t.After(time.Now()) {
-			return errResult("schedule_at must be in the future"), nil, nil
+		t, errRes := parseFutureSchedule(in.ScheduleAt)
+		if errRes != nil {
+			return errRes, nil, nil
 		}
 		scheduleUnix = int(t.Unix())
 		scheduleAtOut = t.UTC().Format(time.RFC3339)
@@ -227,7 +221,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 			res.ScheduleAt = scheduleAtOut
 			res.Note = "Stored on Telegram's servers — delivered automatically at schedule_at even if you're offline."
 			if date > 0 {
-				res.Date = time.Unix(int64(date), 0).UTC().Format(time.RFC3339)
+				res.Date = formatUnixRFC3339(date)
 			}
 			return nil, res, nil
 		}
@@ -250,7 +244,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 			res.Note = "schedule_at was under ~10 seconds away — Telegram delivered the message immediately instead of queueing it."
 		}
 		if date > 0 {
-			res.Date = time.Unix(int64(date), 0).UTC().Format(time.RFC3339)
+			res.Date = formatUnixRFC3339(date)
 		}
 		return nil, res, nil
 	}
@@ -270,7 +264,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		res.Note = "message_id unavailable: Telegram returned an unrecognised update type. The message was delivered but cannot be referenced for edits or deletes until fetched via GetMessages."
 	}
 	if date > 0 {
-		res.Date = time.Unix(int64(date), 0).UTC().Format(time.RFC3339)
+		res.Date = formatUnixRFC3339(date)
 	}
 	return nil, res, nil
 }
@@ -287,21 +281,8 @@ func extractSentMessageID(updates tg.UpdatesClass) (int, int) {
 		// Telegram may return UpdateShortMessage for direct-message sends
 		// (a single-recipient PM where the server can omit full Updates).
 		return u.ID, u.Date
-	case *tg.Updates:
-		for _, update := range u.Updates {
-			if newMsg, ok := update.(*tg.UpdateNewMessage); ok {
-				if msg, ok := newMsg.Message.(*tg.Message); ok {
-					return msg.ID, msg.Date
-				}
-			}
-			if newMsg, ok := update.(*tg.UpdateNewChannelMessage); ok {
-				if msg, ok := newMsg.Message.(*tg.Message); ok {
-					return msg.ID, msg.Date
-				}
-			}
-		}
 	}
-	return 0, 0
+	return firstMessageInUpdates(updates, tg.UpdateNewMessageTypeID, tg.UpdateNewChannelMessageTypeID)
 }
 
 // extractScheduledMessageID pulls the new message ID + date out of an
@@ -312,14 +293,5 @@ func extractSentMessageID(updates tg.UpdatesClass) (int, int) {
 // case this helper returns (0, 0) and the caller should fall back to
 // extractSentMessageID to recover the ID.
 func extractScheduledMessageID(updates tg.UpdatesClass) (int, int) {
-	if u, ok := updates.(*tg.Updates); ok {
-		for _, update := range u.Updates {
-			if newMsg, ok := update.(*tg.UpdateNewScheduledMessage); ok {
-				if msg, ok := newMsg.Message.(*tg.Message); ok {
-					return msg.ID, msg.Date
-				}
-			}
-		}
-	}
-	return 0, 0
+	return firstMessageInUpdates(updates, tg.UpdateNewScheduledMessageTypeID)
 }

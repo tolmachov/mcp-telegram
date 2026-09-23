@@ -7,12 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/tolmachov/mcp-telegram/internal/presentation"
 )
 
 // MCP logging level constants. The official SDK exposes LoggingLevel as a
@@ -41,7 +45,7 @@ type Handler interface {
 //
 // It panics on a missing property or an inference error: both are programmer
 // errors fixed at edit time, and Register has no error return.
-func inputSchemaWithEnums[In any](enums map[string][]any) *jsonschema.Schema {
+func inputSchemaWithEnums[In any](enums map[string][]string) *jsonschema.Schema {
 	schema, err := jsonschema.For[In](nil)
 	if err != nil {
 		panic(fmt.Sprintf("inputSchemaWithEnums: inferring schema for %T: %v", *new(In), err))
@@ -51,7 +55,10 @@ func inputSchemaWithEnums[In any](enums map[string][]any) *jsonschema.Schema {
 		if !ok {
 			panic(fmt.Sprintf("inputSchemaWithEnums: property %q not found in schema for %T", prop, *new(In)))
 		}
-		p.Enum = vals
+		p.Enum = make([]any, len(vals))
+		for i, v := range vals {
+			p.Enum[i] = v
+		}
 	}
 	return schema
 }
@@ -96,35 +103,14 @@ func parseDateWindow(from, to string) (time.Time, time.Time, *mcp.CallToolResult
 // No-op when the request has no progress token. The token is set by the client
 // in _meta.progressToken; the SDK exposes it via req.Params.GetProgressToken().
 func sendProgress(ctx context.Context, req *mcp.CallToolRequest, progress, total float64, message string) {
-	if req == nil || req.Session == nil {
-		return
-	}
-	token := requestProgressToken(req)
-	if token == nil {
-		return
-	}
-	if err := req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
-		ProgressToken: token,
-		Progress:      progress,
-		Total:         total,
-		Message:       message,
-	}); err != nil {
-		slog.Debug("progress notification failed", "err", err)
-	}
+	sendProgressWithToken(ctx, req.Session, requestProgressToken(req), progress, total, message)
 }
 
 func requestProgressToken(req *mcp.CallToolRequest) any {
-	if req == nil || req.Params == nil {
+	if req.Params == nil {
 		return nil
 	}
 	return req.Params.GetProgressToken()
-}
-
-func requestSession(req *mcp.CallToolRequest) *mcp.ServerSession {
-	if req == nil {
-		return nil
-	}
-	return req.Session
 }
 
 // sendProgressWithToken sends a single progress notification using an explicit
@@ -252,14 +238,14 @@ func errChatIDRequired() *mcp.CallToolResult {
 	return errResult("chat_id is required. Use SearchChats (by title) or ResolveUsername (by @handle) to find the numeric chat ID first.")
 }
 
-// errInvalidMessageID wraps a ParseMessageRef failure with an actionable
-// recovery hint. Use this whenever a tool fails to parse an opaque message
-// handle so the model understands the expected format and where to get
-// valid handles from.
-func errInvalidMessageID(s string, err error) *mcp.CallToolResult {
+// errInvalidMessageID wraps a ParseMessageRef failure of the named input field
+// with an actionable recovery hint. Use this whenever a tool fails to parse an
+// opaque message handle so the model understands the expected format and where
+// to get valid handles from.
+func errInvalidMessageID(field, s string, err error) *mcp.CallToolResult {
 	return errResult(fmt.Sprintf(
-		"invalid message_id %q: %v. Expected an opaque handle returned by GetMessages or SendMessage (e.g. \"42\" for a regular message, \"s:42\" for a scheduled one). Do not parse or construct handles manually.",
-		s, err,
+		"invalid %s %q: %v. Expected an opaque handle returned by GetMessages or SendMessage (e.g. \"42\" for a regular message, \"s:42\" for a scheduled one). Do not parse or construct handles manually.",
+		field, s, err,
 	))
 }
 
@@ -273,6 +259,61 @@ func errCannotOnScheduled(verb string) *mcp.CallToolResult {
 		"cannot %s a scheduled message: it has not been sent yet and only exists in Telegram's schedule queue. Wait until it is delivered, or cancel it via DeleteMessages and create a new regular message.",
 		verb,
 	))
+}
+
+// parseRegularRef parses the opaque message handle s passed in the named input
+// field and returns its message ID, rejecting scheduled handles: the operation,
+// described by verb as in errCannotOnScheduled, needs a message that was sent.
+func parseRegularRef(field, s, verb string) (int, *mcp.CallToolResult) {
+	ref, err := presentation.ParseMessageRef(s)
+	if err != nil {
+		return 0, errInvalidMessageID(field, s, err)
+	}
+	if ref.Scheduled {
+		return 0, errCannotOnScheduled(verb)
+	}
+	return ref.ID, nil
+}
+
+// parseFutureSchedule parses a schedule_at value, which must be an RFC3339
+// timestamp in the future.
+func parseFutureSchedule(scheduleAt string) (time.Time, *mcp.CallToolResult) {
+	t, err := time.Parse(time.RFC3339, scheduleAt)
+	if err != nil {
+		return time.Time{}, errResult(fmt.Sprintf("invalid schedule_at %q: %v. Expected RFC3339 format like \"2026-04-10T15:30:00Z\".", scheduleAt, err))
+	}
+	if !t.After(time.Now()) {
+		return time.Time{}, errResult("schedule_at must be in the future")
+	}
+	return t, nil
+}
+
+// formatUnixRFC3339 renders a Telegram unix timestamp as an RFC3339 UTC string.
+func formatUnixRFC3339(unix int) string {
+	return time.Unix(int64(unix), 0).UTC().Format(time.RFC3339)
+}
+
+// firstMessageInUpdates returns the ID and date of the first *tg.Message
+// carried by an update of one of the given types inside an Updates container,
+// or (0, 0) when there is none.
+func firstMessageInUpdates(updates tg.UpdatesClass, typeIDs ...uint32) (int, int) {
+	u, ok := updates.(*tg.Updates)
+	if !ok {
+		return 0, 0
+	}
+	for _, update := range u.Updates {
+		if !slices.Contains(typeIDs, update.TypeID()) {
+			continue
+		}
+		carrier, ok := update.(interface{ GetMessage() tg.MessageClass })
+		if !ok {
+			continue
+		}
+		if msg, ok := carrier.GetMessage().(*tg.Message); ok {
+			return msg.ID, msg.Date
+		}
+	}
+	return 0, 0
 }
 
 // floodWaitResult detects a Telegram FLOOD_WAIT — including the form the

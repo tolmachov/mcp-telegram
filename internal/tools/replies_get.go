@@ -66,7 +66,7 @@ func (h *RepliesGetHandler) Register(s *mcp.Server) {
 func (h *RepliesGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in GetRepliesInput) (*mcp.CallToolResult, *getRepliesOutput, error) {
 	opts := messages.DefaultFetchOptions()
 	state := messagePageCursor{Kind: cursorKindReplies}
-	var rootRef presentation.MessageRef
+	var rootID int
 	if in.Cursor != "" {
 		if in.ChatID != 0 || in.MessageID != "" || in.Limit != 0 || in.BeforeMessageID != "" || in.FromDate != "" || in.ToDate != "" {
 			return errResult("cursor is incompatible with every other field; pass the cursor alone"), nil, nil
@@ -78,30 +78,23 @@ func (h *RepliesGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest
 		}
 		in.ChatID, in.Limit = state.ChatID, state.Limit
 		in.FromDate, in.ToDate = state.FromDate, state.ToDate
-		rootRef = presentation.MessageRef{ID: state.RootMessageID}
+		rootID = state.RootMessageID
 		opts.OffsetID, opts.Limit = state.OffsetID, state.Limit
 	} else {
 		if in.ChatID == 0 {
 			return errChatIDRequired(), nil, nil
 		}
-		var err error
-		rootRef, err = presentation.ParseMessageRef(in.MessageID)
-		if err != nil {
-			return errInvalidMessageID(in.MessageID, err), nil, nil
-		}
-		if rootRef.Scheduled {
-			return errResult("message_id cannot reference a scheduled message; scheduled messages have no reply thread."), nil, nil
+		var errRes *mcp.CallToolResult
+		rootID, errRes = parseRegularRef("message_id", in.MessageID, "read replies to")
+		if errRes != nil {
+			return errRes, nil, nil
 		}
 		opts.Limit = clampLimit(in.Limit, opts.Limit, 100)
 		if in.BeforeMessageID != "" {
-			ref, err := presentation.ParseMessageRef(in.BeforeMessageID)
-			if err != nil {
-				return errInvalidMessageID(in.BeforeMessageID, err), nil, nil
+			opts.OffsetID, errRes = parseRegularRef("before_message_id", in.BeforeMessageID, "page before")
+			if errRes != nil {
+				return errRes, nil, nil
 			}
-			if ref.Scheduled {
-				return errResult("before_message_id cannot reference a scheduled message"), nil, nil
-			}
-			opts.OffsetID = ref.ID
 		}
 	}
 
@@ -111,10 +104,10 @@ func (h *RepliesGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest
 		return dateErr, nil, nil
 	}
 	if in.Cursor == "" {
-		state = messagePageCursor{Kind: cursorKindReplies, ChatID: in.ChatID, Limit: opts.Limit, FromDate: in.FromDate, ToDate: in.ToDate, RootMessageID: rootRef.ID}
+		state = messagePageCursor{Kind: cursorKindReplies, ChatID: in.ChatID, Limit: opts.Limit, FromDate: in.FromDate, ToDate: in.ToDate, RootMessageID: rootID}
 	}
 
-	result, err := h.provider.FetchReplies(ctx, in.ChatID, rootRef.ID, opts)
+	result, err := h.provider.FetchReplies(ctx, in.ChatID, rootID, opts)
 	if err != nil {
 		mcpLog(ctx, req.Session, logLevelWarning, "GetReplies", map[string]any{
 			"action":     "provider_fetch_replies_failed",
@@ -127,7 +120,7 @@ func (h *RepliesGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest
 
 	out := &getRepliesOutput{
 		ChatID:    in.ChatID,
-		MessageID: rootRef.Format(),
+		MessageID: presentation.FormatRegularRef(rootID),
 		Messages:  make([]presentation.Message, 0, len(result.Messages)),
 		Count:     result.Count,
 		HasMore:   result.HasMore,

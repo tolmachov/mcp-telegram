@@ -113,7 +113,7 @@ func (h *ChatMuteHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in
 	if in.DurationSeconds == 0 {
 		res.Forever = true
 	} else {
-		res.MutedUntil = time.Unix(int64(muteUntil), 0).UTC().Format(time.RFC3339)
+		res.MutedUntil = formatUnixRFC3339(muteUntil)
 	}
 	return nil, res, nil
 }

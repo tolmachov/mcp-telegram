@@ -82,14 +82,11 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		}
 		opts.Limit = clampLimit(in.Limit, opts.Limit, 100)
 		if in.BeforeMessageID != "" {
-			ref, err := presentation.ParseMessageRef(in.BeforeMessageID)
-			if err != nil {
-				return errInvalidMessageID(in.BeforeMessageID, err), nil, nil
+			var errRes *mcp.CallToolResult
+			opts.OffsetID, errRes = parseRegularRef("before_message_id", in.BeforeMessageID, "page before")
+			if errRes != nil {
+				return errRes, nil, nil
 			}
-			if ref.Scheduled {
-				return errResult("before_message_id cannot reference a scheduled message"), nil, nil
-			}
-			opts.OffsetID = ref.ID
 		}
 		state = messagePageCursor{Kind: cursorKindHistory, ChatID: in.ChatID, Limit: opts.Limit, FromDate: in.FromDate, ToDate: in.ToDate, UnreadOnly: in.UnreadOnly, IncludeScheduled: in.IncludeScheduled}
 	}

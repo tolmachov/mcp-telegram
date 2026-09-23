@@ -56,23 +56,20 @@ func (h *MessageContextGetHandler) handle(ctx context.Context, req *mcp.CallTool
 	if in.MessageID == "" {
 		return errResult("message_id is required. Pass an opaque handle returned by GetMessages or ResolveMessageLink."), nil, nil
 	}
-	ref, err := presentation.ParseMessageRef(in.MessageID)
-	if err != nil {
-		return errInvalidMessageID(in.MessageID, err), nil, nil
-	}
-	if ref.Scheduled {
-		return errCannotOnScheduled("get context around"), nil, nil
+	msgID, errRes := parseRegularRef("message_id", in.MessageID, "get context around")
+	if errRes != nil {
+		return errRes, nil, nil
 	}
 
 	before := clampWindow(in.Before)
 	after := clampWindow(in.After)
 
-	result, err := h.provider.FetchContext(ctx, in.ChatID, ref.ID, before, after)
+	result, err := h.provider.FetchContext(ctx, in.ChatID, msgID, before, after)
 	if err != nil {
 		mcpLog(ctx, req.Session, logLevelWarning, "GetMessageContext", map[string]any{
 			"action":  "provider_fetch_failed",
 			"chat_id": in.ChatID,
-			"msg_id":  ref.ID,
+			"msg_id":  msgID,
 			"error":   err.Error(),
 		})
 		return errResult(fmt.Sprintf("Failed to get message context: %v", err)), nil, nil
@@ -80,7 +77,7 @@ func (h *MessageContextGetHandler) handle(ctx context.Context, req *mcp.CallTool
 
 	out := &getMessageContextOutput{
 		ChatID:   in.ChatID,
-		AnchorID: presentation.FormatRegularRef(ref.ID),
+		AnchorID: presentation.FormatRegularRef(msgID),
 		Messages: make([]presentation.Message, 0, len(result.Messages)),
 	}
 	for _, m := range result.Messages {

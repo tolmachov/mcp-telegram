@@ -94,7 +94,7 @@ func (h *MessageDeleteHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	for i, s := range in.MessageIDs {
 		ref, err := presentation.ParseMessageRef(s)
 		if err != nil {
-			return errInvalidMessageID(s, err), nil, nil
+			return errInvalidMessageID("message_ids", s, err), nil, nil
 		}
 		if i == 0 {
 			scheduled = ref.Scheduled

@@ -8,7 +8,7 @@ import (
 )
 
 func TestInputSchemaWithEnums(t *testing.T) {
-	schema := inputSchemaWithEnums[SummarizeChatInput](map[string][]any{
+	schema := inputSchemaWithEnums[SummarizeChatInput](map[string][]string{
 		"period": {"day", "week", "month"},
 	})
 
@@ -22,7 +22,7 @@ func TestInputSchemaWithEnums(t *testing.T) {
 
 func TestInputSchemaWithEnumsPanicsOnUnknownProperty(t *testing.T) {
 	assert.Panics(t, func() {
-		inputSchemaWithEnums[SummarizeChatInput](map[string][]any{
+		inputSchemaWithEnums[SummarizeChatInput](map[string][]string{
 			"does_not_exist": {"x"},
 		})
 	})

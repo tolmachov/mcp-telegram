@@ -3,7 +3,8 @@ package tools
 import (
 	"context"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/gotd/td/tg"
@@ -40,13 +41,12 @@ type SearchMessagesInput struct {
 	FromDate        string `json:"from_date,omitempty" jsonschema:"RFC3339 lower bound (inclusive). Wired to Telegram's native min_date (inclusive)."`
 	ToDate          string `json:"to_date,omitempty" jsonschema:"RFC3339 exclusive upper bound. Wired to Telegram's native max_date (strictly less-than). To include a full day\\, pass midnight of the following day\\, e.g. 2026-04-11T00:00:00Z to include all of 2026-04-10."`
 	FromSenderID    int64  `json:"from_sender_id,omitempty" jsonschema:"Numeric peer ID of a sender to filter by (e.g. from ResolveUsername or GetChatInfo). Only returns messages authored by this user/channel."`
-	MediaType       string `json:"media_type,omitempty" jsonschema:"Optional message-type filter. One of: photos\\, videos\\, documents\\, links\\, voice\\, music\\, gif\\, round_video\\, round_voice. Leave empty for plain text search."`
+	MediaType       string `json:"media_type,omitempty" jsonschema:"Optional message-type filter. Leave empty for plain text search."`
 	TopMsgID        string `json:"top_msg_id,omitempty" jsonschema:"Opaque regular-message handle of a forum topic or reply thread root. When set\\, results are restricted to that thread."`
 }
 
 // mediaFilterMap translates the whitelisted media_type enum into its
-// corresponding tg.MessagesFilterClass constructor. Keys MUST stay in
-// sync with the jsonschema description on SearchMessagesInput.MediaType.
+// corresponding tg.MessagesFilterClass constructor. Its keys are the enum.
 var mediaFilterMap = map[string]func() tg.MessagesFilterClass{
 	"photos":      func() tg.MessagesFilterClass { return &tg.InputMessagesFilterPhotos{} },
 	"videos":      func() tg.MessagesFilterClass { return &tg.InputMessagesFilterVideo{} },
@@ -58,6 +58,9 @@ var mediaFilterMap = map[string]func() tg.MessagesFilterClass{
 	"round_video": func() tg.MessagesFilterClass { return &tg.InputMessagesFilterRoundVideo{} },
 	"round_voice": func() tg.MessagesFilterClass { return &tg.InputMessagesFilterRoundVoice{} },
 }
+
+// mediaTypes is the sorted media_type enum.
+var mediaTypes = slices.Sorted(maps.Keys(mediaFilterMap))
 
 // searchMessagesOutput mirrors getMessagesOutput but is declared separately
 // so schema generation doesn't alias the two tools. The per-message DTO
@@ -82,8 +85,8 @@ func (h *MessagesSearchHandler) Register(s *mcp.Server) {
 		Description: "Search messages by substring within a specific chat via Telegram's server-side messages.search. Returns up to `limit` messages (default 50, max 100) sorted newest-first. " +
 			"Continue with `cursor` alone; it embeds the original query and filters. Use `before_message_id` only for the initial anchor. Date range uses inclusive `from_date` and exclusive `to_date`. " +
 			"For cross-chat search use SearchMessagesGlobal. For chat discovery by title use SearchChats.",
-		InputSchema: inputSchemaWithEnums[SearchMessagesInput](map[string][]any{
-			"media_type": {"photos", "videos", "documents", "links", "voice", "music", "gif", "round_video", "round_voice"},
+		InputSchema: inputSchemaWithEnums[SearchMessagesInput](map[string][]string{
+			"media_type": mediaTypes,
 		}),
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
 	}, h.handle)
@@ -118,25 +121,19 @@ func (h *MessagesSearchHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	if in.Cursor != "" {
 		opts.Limit, opts.OffsetID, opts.TopMsgID = state.Limit, state.OffsetID, state.TopMsgID
 	} else if in.BeforeMessageID != "" {
-		ref, err := presentation.ParseMessageRef(in.BeforeMessageID)
-		if err != nil {
-			return errInvalidMessageID(in.BeforeMessageID, err), nil, nil
+		var errRes *mcp.CallToolResult
+		opts.OffsetID, errRes = parseRegularRef("before_message_id", in.BeforeMessageID, "page before")
+		if errRes != nil {
+			return errRes, nil, nil
 		}
-		if ref.Scheduled {
-			return errResult("before_message_id cannot reference a scheduled message"), nil, nil
-		}
-		opts.OffsetID = ref.ID
 	}
 
 	if in.TopMsgID != "" {
-		ref, err := presentation.ParseMessageRef(in.TopMsgID)
-		if err != nil {
-			return errResult(fmt.Sprintf("invalid top_msg_id %q: %v. Expected an opaque regular-message handle (e.g. \"42\") pointing at the thread/topic root.", in.TopMsgID, err)), nil, nil
+		var errRes *mcp.CallToolResult
+		opts.TopMsgID, errRes = parseRegularRef("top_msg_id", in.TopMsgID, "search the thread of")
+		if errRes != nil {
+			return errRes, nil, nil
 		}
-		if ref.Scheduled {
-			return errResult("top_msg_id cannot reference a scheduled message; scheduled messages cannot be thread roots."), nil, nil
-		}
-		opts.TopMsgID = ref.ID
 	}
 
 	var dateErr *mcp.CallToolResult
@@ -148,7 +145,7 @@ func (h *MessagesSearchHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	if in.MediaType != "" {
 		ctor, ok := mediaFilterMap[in.MediaType]
 		if !ok {
-			return errResult(fmt.Sprintf("invalid media_type %q: expected one of %s.", in.MediaType, validMediaTypesList())), nil, nil
+			return errResult(fmt.Sprintf("invalid media_type %q: expected one of %s.", in.MediaType, strings.Join(mediaTypes, ", "))), nil, nil
 		}
 		opts.Filter = ctor()
 	}
@@ -187,15 +184,4 @@ func (h *MessagesSearchHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	}
 
 	return nil, out, nil
-}
-
-// validMediaTypesList returns the accepted media_type values in a stable
-// alphabetical order so error messages don't thrash between calls.
-func validMediaTypesList() string {
-	keys := make([]string, 0, len(mediaFilterMap))
-	for k := range mediaFilterMap {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return strings.Join(keys, ", ")
 }

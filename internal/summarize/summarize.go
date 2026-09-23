@@ -1,9 +1,11 @@
 package summarize
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -26,6 +28,21 @@ Instructions:
 - Keep the summary concise but comprehensive
 - Write in the same language as the messages
 - Output only the updated summary as plain text (markdown allowed)`
+
+// Periods maps each accepted "period" value of SummarizeChat and the summary
+// prompts to how far back it looks.
+var Periods = map[string]time.Duration{
+	"day":   24 * time.Hour,
+	"week":  7 * 24 * time.Hour,
+	"month": 30 * 24 * time.Hour,
+}
+
+// PeriodNames returns the keys of Periods, shortest period first.
+func PeriodNames() []string {
+	return slices.SortedFunc(maps.Keys(Periods), func(a, b string) int {
+		return cmp.Compare(Periods[a], Periods[b])
+	})
+}
 
 // ProgressCallback is called with the current batch number, total batches, and a message.
 type ProgressCallback func(current, total int, message string)

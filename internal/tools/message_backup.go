@@ -389,7 +389,7 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	// in that case backupProgress.Send becomes a no-op via sendProgressWithToken.
 	progress := newBackupProgress(
 		ctx,
-		requestSession(req),
+		req.Session,
 		requestProgressToken(req),
 		fromDate, toDate,
 		count,

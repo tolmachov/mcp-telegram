@@ -20,6 +20,7 @@ import (
 	"github.com/lithammer/fuzzysearch/fuzzy"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/tolmachov/mcp-telegram/internal/summarize"
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
@@ -32,9 +33,6 @@ const (
 	// the Telegram API and the shared rate limiter.
 	chatCacheTTL = 30 * time.Second
 )
-
-// periodValues are the accepted values for the "period" argument across prompts.
-var periodValues = []string{"day", "week", "month"}
 
 // chatLister returns the user's chats. It is abstracted so tests can exercise
 // the completer without a live Telegram client.
@@ -72,7 +70,7 @@ func (c *completer) handle(ctx context.Context, req *mcp.CompleteRequest) (*mcp.
 	value := req.Params.Argument.Value
 	switch req.Params.Argument.Name {
 	case "period":
-		return result(filterPrefix(periodValues, value)), nil
+		return result(filterPrefix(summarize.PeriodNames(), value)), nil
 	case "chat":
 		return result(c.completeChats(ctx, value, false)), nil
 	case "chat_id":

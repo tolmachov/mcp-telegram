@@ -23,9 +23,9 @@ func TestRepliesGetHandlerValidation(t *testing.T) {
 		{"zero chat_id", GetRepliesInput{MessageID: "1"}, "chat_id is required"},
 		{"empty message_id", GetRepliesInput{ChatID: 1}, "invalid message_id"},
 		{"non-numeric message_id", GetRepliesInput{ChatID: 1, MessageID: "abc"}, "invalid message_id"},
-		{"scheduled message_id", GetRepliesInput{ChatID: 1, MessageID: "s:42"}, "no reply thread"},
-		{"non-numeric before_message_id", GetRepliesInput{ChatID: 1, MessageID: "1", BeforeMessageID: "xx"}, "invalid message_id"},
-		{"scheduled before_message_id", GetRepliesInput{ChatID: 1, MessageID: "1", BeforeMessageID: "s:5"}, "before_message_id cannot reference a scheduled"},
+		{"scheduled message_id", GetRepliesInput{ChatID: 1, MessageID: "s:42"}, "cannot read replies to a scheduled message"},
+		{"non-numeric before_message_id", GetRepliesInput{ChatID: 1, MessageID: "1", BeforeMessageID: "xx"}, "invalid before_message_id"},
+		{"scheduled before_message_id", GetRepliesInput{ChatID: 1, MessageID: "1", BeforeMessageID: "s:5"}, "cannot page before a scheduled message"},
 		{"bad from_date", GetRepliesInput{ChatID: 1, MessageID: "1", FromDate: "nope"}, "invalid from_date"},
 		{"from after to", GetRepliesInput{ChatID: 1, MessageID: "1", FromDate: "2026-02-01T00:00:00Z", ToDate: "2026-01-01T00:00:00Z"}, "window is empty"},
 	}

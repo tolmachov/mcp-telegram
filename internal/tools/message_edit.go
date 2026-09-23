@@ -2,8 +2,6 @@ package tools
 
 import (
 	"context"
-	"fmt"
-	"time"
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -70,7 +68,7 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	}
 	ref, err := presentation.ParseMessageRef(in.MessageID)
 	if err != nil {
-		return errInvalidMessageID(in.MessageID, err), nil, nil
+		return errInvalidMessageID("message_id", in.MessageID, err), nil, nil
 	}
 	if in.NewText == "" {
 		return errResult("new_text is required"), nil, nil
@@ -91,12 +89,9 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		if in.ScheduleAt == "" {
 			return errResult("schedule_at is required when editing a scheduled message (\"s:...\"). Provide an RFC3339 timestamp in the future — it sets the new delivery time and fully replaces the old schedule."), nil, nil
 		}
-		t, err := time.Parse(time.RFC3339, in.ScheduleAt)
-		if err != nil {
-			return errResult(fmt.Sprintf("invalid schedule_at %q: %v. Expected RFC3339 format like \"2026-04-10T15:30:00Z\".", in.ScheduleAt, err)), nil, nil
-		}
-		if !t.After(time.Now()) {
-			return errResult("schedule_at must be in the future"), nil, nil
+		t, errRes := parseFutureSchedule(in.ScheduleAt)
+		if errRes != nil {
+			return errRes, nil, nil
 		}
 		editReq.ScheduleDate = int(t.Unix())
 	} else if in.ScheduleAt != "" {
@@ -148,7 +143,7 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		}
 	}
 	if date > 0 {
-		res.EditedAt = time.Unix(int64(date), 0).UTC().Format(time.RFC3339)
+		res.EditedAt = formatUnixRFC3339(date)
 	}
 	return nil, res, nil
 }
@@ -158,21 +153,5 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 // UpdateEditMessage (for regular chats and scheduled messages) and
 // UpdateEditChannelMessage (for channels/supergroups).
 func extractEditedMessageID(updates tg.UpdatesClass) (int, int) {
-	u, ok := updates.(*tg.Updates)
-	if !ok {
-		return 0, 0
-	}
-	for _, update := range u.Updates {
-		if editMsg, ok := update.(*tg.UpdateEditMessage); ok {
-			if msg, ok := editMsg.Message.(*tg.Message); ok {
-				return msg.ID, msg.Date
-			}
-		}
-		if editMsg, ok := update.(*tg.UpdateEditChannelMessage); ok {
-			if msg, ok := editMsg.Message.(*tg.Message); ok {
-				return msg.ID, msg.Date
-			}
-		}
-	}
-	return 0, 0
+	return firstMessageInUpdates(updates, tg.UpdateEditMessageTypeID, tg.UpdateEditChannelMessageTypeID)
 }
