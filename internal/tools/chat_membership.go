@@ -217,7 +217,7 @@ func (h *LeaveChatHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, i
 			return nil, err
 		}
 		if err != nil {
-			return nil, failedHint(fmt.Sprintf("resolve %q", chat), err, "The chat may not exist or you may not have access; use SearchChats or GetChats to verify.")
+			return nil, failed(fmt.Sprintf("resolve %q", chat), err)
 		}
 		return []tgclient.Peer{peer}, nil
 	}, func(peers []tgclient.Peer) (*LeaveChatResult, error) {
@@ -410,7 +410,7 @@ func resolveChannelByUsername(ctx context.Context, client *tg.Client, username s
 	}
 	input, channel, err := resolvedChannel(resolved)
 	if err != nil {
-		return nil, nil, fmt.Errorf("@%s is %w", strings.TrimPrefix(strings.TrimSpace(username), "@"), err)
+		return nil, nil, fmt.Errorf("@%s: %w", strings.TrimPrefix(strings.TrimSpace(username), "@"), err)
 	}
 	return input, channel, nil
 }

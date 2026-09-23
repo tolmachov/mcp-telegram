@@ -34,9 +34,15 @@ func TestIsPeerSpecific(t *testing.T) {
 	for _, err := range []error{
 		tgerr.New(400, "CHANNEL_INVALID"),
 		tgerr.New(400, "PEER_ID_INVALID"),
+		tgerr.New(400, "CHAT_ID_INVALID"),
 		tgerr.New(406, "CHANNEL_PRIVATE"),
+		tgerr.New(400, "CHANNEL_PUBLIC_GROUP_NA"),
+		tgerr.New(400, "PEER_ID_NOT_SUPPORTED"),
+		tgerr.New(400, "USER_BANNED_IN_CHANNEL"),
+		tgerr.New(400, "USERNAME_NOT_OCCUPIED"),
+		tgerr.New(400, "USERNAME_INVALID"),
 		fmt.Errorf("getting top messages: %w", tgerr.New(400, "CHANNEL_PRIVATE")),
-		&PeerError{ID: 5, Err: errors.New("no such chat")},
+		unresolvable(5, "no such chat"),
 	} {
 		assert.True(t, IsPeerSpecific(err), "%v is about one peer", err)
 	}
@@ -44,6 +50,11 @@ func TestIsPeerSpecific(t *testing.T) {
 		errors.New("connection reset by peer"),
 		tgerr.New(500, "INTERNAL_SERVER_ERROR"),
 		tgerr.New(400, "LIMIT_INVALID"),
+		// A resolve that failed for a reason that is not the chat's.
+		fmt.Errorf("resolving channel 5: %w", tgerr.New(500, "INTERNAL_SERVER_ERROR")),
+		// Telegram refusing the session on one DC is about the account, not
+		// about the chat the call named.
+		tgerr.New(401, "AUTH_KEY_UNREGISTERED"),
 	} {
 		assert.False(t, IsPeerSpecific(err), "%v would fail every peer alike", err)
 	}

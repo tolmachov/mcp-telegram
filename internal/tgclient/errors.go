@@ -48,24 +48,27 @@ func ShouldRefreshPeer(err error) bool {
 	return tgerr.Is(err, "PEER_ID_INVALID", "CHANNEL_INVALID", "CHAT_ID_INVALID")
 }
 
+// ErrUnresolvablePeer is the failure to turn a chat reference into a peer
+// because of the reference itself: a non-positive ID, an ID that is no
+// reachable user, chat or channel, a channel this account cannot access, or an
+// entity without the access hash an InputPeer needs. Any other resolve failure
+// — a flood wait, a transport error, Telegram's own trouble — says nothing
+// about the chat and is not this error.
+var ErrUnresolvablePeer = errors.New("cannot resolve chat")
+
+// unresolvable reports that chat id cannot be resolved, and why.
+func unresolvable(id int64, reason string) error {
+	return fmt.Errorf("%w %d: %s", ErrUnresolvablePeer, id, reason)
+}
+
 // IsPeerSpecific reports whether err, which is not systemic (callers test
-// IsSystemic first), is about one peer a request named — a stale or invalid ID
-// or access hash, a chat that failed to resolve, a channel this account cannot
-// access — so a batch Telegram failed as a whole may retry its peers one by one
-// to isolate the bad one. Any other error would fail each of them alike.
+// IsSystemic first), is about one peer a request named — a chat reference that
+// cannot be resolved (ErrUnresolvablePeer), a stale or invalid ID or access
+// hash, a channel this account cannot access, an unknown @username — so a
+// batch Telegram failed as a whole may retry its peers one by one to isolate
+// the bad one. Any other error would fail each of them alike.
 func IsPeerSpecific(err error) bool {
-	var pe *PeerError
-	return ShouldRefreshPeer(err) || errors.As(err, &pe) ||
-		tgerr.Is(err, "CHANNEL_PRIVATE", "CHANNEL_PUBLIC_GROUP_NA", "PEER_ID_NOT_SUPPORTED", "USER_BANNED_IN_CHANNEL")
+	return errors.Is(err, ErrUnresolvablePeer) || ShouldRefreshPeer(err) ||
+		tgerr.Is(err, "CHANNEL_PRIVATE", "CHANNEL_PUBLIC_GROUP_NA", "PEER_ID_NOT_SUPPORTED", "USER_BANNED_IN_CHANNEL",
+			"USERNAME_NOT_OCCUPIED", "USERNAME_INVALID")
 }
-
-// PeerError is a failure to resolve a chat ID to a peer. Tool layers detect
-// it to point the caller at the chat-discovery tools.
-type PeerError struct {
-	ID  int64
-	Err error
-}
-
-func (e *PeerError) Error() string { return fmt.Sprintf("resolving chat %d: %v", e.ID, e.Err) }
-
-func (e *PeerError) Unwrap() error { return e.Err }

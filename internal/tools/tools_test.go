@@ -56,9 +56,14 @@ func TestFailureText(t *testing.T) {
 		assert.Equal(t, "Failed to download media: rpc error code 401: AUTH_KEY_UNREGISTERED.", txt)
 	})
 
-	t.Run("unresolved chat gets the peer hint", func(t *testing.T) {
-		err := failed("send message to chat 42", &tgclient.PeerError{ID: 42, Err: errors.New("boom")})
-		assert.Equal(t, "Failed to send message to chat 42: resolving chat 42: boom. "+peerHint, failureText("SendMessage", err))
+	t.Run("a chat that cannot be resolved gets the peer hint", func(t *testing.T) {
+		err := failed("send message to chat 42", fmt.Errorf("%w 42: no such chat", tgclient.ErrUnresolvablePeer))
+		assert.Equal(t, "Failed to send message to chat 42: cannot resolve chat 42: no such chat. "+peerHint, failureText("SendMessage", err))
+	})
+
+	t.Run("a resolve that failed for another reason gets no peer hint", func(t *testing.T) {
+		err := failed("send message to chat 42", fmt.Errorf("resolving channel 42: %w", tgerr.New(500, "INTERNAL_SERVER_ERROR")))
+		assert.Equal(t, "Failed to send message to chat 42: resolving channel 42: rpc error code 500: INTERNAL_SERVER_ERROR.", failureText("SendMessage", err))
 	})
 
 	t.Run("own hint follows the error", func(t *testing.T) {
@@ -75,7 +80,7 @@ func TestFailureText(t *testing.T) {
 		for name, cause := range map[string]error{
 			"flood wait":   flood,
 			"dead session": dead,
-			"cancellation": &tgclient.PeerError{ID: 42, Err: context.Canceled},
+			"cancellation": fmt.Errorf("resolving chat 42: %w", context.Canceled),
 		} {
 			t.Run(name, func(t *testing.T) {
 				txt := failureText("ResolveUsername", failedHint("resolve @x", cause, "Try SearchChats instead."))
@@ -84,7 +89,7 @@ func TestFailureText(t *testing.T) {
 			})
 		}
 		assert.Equal(t, "Failed to resolve @x: resolving chat 42: context canceled.",
-			failureText("ResolveUsername", failedHint("resolve @x", &tgclient.PeerError{ID: 42, Err: context.Canceled}, "Try SearchChats instead.")))
+			failureText("ResolveUsername", failedHint("resolve @x", fmt.Errorf("resolving chat 42: %w", context.Canceled), "Try SearchChats instead.")))
 	})
 
 	t.Run("note survives a systemic failure, hint does not", func(t *testing.T) {

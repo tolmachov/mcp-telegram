@@ -59,25 +59,16 @@ func resolvedEntity(r *tg.ContactsResolvedPeer) any {
 // r.Peer designates.
 var errResolvedNotPresent = errors.New("resolved peer not present in response entities")
 
-// errNoSharedDialog reports a resolved user or channel without an access hash.
-var errNoSharedDialog = errors.New("resolved but missing access hash (no shared dialog)")
-
 // resolvedPeer builds the peer — InputPeer and entity, as the resolver
 // returns them — for the canonical resolved peer.
 func resolvedPeer(r *tg.ContactsResolvedPeer) (tgclient.Peer, error) {
 	switch e := resolvedEntity(r).(type) {
 	case *tg.User:
-		if e.AccessHash == 0 {
-			return tgclient.Peer{}, errNoSharedDialog
-		}
-		return tgclient.Peer{Input: &tg.InputPeerUser{UserID: e.ID, AccessHash: e.AccessHash}, User: e}, nil
+		return tgclient.PeerFromEntity(e)
 	case *tg.Chat:
-		return tgclient.Peer{Input: &tg.InputPeerChat{ChatID: e.ID}, Chat: e}, nil
+		return tgclient.PeerFromEntity(e)
 	case *tg.Channel:
-		if e.AccessHash == 0 {
-			return tgclient.Peer{}, errNoSharedDialog
-		}
-		return tgclient.Peer{Input: &tg.InputPeerChannel{ChannelID: e.ID, AccessHash: e.AccessHash}, Chat: e}, nil
+		return tgclient.PeerFromEntity(e)
 	}
 	return tgclient.Peer{}, errResolvedNotPresent
 }
@@ -102,8 +93,8 @@ func resolvedPeerInfo(r *tg.ContactsResolvedPeer) (id int64, title string, ok bo
 func resolvedChannel(r *tg.ContactsResolvedPeer) (*tg.InputChannel, *tg.Channel, error) {
 	switch e := resolvedEntity(r).(type) {
 	case *tg.Channel:
-		if e.AccessHash == 0 {
-			return nil, nil, errNoSharedDialog
+		if _, err := tgclient.PeerFromEntity(e); err != nil {
+			return nil, nil, err
 		}
 		return &tg.InputChannel{ChannelID: e.ID, AccessHash: e.AccessHash}, e, nil
 	case nil:

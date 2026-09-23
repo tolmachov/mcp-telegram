@@ -107,8 +107,8 @@ func TestResolverSharedProbeOutlivesCaller(t *testing.T) {
 	cancelFirst()
 	err := <-firstErr
 	require.ErrorIs(t, err, context.Canceled, "the cancelled caller stops waiting")
-	var pe *PeerError
-	require.ErrorAs(t, err, &pe)
+	require.ErrorContains(t, err, "resolving chat 5")
+	assert.False(t, IsPeerSpecific(err), "giving up says nothing about the chat")
 
 	close(inv.gate)
 	require.NoError(t, <-second, "the other caller still gets the peer")
@@ -166,8 +166,7 @@ func TestResolverProbeRunsOnItsLifetime(t *testing.T) {
 	for range waiters {
 		err := <-errs
 		require.ErrorIs(t, err, context.Canceled, "ending the lifetime fails the waiters")
-		var pe *PeerError
-		require.ErrorAs(t, err, &pe)
+		assert.False(t, IsPeerSpecific(err), "the lifetime ending says nothing about the chat")
 	}
 	_, ok := r.cached(5)
 	assert.False(t, ok, "a cancelled probe caches nothing")
@@ -192,9 +191,10 @@ func TestResolverDoesNotCacheErrors(t *testing.T) {
 	r := NewResolver(t.Context(), client)
 
 	_, err := r.Resolve(t.Context(), 1555091578)
-	var pe *PeerError
-	require.ErrorAs(t, err, &pe, "first Resolve should surface the flood-wait as a PeerError")
-	assert.Equal(t, int64(1555091578), pe.ID)
+	_, isFlood := tgerr.AsFloodWait(err)
+	require.True(t, isFlood, "first Resolve should surface the flood wait: %v", err)
+	assert.ErrorContains(t, err, "1555091578", "the error names the chat")
+	assert.False(t, IsPeerSpecific(err), "a flood wait says nothing about the chat")
 
 	p, err := r.Resolve(t.Context(), 1555091578)
 	require.NoError(t, err, "the error must not have been cached; retry should succeed")

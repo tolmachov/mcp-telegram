@@ -268,7 +268,7 @@ func withHint(err error, hint string) error { return newFailure("", "", hint, er
 // withNote attaches an outcome note to err for the failure that wraps it.
 func withNote(err error, note string) error { return newFailure("", note, "", err) }
 
-// peerHint follows a failure to resolve a chat ID.
+// peerHint follows a failure about the one chat a call named (tgclient.IsPeerSpecific).
 const peerHint = "The chat may not exist, you may not have access, or the ID may be wrong. Use SearchChats or GetChats to verify, or ResolveUsername if you only have a @handle."
 
 // toolFailure is the single place a handler's Go error becomes the tool error
@@ -287,7 +287,7 @@ func toolFailure(ctx context.Context, req *mcp.CallToolRequest, tool string, err
 // followed by the failure's note and then its hint. A systemic error gets its
 // fixed guidance as what happened (systemicText) and no hint; anything else
 // shows the error itself, followed by the failure's own hint or, lacking one,
-// the peer hint when a chat ID failed to resolve.
+// the peer hint when the failure is about the chat the call named.
 func failureText(tool string, err error) string {
 	// The outermost op names what failed; the outermost note and hint win.
 	op, note, hint, cause := "run "+tool, "", "", err
@@ -309,11 +309,10 @@ func failureText(tool string, err error) string {
 		e = f.err
 	}
 	var what string
-	var pe *tgclient.PeerError
 	switch {
 	case tgclient.IsSystemic(cause):
 		what, hint = systemicText(tool, cause), ""
-	case hint == "" && errors.As(cause, &pe):
+	case hint == "" && tgclient.IsPeerSpecific(cause):
 		what, hint = sentence(cause), peerHint
 	default:
 		what = sentence(cause)

@@ -96,6 +96,7 @@ func TestResolvePeer(t *testing.T) {
 		for _, id := range []int64{-1001555091578, -500, 0} {
 			_, err := resolvePeer(ctx, client, id)
 			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrUnresolvablePeer)
 			assert.Contains(t, err.Error(), "positive ID", "id %d", id)
 		}
 	})
@@ -139,6 +140,7 @@ func TestResolvePeer(t *testing.T) {
 		assert.NotContains(t, err.Error(), "-100")
 		assert.NotContains(t, err.Error(), "CHANNEL_INVALID")
 		assert.Contains(t, err.Error(), "ResolveUsername")
+		assert.ErrorIs(t, err, ErrUnresolvablePeer)
 	})
 
 	t.Run("CHAT_ID_INVALID from the basic-chat probe falls through to the friendly error", func(t *testing.T) {
@@ -155,10 +157,11 @@ func TestResolvePeer(t *testing.T) {
 		_, err := resolvePeer(ctx, client, 1906423222)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "ResolveUsername")
+		assert.ErrorIs(t, err, ErrUnresolvablePeer)
 		assert.NotContains(t, err.Error(), "CHAT_ID_INVALID", "raw MTProto code must not leak")
 	})
 
-	t.Run("known user without access_hash fails loudly and aborts the sweep", func(t *testing.T) {
+	t.Run("known user without access hash fails loudly and aborts the sweep", func(t *testing.T) {
 		client := tg.NewClient(fakeInvoker{
 			users: func([]tg.InputUserClass) ([]tg.UserClass, error) {
 				return []tg.UserClass{&tg.User{ID: 42, AccessHash: 0}}, nil
@@ -171,7 +174,8 @@ func TestResolvePeer(t *testing.T) {
 
 		_, err := resolvePeer(ctx, client, 42)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "access_hash")
+		assert.ErrorIs(t, err, ErrUnresolvablePeer)
+		assert.Contains(t, err.Error(), "access hash")
 	})
 
 	t.Run("genuine error in an early probe aborts without firing later probes", func(t *testing.T) {
@@ -192,6 +196,7 @@ func TestResolvePeer(t *testing.T) {
 		_, err := resolvePeer(ctx, client, 1555091578)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "FLOOD_WAIT", "the real error must surface, not a misattributed one")
+		assert.NotErrorIs(t, err, ErrUnresolvablePeer, "a flood wait says nothing about the chat")
 	})
 
 	t.Run("inaccessible channel surfaces an actionable error", func(t *testing.T) {
@@ -208,6 +213,47 @@ func TestResolvePeer(t *testing.T) {
 		_, err := resolvePeer(ctx, client, 1555091578)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "ResolveUsername")
+		assert.ErrorIs(t, err, ErrUnresolvablePeer)
 		assert.NotContains(t, err.Error(), "CHANNEL_PRIVATE", "raw MTProto code must not leak")
 	})
+}
+
+// TestPeerFromEntity pins the one builder of a Peer from an entity: a user or
+// channel needs its access hash, a basic chat needs none.
+func TestPeerFromEntity(t *testing.T) {
+	peer, err := PeerFromEntity(&tg.User{ID: 7, AccessHash: 99})
+	require.NoError(t, err)
+	assert.Equal(t, &tg.InputPeerUser{UserID: 7, AccessHash: 99}, peer.Input)
+	assert.Equal(t, int64(7), peer.User.ID)
+
+	peer, err = PeerFromEntity(&tg.Chat{ID: 42})
+	require.NoError(t, err)
+	assert.Equal(t, &tg.InputPeerChat{ChatID: 42}, peer.Input)
+	assert.Equal(t, &tg.Chat{ID: 42}, peer.Chat)
+
+	peer, err = PeerFromEntity(&tg.Channel{ID: 5, AccessHash: 123})
+	require.NoError(t, err)
+	assert.Equal(t, &tg.InputPeerChannel{ChannelID: 5, AccessHash: 123}, peer.Input)
+	assert.Equal(t, &tg.Channel{ID: 5, AccessHash: 123}, peer.Chat)
+
+	_, err = PeerFromEntity(&tg.User{ID: 7})
+	require.ErrorIs(t, err, ErrUnresolvablePeer)
+	assert.ErrorContains(t, err, "access hash")
+	_, err = PeerFromEntity(&tg.Channel{ID: 5})
+	require.ErrorIs(t, err, ErrUnresolvablePeer)
+	assert.ErrorContains(t, err, "access hash")
+}
+
+// TestResolvePeerRejectsAChannelWithoutAccessHash pins that the ID path agrees
+// with the @username path (PeerFromEntity) on a channel Telegram returns
+// without its access hash.
+func TestResolvePeerRejectsAChannelWithoutAccessHash(t *testing.T) {
+	client := tg.NewClient(fakeInvoker{
+		channels: func([]tg.InputChannelClass) (tg.MessagesChatsClass, error) {
+			return &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Channel{ID: 5}}}, nil
+		},
+	})
+	_, err := resolvePeer(t.Context(), client, 5)
+	require.ErrorIs(t, err, ErrUnresolvablePeer)
+	assert.ErrorContains(t, err, "access hash")
 }

@@ -39,6 +39,28 @@ func (p Peer) ID() int64 {
 // sweep.
 type peerProbe func(ctx context.Context, client *tg.Client, id int64) (Peer, bool, error)
 
+// PeerFromEntity builds the Peer for an entity Telegram returned: a user, a
+// basic chat or a channel. MTProto addresses a user or a channel by its access
+// hash, so one Telegram returned without it — the account shares no dialog
+// with it — cannot be addressed and fails with ErrUnresolvablePeer.
+func PeerFromEntity[E *tg.User | *tg.Chat | *tg.Channel](entity E) (Peer, error) {
+	switch e := any(entity).(type) {
+	case *tg.User:
+		if e.AccessHash == 0 {
+			return Peer{}, unresolvable(e.ID, "Telegram returned the user without an access hash, so this account shares no dialog with them")
+		}
+		return Peer{Input: &tg.InputPeerUser{UserID: e.ID, AccessHash: e.AccessHash}, User: e}, nil
+	case *tg.Channel:
+		if e.AccessHash == 0 {
+			return Peer{}, unresolvable(e.ID, "Telegram returned the channel without an access hash, so this account shares no dialog with it")
+		}
+		return Peer{Input: &tg.InputPeerChannel{ChannelID: e.ID, AccessHash: e.AccessHash}, Chat: e}, nil
+	default:
+		chat := any(entity).(*tg.Chat)
+		return Peer{Input: &tg.InputPeerChat{ChatID: chat.ID}, Chat: chat}, nil
+	}
+}
+
 // resolvePeer resolves a chat ID to a Peer, fetching the access_hash MTProto
 // requires for users and channels. Resolver is its only caller: it caches the
 // result and owns the stale-hash retry.
@@ -52,19 +74,12 @@ type peerProbe func(ctx context.Context, client *tg.Client, id int64) (Peer, boo
 // messages.getChats path entirely. Users take priority on the astronomically
 // unlikely numeric collision.
 //
-// Non-positive IDs, including Bot-API "-100…" marked IDs, are rejected. Every
-// failure is a *PeerError.
+// Non-positive IDs, including Bot-API "-100…" marked IDs, are rejected. A
+// failure that is down to the ID itself is ErrUnresolvablePeer; any other one
+// is the probe's own error.
 func resolvePeer(ctx context.Context, client *tg.Client, dialogID int64) (Peer, error) {
-	peer, err := probePeer(ctx, client, dialogID)
-	if err != nil {
-		return Peer{}, &PeerError{ID: dialogID, Err: err}
-	}
-	return peer, nil
-}
-
-func probePeer(ctx context.Context, client *tg.Client, dialogID int64) (Peer, error) {
 	if dialogID <= 0 {
-		return Peer{}, fmt.Errorf("chat id %d is invalid: pass the positive ID Telegram clients show (Bot-API \"-100…\" IDs are not accepted)", dialogID)
+		return Peer{}, unresolvable(dialogID, "pass the positive ID Telegram clients show (Bot-API \"-100…\" IDs are not accepted)")
 	}
 
 	// Probe each candidate type in order. A match returns immediately; a
@@ -81,7 +96,7 @@ func probePeer(ctx context.Context, client *tg.Client, dialogID int64) (Peer, er
 			return peer, nil
 		}
 	}
-	return Peer{}, fmt.Errorf("id %d is not a reachable user, chat, or channel; verify it with ResolveUsername (by @handle) or SearchChats (by title)", dialogID)
+	return Peer{}, unresolvable(dialogID, "it is not a reachable user, chat, or channel; verify it with ResolveUsername (by @handle) or SearchChats (by title)")
 }
 
 // resolveUser probes users.getUsers. It reports no match when the ID is not a
@@ -101,10 +116,8 @@ func resolveUser(ctx context.Context, client *tg.Client, id int64) (Peer, bool, 
 	if !ok {
 		return Peer{}, false, nil // *tg.UserEmpty — not a user
 	}
-	if user.AccessHash == 0 {
-		return Peer{}, false, fmt.Errorf("user %d resolved but missing access_hash; no shared dialog", id)
-	}
-	return Peer{Input: &tg.InputPeerUser{UserID: id, AccessHash: user.AccessHash}, User: user}, true, nil
+	peer, err := PeerFromEntity(user)
+	return peer, err == nil, err
 }
 
 // resolveChannel probes channels.getChannels.
@@ -112,9 +125,9 @@ func resolveUser(ctx context.Context, client *tg.Client, id int64) (Peer, bool, 
 // CHANNEL_INVALID / PEER_ID_INVALID mean "not a channel" and fall through so the
 // caller can try the next type or emit the friendly generic error rather than
 // leaking MTProto codes. CHANNEL_PRIVATE is different: the ID *is* a channel that
-// this session can't access (e.g. a public channel it hasn't joined, exactly the
-// access_hash==0 case here), so it returns an actionable error pointing at
-// ResolveUsername instead of pretending the channel doesn't exist.
+// this session can't access (e.g. a public channel it hasn't joined), so it
+// returns an actionable error pointing at ResolveUsername instead of pretending
+// the channel doesn't exist.
 func resolveChannel(ctx context.Context, client *tg.Client, id int64) (Peer, bool, error) {
 	channels, err := client.ChannelsGetChannels(ctx, []tg.InputChannelClass{&tg.InputChannel{ChannelID: id}})
 	if err != nil {
@@ -122,7 +135,7 @@ func resolveChannel(ctx context.Context, client *tg.Client, id int64) (Peer, boo
 		case tgerr.Is(err, "CHANNEL_INVALID", "PEER_ID_INVALID"):
 			return Peer{}, false, nil
 		case tgerr.Is(err, "CHANNEL_PRIVATE"):
-			return Peer{}, false, fmt.Errorf("channel %d exists but is inaccessible from this account; resolve it by @username with ResolveUsername (and join it if needed)", id)
+			return Peer{}, false, unresolvable(id, "the channel exists but is inaccessible from this account; resolve it by @username with ResolveUsername (and join it if needed)")
 		default:
 			return Peer{}, false, fmt.Errorf("resolving channel %d: %w", id, err)
 		}
@@ -135,7 +148,8 @@ func resolveChannel(ctx context.Context, client *tg.Client, id int64) (Peer, boo
 	if !ok {
 		return Peer{}, false, nil
 	}
-	return Peer{Input: &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash}, Chat: channel}, true, nil
+	peer, err := PeerFromEntity(channel)
+	return peer, err == nil, err
 }
 
 // resolveBasicChat probes messages.getChats for a legacy basic group, which
@@ -163,5 +177,6 @@ func resolveBasicChat(ctx context.Context, client *tg.Client, id int64) (Peer, b
 	if !ok {
 		return Peer{}, false, nil // chatEmpty / not a basic chat
 	}
-	return Peer{Input: &tg.InputPeerChat{ChatID: id}, Chat: chat}, true, nil
+	peer, err := PeerFromEntity(chat)
+	return peer, err == nil, err
 }

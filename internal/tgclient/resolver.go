@@ -2,6 +2,7 @@ package tgclient
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"sync"
 	"time"
@@ -57,7 +58,8 @@ func (r *Resolver) Client() *tg.Client { return r.client }
 
 // Resolve returns the peer for id, from the cache when it holds a live entry.
 // Failures are never cached, so a transient error (e.g. a flood wait) is
-// retried on the next call. Every failure is a *PeerError.
+// retried on the next call. Every failure names the chat, and one that is down
+// to the ID itself is ErrUnresolvablePeer (see resolvePeer).
 //
 // Concurrent cold resolves of id share one probe. It belongs to none of them:
 // it runs on the resolver's lifetime (see NewResolver) bounded by
@@ -83,10 +85,10 @@ func (r *Resolver) Resolve(ctx context.Context, id int64) (Peer, error) {
 	})
 	select {
 	case <-ctx.Done():
-		return Peer{}, &PeerError{ID: id, Err: ctx.Err()}
+		return Peer{}, fmt.Errorf("resolving chat %d: %w", id, ctx.Err())
 	case outcome := <-flight:
 		if outcome.Err != nil {
-			return Peer{}, outcome.Err //nolint:wrapcheck // resolvePeer already returns a *PeerError naming the chat.
+			return Peer{}, outcome.Err //nolint:wrapcheck // resolvePeer's errors already name the chat.
 		}
 		return outcome.Val.(Peer), nil
 	}

@@ -6,8 +6,12 @@ import (
 	"testing"
 
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	telegramfake "github.com/tolmachov/mcp-telegram/internal/testutil/telegram"
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // TestNextFolderID verifies the smallest-free-ID >= 2 assignment.
@@ -287,4 +291,31 @@ func TestDeleteFolderValidation(t *testing.T) {
 	require.NotNil(t, errRes)
 	require.True(t, errRes.IsError)
 	assert.Contains(t, toolResultText(errRes), "folder_id is required")
+}
+
+// TestResolvePeerRefSkipsOnlyChatProblems pins that a folder edit skips a
+// reference only for a problem with the reference itself, and fails on any
+// other resolve failure so the model retries instead of losing a good chat.
+func TestResolvePeerRefSkipsOnlyChatProblems(t *testing.T) {
+	resolveUsername := func(err error) telegramfake.InvokeFunc {
+		return telegramfake.Typed(func(context.Context, *tg.ContactsResolveUsernameRequest, *tg.ContactsResolvedPeer) error { return err })
+	}
+	inv := telegramfake.New(
+		resolveUsername(tgerr.New(400, "USERNAME_NOT_OCCUPIED")),
+		resolveUsername(tgerr.New(500, "INTERNAL_SERVER_ERROR")),
+	)
+	peers := tgclient.NewResolver(t.Context(), tg.NewClient(inv))
+
+	_, reason, fatal := resolvePeerRef(t.Context(), peers, "@nobody")
+	require.NoError(t, fatal)
+	assert.Contains(t, reason, "USERNAME_NOT_OCCUPIED")
+
+	_, reason, fatal = resolvePeerRef(t.Context(), peers, "@flaky")
+	require.Error(t, fatal, "a server error says nothing about the chat")
+	assert.Empty(t, reason)
+
+	_, reason, fatal = resolvePeerRef(t.Context(), peers, "-1001555091578")
+	require.NoError(t, fatal)
+	assert.Contains(t, reason, "positive ID")
+	assert.Zero(t, inv.Remaining())
 }
