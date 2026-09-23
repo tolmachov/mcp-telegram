@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -32,75 +33,78 @@ func resolvePublicUsername(ctx context.Context, client *tg.Client, username stri
 	return resolved, nil
 }
 
-// resolvedInputPeer builds the InputPeer for the canonical resolved peer
-// (r.Peer), looking up the access hash among the response entities.
-func resolvedInputPeer(r *tg.ContactsResolvedPeer) (tg.InputPeerClass, error) {
+// resolvedEntity returns the response entity that r.Peer designates — a
+// *tg.User, *tg.Chat or *tg.Channel — or nil when the response does not carry it.
+func resolvedEntity(r *tg.ContactsResolvedPeer) any {
 	switch p := r.Peer.(type) {
 	case *tg.PeerUser:
-		for _, u := range r.Users {
-			if user, ok := u.(*tg.User); ok && user.ID == p.UserID {
-				if user.AccessHash == 0 {
-					return nil, fmt.Errorf("resolved but missing access hash (no shared dialog)")
-				}
-				return &tg.InputPeerUser{UserID: user.ID, AccessHash: user.AccessHash}, nil
-			}
+		if user, ok := r.MapUsers().UserToMap()[p.UserID]; ok {
+			return user
 		}
 	case *tg.PeerChat:
-		return &tg.InputPeerChat{ChatID: p.ChatID}, nil
+		if chat, ok := r.MapChats().ChatToMap()[p.ChatID]; ok {
+			return chat
+		}
 	case *tg.PeerChannel:
-		for _, c := range r.Chats {
-			if ch, ok := c.(*tg.Channel); ok && ch.ID == p.ChannelID {
-				if ch.AccessHash == 0 {
-					return nil, fmt.Errorf("resolved but missing access hash (no shared dialog)")
-				}
-				return &tg.InputPeerChannel{ChannelID: ch.ID, AccessHash: ch.AccessHash}, nil
-			}
+		if ch, ok := r.MapChats().ChannelToMap()[p.ChannelID]; ok {
+			return ch
 		}
 	}
-	return nil, fmt.Errorf("resolved peer %T not present in response entities", r.Peer)
+	return nil
+}
+
+// errResolvedNotPresent reports a response that does not carry the entity its
+// r.Peer designates.
+var errResolvedNotPresent = errors.New("resolved peer not present in response entities")
+
+// errNoSharedDialog reports a resolved user or channel without an access hash.
+var errNoSharedDialog = errors.New("resolved but missing access hash (no shared dialog)")
+
+// resolvedInputPeer builds the InputPeer for the canonical resolved peer.
+func resolvedInputPeer(r *tg.ContactsResolvedPeer) (tg.InputPeerClass, error) {
+	switch e := resolvedEntity(r).(type) {
+	case *tg.User:
+		if e.AccessHash == 0 {
+			return nil, errNoSharedDialog
+		}
+		return &tg.InputPeerUser{UserID: e.ID, AccessHash: e.AccessHash}, nil
+	case *tg.Chat:
+		return &tg.InputPeerChat{ChatID: e.ID}, nil
+	case *tg.Channel:
+		if e.AccessHash == 0 {
+			return nil, errNoSharedDialog
+		}
+		return &tg.InputPeerChannel{ChannelID: e.ID, AccessHash: e.AccessHash}, nil
+	}
+	return nil, errResolvedNotPresent
 }
 
 // resolvedPeerInfo returns the canonical resolved peer's bare MTProto ID and
 // display title.
 func resolvedPeerInfo(r *tg.ContactsResolvedPeer) (id int64, title string, ok bool) {
-	switch p := r.Peer.(type) {
-	case *tg.PeerUser:
-		for _, u := range r.Users {
-			if user, uok := u.(*tg.User); uok && user.ID == p.UserID {
-				return user.ID, strings.TrimSpace(user.FirstName + " " + user.LastName), true
-			}
-		}
-	case *tg.PeerChat:
-		for _, c := range r.Chats {
-			if chat, cok := c.(*tg.Chat); cok && chat.ID == p.ChatID {
-				return chat.ID, chat.Title, true
-			}
-		}
-	case *tg.PeerChannel:
-		for _, c := range r.Chats {
-			if ch, cok := c.(*tg.Channel); cok && ch.ID == p.ChannelID {
-				return ch.ID, ch.Title, true
-			}
-		}
+	switch e := resolvedEntity(r).(type) {
+	case *tg.User:
+		return e.ID, strings.TrimSpace(e.FirstName + " " + e.LastName), true
+	case *tg.Chat:
+		return e.ID, e.Title, true
+	case *tg.Channel:
+		return e.ID, e.Title, true
 	}
 	return 0, "", false
 }
 
 // resolvedChannel returns the canonical resolved peer as a channel/supergroup,
 // erroring for users and basic groups (which have no InputChannel form). Used
-// by JoinChat/LeaveChat, which act only on channels.
+// by JoinChat, which acts only on channels.
 func resolvedChannel(r *tg.ContactsResolvedPeer) (*tg.InputChannel, *tg.Channel, error) {
-	p, ok := r.Peer.(*tg.PeerChannel)
-	if !ok {
-		return nil, nil, fmt.Errorf("not a channel or supergroup")
-	}
-	for _, c := range r.Chats {
-		if ch, cok := c.(*tg.Channel); cok && ch.ID == p.ChannelID {
-			if ch.AccessHash == 0 {
-				return nil, nil, fmt.Errorf("resolved but missing access hash (no shared dialog)")
-			}
-			return &tg.InputChannel{ChannelID: ch.ID, AccessHash: ch.AccessHash}, ch, nil
+	switch e := resolvedEntity(r).(type) {
+	case *tg.Channel:
+		if e.AccessHash == 0 {
+			return nil, nil, errNoSharedDialog
 		}
+		return &tg.InputChannel{ChannelID: e.ID, AccessHash: e.AccessHash}, e, nil
+	case nil:
+		return nil, nil, errResolvedNotPresent
 	}
-	return nil, nil, fmt.Errorf("resolved channel not present in response entities")
+	return nil, nil, fmt.Errorf("not a channel or supergroup")
 }

@@ -58,17 +58,14 @@ func (h *UsernameResolveHandler) Register(s *mcp.Server) {
 }
 
 func (h *UsernameResolveHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in ResolveUsernameInput) (*mcp.CallToolResult, *ResolveUsernameResult, error) {
-	if strings.TrimSpace(in.Username) == "" {
+	username := strings.TrimPrefix(strings.TrimSpace(in.Username), "@")
+	if username == "" {
 		return errResult("username is required (e.g. '@durov' or 'durov'). For chats without a public @username, use SearchChats by title instead."), nil, nil
 	}
 
-	username := strings.TrimPrefix(strings.TrimSpace(in.Username), "@")
-
-	resolved, err := h.client.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{
-		Username: username,
-	})
+	resolved, err := resolvePublicUsername(ctx, h.client, username)
 	if err != nil {
-		return errResult(fmt.Sprintf("Failed to resolve username @%s: %v", username, err)), nil, nil
+		return errResult(fmt.Sprintf("Failed to resolve username: %v", err)), nil, nil
 	}
 
 	out := &ResolveUsernameResult{

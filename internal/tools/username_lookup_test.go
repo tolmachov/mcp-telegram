@@ -30,7 +30,10 @@ func TestResolvedInputPeer(t *testing.T) {
 	})
 
 	t.Run("basic chat needs no access hash", func(t *testing.T) {
-		r := &tg.ContactsResolvedPeer{Peer: &tg.PeerChat{ChatID: 42}}
+		r := &tg.ContactsResolvedPeer{
+			Peer:  &tg.PeerChat{ChatID: 42},
+			Chats: []tg.ChatClass{&tg.Chat{ID: 42}},
+		}
 		peer, err := resolvedInputPeer(r)
 		require.NoError(t, err)
 		assert.Equal(t, &tg.InputPeerChat{ChatID: 42}, peer)
@@ -88,7 +91,10 @@ func TestResolvedChannel(t *testing.T) {
 	})
 
 	t.Run("basic chat is rejected as not a channel", func(t *testing.T) {
-		r := &tg.ContactsResolvedPeer{Peer: &tg.PeerChat{ChatID: 42}}
+		r := &tg.ContactsResolvedPeer{
+			Peer:  &tg.PeerChat{ChatID: 42},
+			Chats: []tg.ChatClass{&tg.Chat{ID: 42}},
+		}
 		_, _, err := resolvedChannel(r)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not a channel")

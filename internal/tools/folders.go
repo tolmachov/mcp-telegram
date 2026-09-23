@@ -5,15 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // Folder (dialog filter) constraints enforced before hitting the Telegram API.
@@ -64,8 +61,8 @@ func isFatalResolveErr(err error) bool {
 }
 
 // resolvePeerRef resolves a folder chat reference (a public @username or a
-// numeric chat ID) to an InputPeer. Unlike resolveChannelByUsername it supports
-// users, channels and basic groups, since folders can hold any of them.
+// numeric chat ID) to an InputPeer of any kind, since folders can hold users,
+// channels and basic groups alike.
 //
 // A per-chat problem (typo, no shared dialog, invite link) is returned as a
 // non-empty reason string so batch callers can skip that one and keep going. A
@@ -76,32 +73,16 @@ func resolvePeerRef(ctx context.Context, client *tg.Client, ref string) (peer tg
 	if ref == "" {
 		return nil, "empty chat reference", nil
 	}
-	kind, value := classifyChatRef(ref)
-	switch kind {
-	case chatRefInvite:
+	peer, err := resolveChatRef(ctx, client, ref)
+	switch {
+	case err == nil:
+		return peer, "", nil
+	case errors.Is(err, errInviteChatRef):
 		return nil, "is an invite link; join the chat first with JoinChat, then add it by @username or numeric ID", nil
-	case chatRefUsername:
-		peer, err := resolveInputPeerByUsername(ctx, client, value)
-		if err != nil {
-			if isFatalResolveErr(err) {
-				return nil, "", fmt.Errorf("resolving @%s: %w", value, err)
-			}
-			return nil, fmt.Sprintf("could not resolve @%s: %v", value, err), nil
-		}
-		return peer, "", nil
-	default: // chatRefID
-		id, err := strconv.ParseInt(value, 10, 64)
-		if err != nil {
-			return nil, fmt.Sprintf("invalid chat reference %q: expected a public @username or a numeric chat ID", ref), nil
-		}
-		peer, err := tgclient.ResolvePeer(ctx, client, id)
-		if err != nil {
-			if isFatalResolveErr(err) {
-				return nil, "", fmt.Errorf("resolving chat %d: %w", id, err)
-			}
-			return nil, fmt.Sprintf("could not resolve chat %d: %v", id, err), nil
-		}
-		return peer, "", nil
+	case isFatalResolveErr(err):
+		return nil, "", err
+	default:
+		return nil, err.Error(), nil
 	}
 }
 
@@ -177,18 +158,6 @@ func formatSkipped(skipped []FolderSkippedChat) string {
 		parts = append(parts, fmt.Sprintf("%s (%s)", s.Chat, s.Reason))
 	}
 	return strings.Join(parts, "; ")
-}
-
-// resolveInputPeerByUsername resolves a public @username to the InputPeer of
-// its canonical entity (user, channel/supergroup, or basic group), via the
-// shared username lookup so it agrees with every other tool on which entity a
-// @username names.
-func resolveInputPeerByUsername(ctx context.Context, client *tg.Client, username string) (tg.InputPeerClass, error) {
-	resolved, err := resolvePublicUsername(ctx, client, username)
-	if err != nil {
-		return nil, err
-	}
-	return resolvedInputPeer(resolved)
 }
 
 // findEditableFolder fetches all folders and returns the standard DialogFilter

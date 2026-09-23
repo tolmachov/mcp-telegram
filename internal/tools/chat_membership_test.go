@@ -80,18 +80,18 @@ func TestChatRefFromURL(t *testing.T) {
 	}
 }
 
-// TestLeaveChatResolvePeerRejectsInvite verifies the documented contract that
-// LeaveChat refuses invite links before any network call. resolvePeer is called
-// directly so the test isolates reference parsing. A nil client is safe because
+// TestLeaveChatRejectsInvite verifies the documented contract that LeaveChat
+// refuses invite links before any network call. A nil client is safe because
 // the invite branch returns before any RPC.
-func TestLeaveChatResolvePeerRejectsInvite(t *testing.T) {
+func TestLeaveChatRejectsInvite(t *testing.T) {
 	h := &LeaveChatHandler{}
 	ctx := context.Background()
 
 	for _, ref := range []string{"https://t.me/+AbCdEf", "tg://join?invite=AbCdEf"} {
 		t.Run(ref, func(t *testing.T) {
-			peer, errRes := h.resolvePeer(ctx, ref)
-			require.Nil(t, peer)
+			errRes, out, err := h.handle(ctx, &mcp.CallToolRequest{}, LeaveChatInput{Chat: ref, Confirm: true})
+			require.NoError(t, err)
+			require.Nil(t, out)
 			require.NotNil(t, errRes)
 			require.True(t, errRes.IsError)
 			assert.Contains(t, toolResultText(errRes), "does not accept invite links")

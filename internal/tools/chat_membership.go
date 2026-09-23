@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -208,9 +209,12 @@ func (h *LeaveChatHandler) handle(ctx context.Context, req *mcp.CallToolRequest,
 		return errRes, nil, nil
 	}
 
-	peer, errRes := h.resolvePeer(ctx, chat)
-	if errRes != nil {
-		return errRes, nil, nil
+	peer, err := resolveChatRef(ctx, h.client, chat)
+	if errors.Is(err, errInviteChatRef) {
+		return errResult("LeaveChat does not accept invite links. Pass the chat's @username or numeric ID instead (find it with GetChats or SearchChats)."), nil, nil
+	}
+	if err != nil {
+		return errResult(fmt.Sprintf("Failed to resolve %q: %v. The chat may not exist or you may not have access; use SearchChats or GetChats to verify.", chat, err)), nil, nil
 	}
 
 	// Reject peers that cannot be left before issuing the mutation.
@@ -224,32 +228,6 @@ func (h *LeaveChatHandler) handle(ctx context.Context, req *mcp.CallToolRequest,
 		return h.leaveChannel(ctx, req, chat, channelPeer)
 	}
 	return h.leaveBasicChat(ctx, req, chat, chatPeer)
-}
-
-// resolvePeer turns a @username or numeric ID into an InputPeer, returning a
-// ready-to-send error result on failure.
-func (h *LeaveChatHandler) resolvePeer(ctx context.Context, chat string) (tg.InputPeerClass, *mcp.CallToolResult) {
-	kind, value := classifyChatRef(chat)
-	switch kind {
-	case chatRefUsername:
-		input, _, err := resolveChannelByUsername(ctx, h.client, value)
-		if err != nil {
-			return nil, errResult(fmt.Sprintf("Failed to resolve @%s: %v. You can only leave channels and supergroups by username.", value, err))
-		}
-		return &tg.InputPeerChannel{ChannelID: input.ChannelID, AccessHash: input.AccessHash}, nil
-	case chatRefInvite:
-		return nil, errResult("LeaveChat does not accept invite links. Pass the chat's @username or numeric ID instead (find it with GetChats or SearchChats).")
-	default: // chatRefID
-		id, err := strconv.ParseInt(value, 10, 64)
-		if err != nil {
-			return nil, errResult(fmt.Sprintf("invalid chat reference %q: expected a public @username or a numeric chat ID.", chat))
-		}
-		peer, err := tgclient.ResolvePeer(ctx, h.client, id)
-		if err != nil {
-			return nil, errResolvePeer(id, err)
-		}
-		return peer, nil
-	}
 }
 
 func (h *LeaveChatHandler) leaveChannel(ctx context.Context, req *mcp.CallToolRequest, chat string, p *tg.InputPeerChannel) (*mcp.CallToolResult, *LeaveChatResult, error) {
@@ -324,6 +302,41 @@ func classifyChatRef(s string) (kind, value string) {
 	}
 	// Anything else is treated as a bare username.
 	return chatRefUsername, s
+}
+
+// errInviteChatRef rejects an invite link where a chat that is already known
+// is expected: an invite names no chat until it is joined.
+var errInviteChatRef = errors.New("invite links name no chat until joined")
+
+// resolveChatRef resolves a chat reference — a public @username or t.me link,
+// or a numeric chat ID — to the InputPeer of whatever it names: a user, basic
+// group or channel. Invite links are rejected with errInviteChatRef.
+func resolveChatRef(ctx context.Context, client *tg.Client, ref string) (tg.InputPeerClass, error) {
+	kind, value := classifyChatRef(ref)
+	switch kind {
+	case chatRefInvite:
+		return nil, errInviteChatRef
+	case chatRefUsername:
+		resolved, err := resolvePublicUsername(ctx, client, value)
+		if err != nil {
+			return nil, err
+		}
+		peer, err := resolvedInputPeer(resolved)
+		if err != nil {
+			return nil, fmt.Errorf("@%s: %w", value, err)
+		}
+		return peer, nil
+	default: // chatRefID
+		id, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid chat reference %q: expected a public @username or a numeric chat ID", ref)
+		}
+		peer, err := tgclient.ResolvePeer(ctx, client, id)
+		if err != nil {
+			return nil, fmt.Errorf("resolving chat %d: %w", id, err)
+		}
+		return peer, nil
+	}
 }
 
 // chatRefFromURL classifies a Telegram link (t.me / telegram.me / telegram.dog,
