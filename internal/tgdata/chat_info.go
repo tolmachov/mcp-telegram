@@ -22,8 +22,6 @@ func GetChatInfo(ctx context.Context, client *tg.Client, chatID int64) (*ChatFul
 
 	switch p := peer.(type) {
 	case *tg.InputPeerUser:
-		info.ID = p.UserID
-		info.Type = ChatTypeUser
 		fullUser, err := client.UsersGetFullUser(ctx, &tg.InputUser{
 			UserID:     p.UserID,
 			AccessHash: p.AccessHash,
@@ -33,11 +31,7 @@ func GetChatInfo(ctx context.Context, client *tg.Client, chatID int64) (*ChatFul
 		}
 		for _, u := range fullUser.Users {
 			if user, ok := u.(*tg.User); ok && user.ID == p.UserID {
-				info.Name = tgclient.UserName(user)
-				info.Username = user.Username
-				if user.Bot {
-					info.Type = ChatTypeBot
-				}
+				info.ChatInfo = ChatInfoFromUser(user)
 				break
 			}
 		}
@@ -47,8 +41,6 @@ func GetChatInfo(ctx context.Context, client *tg.Client, chatID int64) (*ChatFul
 		info.Description = fullUser.FullUser.About
 
 	case *tg.InputPeerChat:
-		info.ID = p.ChatID
-		info.Type = ChatTypeGroup
 		fullChat, err := client.MessagesGetFullChat(ctx, p.ChatID)
 		if err != nil {
 			return nil, fmt.Errorf("getting full chat info: %w", err)
@@ -64,7 +56,7 @@ func GetChatInfo(ctx context.Context, client *tg.Client, chatID int64) (*ChatFul
 		// title.
 		for _, c := range fullChat.Chats {
 			if chat, ok := c.(*tg.Chat); ok && chat.ID == p.ChatID {
-				info.Name = chat.Title
+				info.ChatInfo = basicGroupInfo(chat)
 				break
 			}
 		}
@@ -73,8 +65,6 @@ func GetChatInfo(ctx context.Context, client *tg.Client, chatID int64) (*ChatFul
 		}
 
 	case *tg.InputPeerChannel:
-		info.ID = p.ChannelID
-		info.Type = ChatTypeChannel
 		fullChannel, err := client.ChannelsGetFullChannel(ctx, &tg.InputChannel{
 			ChannelID:  p.ChannelID,
 			AccessHash: p.AccessHash,
@@ -88,11 +78,7 @@ func GetChatInfo(ctx context.Context, client *tg.Client, chatID int64) (*ChatFul
 		}
 		for _, c := range fullChannel.Chats {
 			if channel, ok := c.(*tg.Channel); ok && channel.ID == p.ChannelID {
-				info.Name = channel.Title
-				info.Username = channel.Username
-				if channel.Megagroup {
-					info.Type = ChatTypeSupergroup
-				}
+				info.ChatInfo = channelInfo(channel)
 				break
 			}
 		}

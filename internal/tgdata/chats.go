@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
-
-	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // ProgressFunc is a callback for reporting progress
@@ -53,48 +51,26 @@ func newEntityMaps(users []tg.UserClass, chats []tg.ChatClass) entityMaps {
 // skip it — matching the previous behaviour where such dialogs resolved to
 // an empty input peer and were dropped.
 func (em entityMaps) dialogToChatInfo(dialog *tg.Dialog, now time.Time) (ChatInfo, bool) {
-	info := ChatInfo{
-		UnreadCount:  dialog.UnreadCount,
-		MentionCount: dialog.UnreadMentionsCount,
-		Muted:        dialog.NotifySettings.MuteUntil > int(now.Unix()),
-		Pinned:       dialog.Pinned,
-		Archived:     dialog.FolderID != 0,
-	}
-
+	var info ChatInfo
 	switch peer := dialog.Peer.(type) {
 	case *tg.PeerUser:
-		info.ID = peer.UserID
-		info.Type = ChatTypeUser
 		user, ok := em.users[peer.UserID]
 		if !ok {
 			return ChatInfo{}, false
 		}
-		info.Name = tgclient.UserName(user)
-		info.Username = user.Username
-		if user.Bot {
-			info.Type = ChatTypeBot
-		}
+		info = ChatInfoFromUser(user)
 	case *tg.PeerChat:
-		info.ID = peer.ChatID
-		info.Type = ChatTypeGroup
 		chat, ok := em.chats[peer.ChatID]
 		if !ok {
 			return ChatInfo{}, false
 		}
-		info.Name = chat.Title
+		info = basicGroupInfo(chat)
 	case *tg.PeerChannel:
-		// Bare MTProto channel ID — the positive number the official clients show.
-		info.ID = peer.ChannelID
-		info.Type = ChatTypeChannel
 		channel, ok := em.channels[peer.ChannelID]
 		if !ok {
 			return ChatInfo{}, false
 		}
-		info.Name = channel.Title
-		info.Username = channel.Username
-		if channel.Megagroup {
-			info.Type = ChatTypeSupergroup
-		}
+		info = channelInfo(channel)
 	default:
 		return ChatInfo{}, false
 	}
@@ -102,6 +78,11 @@ func (em entityMaps) dialogToChatInfo(dialog *tg.Dialog, now time.Time) (ChatInf
 	if info.Name == "" {
 		info.Name = "Unknown"
 	}
+	info.UnreadCount = dialog.UnreadCount
+	info.MentionCount = dialog.UnreadMentionsCount
+	info.Muted = dialog.NotifySettings.MuteUntil > int(now.Unix())
+	info.Pinned = dialog.Pinned
+	info.Archived = dialog.FolderID != 0
 	return info, true
 }
 

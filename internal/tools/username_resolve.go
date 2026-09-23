@@ -7,6 +7,8 @@ import (
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
 // UsernameResolveHandler handles the ResolveUsername tool.
@@ -24,19 +26,19 @@ type ResolveUsernameInput struct {
 	Username string `json:"username" jsonschema:"The username to resolve (with or without @ prefix)"`
 }
 
-// ResolveUsernameEntity is a single resolved entity (user, bot, chat,
+// ResolveUsernameEntity is a single resolved entity (user, bot, group,
 // channel, or supergroup). Kind is always set; other fields are
 // populated when available from the Telegram API response.
 type ResolveUsernameEntity struct {
-	Kind              string `json:"kind"` // "user" | "bot" | "chat" | "channel" | "supergroup"
-	ID                int64  `json:"id"`
-	Username          string `json:"username,omitempty"`
-	Title             string `json:"title,omitempty"`
-	FirstName         string `json:"first_name,omitempty"`
-	LastName          string `json:"last_name,omitempty"`
-	ParticipantsCount int    `json:"participants_count,omitempty"`
-	Verified          bool   `json:"verified,omitempty"`
-	Premium           bool   `json:"premium,omitempty"`
+	Kind              tgdata.ChatType `json:"kind"`
+	ID                int64           `json:"id"`
+	Username          string          `json:"username,omitempty"`
+	Title             string          `json:"title,omitempty"`
+	FirstName         string          `json:"first_name,omitempty"`
+	LastName          string          `json:"last_name,omitempty"`
+	ParticipantsCount int             `json:"participants_count,omitempty"`
+	Verified          bool            `json:"verified,omitempty"`
+	Premium           bool            `json:"premium,omitempty"`
 }
 
 // ResolveUsernameResult is the typed output of ResolveUsername. Returns
@@ -78,37 +80,29 @@ func (h *UsernameResolveHandler) handle(ctx context.Context, _ *mcp.CallToolRequ
 		if !ok {
 			continue
 		}
-		e := ResolveUsernameEntity{
-			Kind:      "user",
+		out.Entities = append(out.Entities, ResolveUsernameEntity{
+			Kind:      tgdata.UserType(u),
 			ID:        u.ID,
 			Username:  u.Username,
 			FirstName: u.FirstName,
 			LastName:  u.LastName,
 			Verified:  u.Verified,
 			Premium:   u.Premium,
-		}
-		if u.Bot {
-			e.Kind = "bot"
-		}
-		out.Entities = append(out.Entities, e)
+		})
 	}
 
 	for _, chat := range resolved.Chats {
 		switch c := chat.(type) {
 		case *tg.Chat:
 			out.Entities = append(out.Entities, ResolveUsernameEntity{
-				Kind:              "chat",
+				Kind:              tgdata.ChatTypeGroup,
 				ID:                c.ID,
 				Title:             c.Title,
 				ParticipantsCount: c.ParticipantsCount,
 			})
 		case *tg.Channel:
-			kind := "channel"
-			if c.Megagroup {
-				kind = "supergroup"
-			}
 			out.Entities = append(out.Entities, ResolveUsernameEntity{
-				Kind:              kind,
+				Kind:              tgdata.ChannelType(c),
 				ID:                c.ID,
 				Username:          c.Username,
 				Title:             c.Title,

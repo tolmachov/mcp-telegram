@@ -13,6 +13,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
+	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
 // Membership status values reported by JoinChat / LeaveChat.
@@ -63,12 +64,12 @@ type JoinChatInput struct {
 // join is gated behind an in-app web view (verification/captcha), Status is
 // "action_required" and Detail explains what the user must do to finish.
 type JoinChatResult struct {
-	Status string `json:"status"` // "joined" | "already_member" | "requested" | "action_required"
-	Chat   string `json:"chat"`
-	ChatID int64  `json:"chat_id,omitempty"`
-	Title  string `json:"title,omitempty"`
-	Kind   string `json:"kind,omitempty"` // "channel" | "supergroup" | "chat"
-	Detail string `json:"detail,omitempty"`
+	Status string          `json:"status"` // "joined" | "already_member" | "requested" | "action_required"
+	Chat   string          `json:"chat"`
+	ChatID int64           `json:"chat_id,omitempty"`
+	Title  string          `json:"title,omitempty"`
+	Kind   tgdata.ChatType `json:"kind,omitempty"` // "channel" | "supergroup" | "group"
+	Detail string          `json:"detail,omitempty"`
 }
 
 // LeaveChatInput is the input for the LeaveChat tool.
@@ -79,10 +80,10 @@ type LeaveChatInput struct {
 
 // LeaveChatResult is the typed output of LeaveChat.
 type LeaveChatResult struct {
-	Status string `json:"status"` // "left" | "not_member"
-	Chat   string `json:"chat"`
-	ChatID int64  `json:"chat_id,omitempty"`
-	Kind   string `json:"kind,omitempty"` // "channel" | "chat" (supergroups report as "channel")
+	Status string          `json:"status"` // "left" | "not_member"
+	Chat   string          `json:"chat"`
+	ChatID int64           `json:"chat_id,omitempty"`
+	Kind   tgdata.ChatType `json:"kind,omitempty"` // "channel" | "group" (supergroups report as "channel")
 }
 
 // Register adds the JoinChat tool to the MCP server.
@@ -234,7 +235,7 @@ func (h *LeaveChatHandler) leaveChannel(ctx context.Context, req *mcp.CallToolRe
 	_, err := h.client.ChannelsLeaveChannel(ctx, &tg.InputChannel{ChannelID: p.ChannelID, AccessHash: p.AccessHash})
 	if err != nil {
 		if tgerr.Is(err, "USER_NOT_PARTICIPANT") {
-			return nil, &LeaveChatResult{Status: statusNotMember, Chat: chat, ChatID: p.ChannelID, Kind: "channel"}, nil
+			return nil, &LeaveChatResult{Status: statusNotMember, Chat: chat, ChatID: p.ChannelID, Kind: tgdata.ChatTypeChannel}, nil
 		}
 		if tgerr.Is(err, "USER_CREATOR") {
 			return errResult(fmt.Sprintf("Cannot leave %q: you are its owner. Transfer ownership or delete the channel instead.", chat)), nil, nil
@@ -245,7 +246,7 @@ func (h *LeaveChatHandler) leaveChannel(ctx context.Context, req *mcp.CallToolRe
 		}
 		return errResult(fmt.Sprintf("Failed to leave %q: %v", chat, err)), nil, nil
 	}
-	return nil, &LeaveChatResult{Status: statusLeft, Chat: chat, ChatID: p.ChannelID, Kind: "channel"}, nil
+	return nil, &LeaveChatResult{Status: statusLeft, Chat: chat, ChatID: p.ChannelID, Kind: tgdata.ChatTypeChannel}, nil
 }
 
 func (h *LeaveChatHandler) leaveBasicChat(ctx context.Context, req *mcp.CallToolRequest, chat string, p *tg.InputPeerChat) (*mcp.CallToolResult, *LeaveChatResult, error) {
@@ -255,7 +256,7 @@ func (h *LeaveChatHandler) leaveBasicChat(ctx context.Context, req *mcp.CallTool
 	})
 	if err != nil {
 		if tgerr.Is(err, "USER_NOT_PARTICIPANT") {
-			return nil, &LeaveChatResult{Status: statusNotMember, Chat: chat, ChatID: p.ChatID, Kind: "chat"}, nil
+			return nil, &LeaveChatResult{Status: statusNotMember, Chat: chat, ChatID: p.ChatID, Kind: tgdata.ChatTypeGroup}, nil
 		}
 		mcpLog(ctx, req.Session, logLevelWarning, "LeaveChat", map[string]any{"chat": chat, "error": err.Error()})
 		if res, ok := floodWaitResult("leave", err); ok {
@@ -263,7 +264,7 @@ func (h *LeaveChatHandler) leaveBasicChat(ctx context.Context, req *mcp.CallTool
 		}
 		return errResult(fmt.Sprintf("Failed to leave %q: %v", chat, err)), nil, nil
 	}
-	return nil, &LeaveChatResult{Status: statusLeft, Chat: chat, ChatID: p.ChatID, Kind: "chat"}, nil
+	return nil, &LeaveChatResult{Status: statusLeft, Chat: chat, ChatID: p.ChatID, Kind: tgdata.ChatTypeGroup}, nil
 }
 
 // classifyChatRef determines how a chat reference string should be interpreted:
@@ -407,8 +408,8 @@ func joinResultFrom(chat, status string, res tg.MessagesChatInviteJoinResultClas
 	out := &JoinChatResult{Status: status, Chat: chat}
 	switch r := res.(type) {
 	case *tg.MessagesChatInviteJoinResultOk:
-		if id, title, kind := chatInfoFromUpdates(r.Updates); id != 0 {
-			out.ChatID, out.Title, out.Kind = id, title, kind
+		if info, ok := chatInfoFromUpdates(r.Updates); ok {
+			out.ChatID, out.Title, out.Kind = info.ID, info.Name, info.Type
 		}
 	case *tg.MessagesChatInviteJoinResultWebView:
 		out.Status = statusActionRequired
@@ -425,15 +426,12 @@ func fillJoinResultFromChannel(out *JoinChatResult, channel *tg.Channel) {
 	}
 	out.ChatID = channel.ID
 	out.Title = channel.Title
-	out.Kind = "channel"
-	if channel.Megagroup {
-		out.Kind = "supergroup"
-	}
+	out.Kind = tgdata.ChannelType(channel)
 }
 
-// chatInfoFromUpdates pulls the first channel/chat out of an UpdatesClass so a
-// join can report which chat was joined. Returns id=0 when none is present.
-func chatInfoFromUpdates(u tg.UpdatesClass) (id int64, title, kind string) {
+// chatInfoFromUpdates pulls the first channel/group out of an UpdatesClass so
+// a join can report which chat was joined. ok is false when none is present.
+func chatInfoFromUpdates(u tg.UpdatesClass) (tgdata.ChatInfo, bool) {
 	var chats []tg.ChatClass
 	switch v := u.(type) {
 	case *tg.Updates:
@@ -442,16 +440,9 @@ func chatInfoFromUpdates(u tg.UpdatesClass) (id int64, title, kind string) {
 		chats = v.Chats
 	}
 	for _, c := range chats {
-		switch ch := c.(type) {
-		case *tg.Channel:
-			k := "channel"
-			if ch.Megagroup {
-				k = "supergroup"
-			}
-			return ch.ID, ch.Title, k
-		case *tg.Chat:
-			return ch.ID, ch.Title, "chat"
+		if info, ok := tgdata.ChatInfoFromChat(c); ok {
+			return info, true
 		}
 	}
-	return 0, "", ""
+	return tgdata.ChatInfo{}, false
 }

@@ -12,7 +12,6 @@ import (
 	"github.com/lithammer/fuzzysearch/fuzzy"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
@@ -125,41 +124,15 @@ func (h *ChatsSearchHandler) searchGlobal(ctx context.Context, query string) ([]
 
 	var results []tgdata.ChatInfo
 
-	// Process users; bots are intentionally excluded (not meaningful chat targets).
+	// Bots are intentionally excluded (not meaningful chat targets).
 	for _, user := range found.Users {
-		u, ok := user.(*tg.User)
-		if !ok || u.Bot {
-			continue
+		if u, ok := user.(*tg.User); ok && !u.Bot {
+			results = append(results, tgdata.ChatInfoFromUser(u))
 		}
-
-		results = append(results, tgdata.ChatInfo{
-			ID:       u.ID,
-			Type:     tgdata.ChatTypeUser,
-			Name:     tgclient.UserName(u),
-			Username: u.Username,
-		})
 	}
-
-	// Process chats.
 	for _, chat := range found.Chats {
-		switch c := chat.(type) {
-		case *tg.Chat:
-			results = append(results, tgdata.ChatInfo{
-				ID:   c.ID,
-				Type: tgdata.ChatTypeGroup,
-				Name: c.Title,
-			})
-		case *tg.Channel:
-			chatType := tgdata.ChatTypeChannel
-			if c.Megagroup {
-				chatType = tgdata.ChatTypeSupergroup
-			}
-			results = append(results, tgdata.ChatInfo{
-				ID:       c.ID,
-				Type:     chatType,
-				Name:     c.Title,
-				Username: c.Username,
-			})
+		if info, ok := tgdata.ChatInfoFromChat(chat); ok {
+			results = append(results, info)
 		}
 	}
 

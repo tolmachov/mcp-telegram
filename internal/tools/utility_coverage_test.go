@@ -107,7 +107,7 @@ func TestReadOnlyHandlersUseExpectedRPCs(t *testing.T) {
 		require.NoError(t, err)
 		require.Nil(t, errRes)
 		require.Len(t, out.Entities, 2)
-		assert.Equal(t, "supergroup", out.Entities[1].Kind)
+		assert.Equal(t, tgdata.ChatTypeSupergroup, out.Entities[1].Kind)
 		assert.Zero(t, inv.Remaining())
 	})
 

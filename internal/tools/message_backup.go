@@ -15,6 +15,7 @@ import (
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
+	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 	"github.com/tolmachov/mcp-telegram/internal/xdg"
 )
 
@@ -36,6 +37,12 @@ var telegramLaunchDate = time.Date(2013, 8, 14, 0, 0, 0, 0, time.UTC)
 // fails; resolved=false lets callers surface the fallback to users. Failures
 // are logged at Warn so operators can diagnose unexpected fallback filenames.
 func getChatName(ctx context.Context, raw *tg.Client, peer tg.InputPeerClass, chatID int64) (name string, resolved bool) {
+	fallback := fmt.Sprintf("chat_%d", chatID)
+
+	var (
+		chats tg.MessagesChatsClass
+		err   error
+	)
 	switch p := peer.(type) {
 	case *tg.InputPeerUser:
 		users, err := raw.UsersGetUsers(ctx, []tg.InputUserClass{
@@ -43,59 +50,35 @@ func getChatName(ctx context.Context, raw *tg.Client, peer tg.InputPeerClass, ch
 		})
 		if err != nil {
 			slog.Warn("getChatName: user lookup failed; using fallback chat_<id>", "chat_id", chatID, "err", err)
-		} else if len(users) > 0 {
-			if user, ok := users[0].(*tg.User); ok {
-				return tgclient.UserName(user), true
-			}
-			slog.Debug("getChatName: unexpected user type from API", "chat_id", chatID, "type", fmt.Sprintf("%T", users[0]))
+			return fallback, false
 		}
+		for _, u := range users {
+			if user, ok := u.(*tg.User); ok {
+				return tgdata.ChatInfoFromUser(user).Name, true
+			}
+		}
+		slog.Debug("getChatName: no user entity in API response", "chat_id", chatID)
+		return fallback, false
 	case *tg.InputPeerChat:
-		chats, err := raw.MessagesGetChats(ctx, []int64{p.ChatID})
-		if err != nil {
-			slog.Warn("getChatName: chat lookup failed; using fallback chat_<id>", "chat_id", chatID, "err", err)
-		} else {
-			// MessagesGetChats may return either MessagesChats or MessagesChatsSlice
-			// (the latter when the server paginates large chat lists); both carry the
-			// same Chats field.
-			var chatList []tg.ChatClass
-			switch r := chats.(type) {
-			case *tg.MessagesChats:
-				chatList = r.Chats
-			case *tg.MessagesChatsSlice:
-				chatList = r.Chats
-			}
-			if len(chatList) > 0 {
-				if chat, ok := chatList[0].(*tg.Chat); ok {
-					return chat.Title, true
-				}
-				slog.Debug("getChatName: unexpected chat type from API", "chat_id", chatID, "type", fmt.Sprintf("%T", chatList[0]))
-			}
-		}
+		chats, err = raw.MessagesGetChats(ctx, []int64{p.ChatID})
 	case *tg.InputPeerChannel:
-		chats, err := raw.ChannelsGetChannels(ctx, []tg.InputChannelClass{
+		chats, err = raw.ChannelsGetChannels(ctx, []tg.InputChannelClass{
 			&tg.InputChannel{ChannelID: p.ChannelID, AccessHash: p.AccessHash},
 		})
-		if err != nil {
-			slog.Warn("getChatName: channel lookup failed; using fallback chat_<id>", "chat_id", chatID, "err", err)
-		} else {
-			// ChannelsGetChannels returns the same MessagesChats/MessagesChatsSlice
-			// union as MessagesGetChats; handle both.
-			var chatList []tg.ChatClass
-			switch r := chats.(type) {
-			case *tg.MessagesChats:
-				chatList = r.Chats
-			case *tg.MessagesChatsSlice:
-				chatList = r.Chats
-			}
-			if len(chatList) > 0 {
-				if channel, ok := chatList[0].(*tg.Channel); ok {
-					return channel.Title, true
-				}
-				slog.Debug("getChatName: unexpected channel type from API", "chat_id", chatID, "type", fmt.Sprintf("%T", chatList[0]))
-			}
+	default:
+		return fallback, false
+	}
+	if err != nil {
+		slog.Warn("getChatName: chat lookup failed; using fallback chat_<id>", "chat_id", chatID, "err", err)
+		return fallback, false
+	}
+	for _, c := range chats.GetChats() {
+		if info, ok := tgdata.ChatInfoFromChat(c); ok {
+			return info.Name, true
 		}
 	}
-	return fmt.Sprintf("chat_%d", chatID), false
+	slog.Debug("getChatName: no chat entity in API response", "chat_id", chatID)
+	return fallback, false
 }
 
 // MessageBackupHandler handles the BackupMessages tool.

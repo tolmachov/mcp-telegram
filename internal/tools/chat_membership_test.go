@@ -10,6 +10,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
 // TestClassifyChatRef verifies the local (no-network) classification of a chat
@@ -148,7 +150,7 @@ func TestLeaveChatConfirmBypassesElicitation(t *testing.T) {
 		require.Nil(t, errRes)
 		require.NotNil(t, out)
 		assert.Equal(t, statusLeft, out.Status)
-		assert.Equal(t, "channel", out.Kind)
+		assert.Equal(t, tgdata.ChatTypeChannel, out.Kind)
 		assert.Equal(t, int64(555), out.ChatID)
 		assert.Equal(t, 1, inv.leaveCalls, "confirm=true must reach channels.leaveChannel")
 	})
