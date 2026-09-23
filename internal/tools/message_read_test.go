@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/gotd/td/bin"
@@ -141,7 +142,63 @@ func TestMarkAsReadLooksUpChannelTopsInOneCall(t *testing.T) {
 	require.Nil(t, errRes)
 	require.NotNil(t, out)
 	assert.Equal(t, 3, out.Successful)
+	assert.Equal(t, []int64{secondID}, out.NothingToReadIDs, "the result says which channel had nothing to mark")
 	assert.Zero(t, inv.Remaining())
+}
+
+// TestMarkAsReadReportsAnUnacknowledgedRead pins that a channel read Telegram
+// answers with false fails that chat instead of counting as read.
+func TestMarkAsReadReportsAnUnacknowledgedRead(t *testing.T) {
+	const channelID, groupID = int64(91), int64(93)
+	script := []telegramfake.InvokeFunc{notUserStep(t, channelID), resolveChannelStep(t, channelID, 1)}
+	script = append(script, basicGroupSteps(t, groupID)...)
+	script = append(script,
+		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetPeerDialogsRequest, out *tg.MessagesPeerDialogs) error {
+			out.Dialogs = []tg.DialogClass{&tg.Dialog{Peer: &tg.PeerChannel{ChannelID: channelID}, TopMessage: 5}}
+			return nil
+		}),
+		telegramfake.Typed(func(_ context.Context, _ *tg.ChannelsReadHistoryRequest, out *tg.BoolBox) error {
+			out.Bool = &tg.BoolFalse{}
+			return nil
+		}),
+		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesReadHistoryRequest, _ *tg.MessagesAffectedMessages) error {
+			return nil
+		}),
+	)
+	inv := telegramfake.New(script...)
+	h := NewMessageReadHandler(tgclient.NewResolver(t.Context(), tg.NewClient(inv)))
+
+	_, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, MarkAsReadInput{ChatIDs: []int64{channelID, groupID}})
+	require.NoError(t, err)
+	require.NotNil(t, out)
+	assert.Equal(t, []int64{groupID}, out.SuccessIDs)
+	require.Len(t, out.Failures, 1)
+	assert.Equal(t, channelID, out.Failures[0].ChatID)
+	assert.Contains(t, out.Failures[0].Error, "did not acknowledge the read")
+	assert.Zero(t, inv.Remaining())
+}
+
+// TestMarkAsReadCollapsesIdenticalFailures pins that chats failing with the
+// same error share one line of the failure instead of repeating it per chat.
+func TestMarkAsReadCollapsesIdenticalFailures(t *testing.T) {
+	const firstID, secondID = int64(91), int64(92)
+	inv := telegramfake.New(
+		notUserStep(t, firstID),
+		resolveChannelStep(t, firstID, 1),
+		notUserStep(t, secondID),
+		resolveChannelStep(t, secondID, 2),
+		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetPeerDialogsRequest, _ *tg.MessagesPeerDialogs) error {
+			return tgerr.New(500, "INTERNAL_SERVER_ERROR")
+		}),
+	)
+	h := NewMessageReadHandler(tgclient.NewResolver(t.Context(), tg.NewClient(inv)))
+
+	_, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, MarkAsReadInput{ChatIDs: []int64{firstID, secondID}})
+	require.Nil(t, out)
+	require.Error(t, err)
+	txt := failureText("MarkAsRead", err)
+	assert.Contains(t, txt, "chat_id=91, 92: getting channel top messages: rpc error code 500: INTERNAL_SERVER_ERROR")
+	assert.Equal(t, 1, strings.Count(txt, "INTERNAL_SERVER_ERROR"), txt)
 }
 
 // basicGroupSteps answers the resolver's probes for id as a basic group.
