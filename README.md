@@ -200,7 +200,7 @@ Leave it unset to expose all three and let the client choose.
 |-----|-------------|
 | `telegram://me` | Current user info |
 | `telegram://chats` | All chats list |
-| `telegram://chats/{id}/info` | Detailed info for any chat ID via resource template |
+| `telegram://chats/{chat_id}/info` | Detailed info for any chat ID via resource template |
 | `telegram://chats/{id}/messages` | Last 100 messages from a pinned chat (dynamic resource, only for currently pinned chats) |
 
 Pinned chat resources are created dynamically for each pinned chat and refreshed in the background; clients receive `resources/list_changed` when the set changes (except in multi-variant mode — see the note under [Server Variants](#server-variants)).
@@ -327,9 +327,9 @@ resolve as CLI flags → process environment → defaults. The binary never read
 | `MCP_SUMMARIZE_GEMINI_API_KEY` | Google Gemini API key | - |
 | `MCP_SUMMARIZE_ANTHROPIC_API_KEY` | Anthropic API key | - |
 | `MCP_TELEGRAM_MEDIA_MAX_BYTES` | Max bytes `GetMedia` downloads | `52428800` |
-| `MCP_TELEGRAM_RATE_LIMIT_RPS` | Telegram history RPS ceiling | `1` |
+| `MCP_TELEGRAM_RATE_LIMIT_RPS` | Telegram history RPS ceiling (must be positive) | `1` |
 | `MCP_TELEGRAM_PINNED_REFRESH_SECONDS` | Pinned resource polling interval | `30` |
-| `MCP_TELEGRAM_FLOOD_WAIT_MAX_SECONDS` | Maximum handled `FLOOD_WAIT` | `60` |
+| `MCP_TELEGRAM_FLOOD_WAIT_MAX_SECONDS` | Maximum handled `FLOOD_WAIT` (must be positive) | `60` |
 | `MCP_VARIANT` | Pin `full`, `compact`, or `research`; empty enables negotiation | empty |
 | `MCP_TRANSPORT` | MCP transport: `stdio` or `http` (streamable HTTP) | `stdio` |
 | `MCP_HTTP_ADDR` | Explicit listen address for HTTP; when unset on Cloud Run, the server binds to injected `:$PORT` | `127.0.0.1:8080` |

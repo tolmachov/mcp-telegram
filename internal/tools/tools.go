@@ -30,9 +30,9 @@ const (
 )
 
 // Handler is the interface every tool implements. Each handler registers
-// itself with the server using the typed mcp.AddTool[In, Out] helper, which
-// auto-validates input, generates the JSON schema, and populates structured
-// output automatically.
+// itself with the server through AddTool (or AddContentTool for a tool with no
+// typed output), which wrap the SDK's typed mcp.AddTool: input is validated,
+// the JSON schema generated and structured output populated automatically.
 type Handler interface {
 	Register(s *mcp.Server)
 }
@@ -71,8 +71,9 @@ func RegisterTools(s *mcp.Server, handlers []Handler) {
 	}
 }
 
-// parseDateFilter parses an RFC3339 date string for a filter field (e.g.
-// "from_date"). Returns an errResult on parse failure; ok is false in that case.
+// parseDate parses a date filter value (e.g. "from_date"): RFC3339, or
+// "YYYY-MM-DD[ HH:MM:SS]" read as UTC. An empty value yields the zero time,
+// meaning no bound.
 func parseDate(value string) (time.Time, error) {
 	if value == "" {
 		return time.Time{}, nil
