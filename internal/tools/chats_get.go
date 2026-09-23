@@ -10,9 +10,13 @@ import (
 )
 
 // ChatsGetHandler handles the GetChats tool with server-side pagination.
-// Every call without a cursor reloads all chats into the shared tgdata.ChatsCache;
-// subsequent calls with a cursor serve pages from that cache without hitting the
-// Telegram API, and SearchChats reads the same snapshot.
+// Every call without a cursor reloads all chats into the shared
+// tgdata.ChatsCache and returns the first page of that snapshot. A cursor
+// names the snapshot it came from, so the next pages come from the same
+// listing without hitting the Telegram API, even after other readers
+// (SearchChats, completion, the chats resource) have loaded newer ones; the
+// cache keeps a snapshot readable only for a bounded time and number of newer
+// loads.
 type ChatsGetHandler struct {
 	cache *tgdata.ChatsCache
 }
@@ -28,7 +32,7 @@ func NewChatsGetHandler(cache *tgdata.ChatsCache) *ChatsGetHandler {
 // GetChatsInput is the input for the GetChats tool.
 type GetChatsInput struct {
 	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum number of chats per page (1-500; default 100)"`
-	Cursor string `json:"cursor,omitempty" jsonschema:"Opaque pagination cursor from a previous GetChats response. Omit to load fresh data."`
+	Cursor string `json:"cursor,omitempty" jsonschema:"Opaque pagination cursor from a previous GetChats response; continues the same listing. Omit to load fresh data."`
 }
 
 // getChatsOutput is the structured output for the GetChats tool.
@@ -54,7 +58,7 @@ const truncatedChatsWarning = "Chat listing is incomplete: dialog pagination sta
 func (h *ChatsGetHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "GetChats",
-		Description: "Get a paginated list of chats, groups, and channels. First call loads all chats (may be slow) and returns the first page. Pass the returned cursor to get subsequent pages from cache. Omit cursor to force a fresh reload. To find a specific chat by name, use SearchChats instead.",
+		Description: "Get a paginated list of chats, groups, and channels. First call loads all chats (may be slow) and returns the first page. Pass the returned cursor to get subsequent pages of the same listing from cache. Omit cursor to force a fresh reload. To find a specific chat by name, use SearchChats instead.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: new(true)},
 	}, h.handle)
 }
@@ -91,7 +95,7 @@ func (h *ChatsGetHandler) handleWithCursor(cursor string, limit int) (*mcp.CallT
 
 	snap, ok := h.cache.Snapshot(sid)
 	if !ok {
-		return errResult("Cursor expired (cache was refreshed or server restarted). Call GetChats without cursor to start fresh."), nil, nil
+		return errResult("Cursor expired (its chat listing is too old or the server restarted). Call GetChats without cursor to start fresh."), nil, nil
 	}
 	if offset >= len(snap.Chats) {
 		return errResult(fmt.Sprintf("Cursor offset %d is beyond the cached list (%d chats). Call GetChats without cursor to start fresh.", offset, len(snap.Chats))), nil, nil

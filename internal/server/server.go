@@ -310,7 +310,7 @@ type assembly struct {
 // server(s) for one Telegram client, and starts the pinned-chat watcher on a
 // child of ctx. The caller must Close the assembly.
 func (s *Server) buildAssembly(ctx context.Context, api *tg.Client, logger *slog.Logger) (*assembly, error) {
-	// One chat-list snapshot shared by GetChats, SearchChats, the chats
+	// One chat-list cache shared by GetChats, SearchChats, the chats
 	// resource and completion, so none of them re-paginates every dialog on
 	// its own.
 	chatsCache := tgdata.NewChatsCache(func(ctx context.Context, onProgress tgdata.ProgressFunc) (*tgdata.ChatsList, error) {
