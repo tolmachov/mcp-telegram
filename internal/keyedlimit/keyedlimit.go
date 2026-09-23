@@ -1,5 +1,5 @@
 // Package keyedlimit is a token-bucket rate limiter with one bucket per key,
-// bounded in memory by idle eviction and a size cap.
+// bounded in memory by a size cap.
 package keyedlimit
 
 import (
@@ -31,7 +31,8 @@ type Limiter[K comparable] struct {
 	// Past it a bucket is indistinguishable from a fresh one, so dropping it
 	// loses nothing.
 	refill time.Duration
-	now    func() time.Time
+	// now is the one clock behind both the buckets' tokens and lastSeen.
+	now func() time.Time
 }
 
 // New returns a limiter granting each key rps events per second with the
@@ -57,19 +58,21 @@ func (l *Limiter[K]) Allow(key K) bool {
 	now := l.now()
 	b, ok := l.buckets[key]
 	if !ok {
-		l.evictLocked(now)
+		if len(l.buckets) >= maxKeys {
+			l.evictLocked(now)
+		}
 		b = &bucket{limiter: rate.NewLimiter(l.rps, l.burst)}
 		l.buckets[key] = b
 	}
 	b.lastSeen = now
-	return b.limiter.Allow()
+	return b.limiter.AllowN(now, 1)
 }
 
-// evictLocked makes room for a new key in one pass over the map: it drops
-// every bucket that has refilled completely and, if the map is still at
-// capacity, the least-recently-seen survivor. Called only when a new key shows
-// up, so steady-state traffic pays nothing. Under a flood of fresh keys the
-// cap bounds memory while keeping the buckets of active callers (they refresh
+// evictLocked makes room for a new key in a full map in one pass: it drops
+// every bucket that has refilled completely and, if none has, the
+// least-recently-seen one. Called only when a new key meets a full map, so
+// traffic below the cap pays nothing. Under a flood of fresh keys the cap
+// bounds memory while keeping the buckets of active callers (they refresh
 // lastSeen constantly).
 func (l *Limiter[K]) evictLocked(now time.Time) {
 	var stalestKey K

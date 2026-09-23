@@ -17,22 +17,51 @@ func TestLimiterBurstPerKey(t *testing.T) {
 	assert.True(t, l.Allow("b"), "a different key gets its own bucket")
 }
 
-func TestLimiterEvictsRefilledBuckets(t *testing.T) {
+func TestLimiterKeepsBucketsBelowCap(t *testing.T) {
 	l := New[int](1, 2)
 	base := time.Now()
 	l.now = func() time.Time { return base }
-
 	require.True(t, l.Allow(1))
-	require.True(t, l.Allow(2))
 
-	// Key 1 has been idle past its refill window; key 2 was just seen. The
-	// arrival of a new key sweeps only the refilled bucket.
-	l.now = func() time.Time { return base.Add(l.refill + time.Millisecond) }
+	// Key 1 has refilled, but the map is far from full: a new key does not
+	// scan it.
+	l.now = func() time.Time { return base.Add(l.refill + time.Second) }
 	require.True(t, l.Allow(2))
-	l.now = func() time.Time { return base.Add(l.refill + 2*time.Millisecond) }
-	require.True(t, l.Allow(3))
-	assert.NotContains(t, l.buckets, 1)
+	assert.Contains(t, l.buckets, 1)
 	assert.Contains(t, l.buckets, 2)
+}
+
+func TestLimiterAtCapEvictsRefilledBuckets(t *testing.T) {
+	l := New[int](1, 1)
+	base := time.Now()
+
+	// Fill to the cap with strictly increasing lastSeen, one microsecond apart.
+	for i := range maxKeys {
+		l.now = func() time.Time { return base.Add(time.Duration(i) * time.Microsecond) }
+		require.True(t, l.Allow(i))
+	}
+
+	// Past the refill window of the first half: a new key drops all of them,
+	// not just the stalest.
+	half := maxKeys / 2
+	l.now = func() time.Time { return base.Add(l.refill + time.Duration(half)*time.Microsecond) }
+	require.True(t, l.Allow(-1))
+	assert.Len(t, l.buckets, maxKeys-half+1)
+	assert.NotContains(t, l.buckets, half-1)
+	assert.Contains(t, l.buckets, half)
+}
+
+func TestLimiterUsesInjectedClock(t *testing.T) {
+	l := New[int](1, 1)
+	base := time.Now()
+	l.now = func() time.Time { return base }
+	require.True(t, l.Allow(1))
+	require.False(t, l.Allow(1))
+
+	// One second on the injected clock refills one token; the wall clock has
+	// barely moved.
+	l.now = func() time.Time { return base.Add(time.Second) }
+	assert.True(t, l.Allow(1))
 }
 
 func TestLimiterRefillWindowMatchesBurst(t *testing.T) {
