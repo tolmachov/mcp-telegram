@@ -121,18 +121,11 @@ func (h *RepliesGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest
 	out := &getRepliesOutput{
 		ChatID:    in.ChatID,
 		MessageID: presentation.FormatRegularRef(rootID),
-		Messages:  make([]presentation.Message, 0, len(result.Messages)),
+		Messages:  presentation.FromMessages(result.Messages, false),
 		Count:     result.Count,
 		HasMore:   result.HasMore,
 	}
-	for _, m := range result.Messages {
-		out.Messages = append(out.Messages, presentation.FromMessage(m, false))
-	}
-	if result.HasMore && result.NextID > 0 {
-		state.OffsetID = result.NextID
-		out.NextCursor = formatMessagePageCursor(state)
-		out.PaginationHint = "More replies available. Call GetReplies again with next_cursor copied verbatim into cursor and omit every other field."
-	}
+	out.NextCursor, out.PaginationHint = pageCursorResult(result, state, "GetReplies", "replies")
 
 	return nil, out, nil
 }

@@ -113,20 +113,11 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 
 	out := &getMessagesOutput{
 		ChatID:   in.ChatID,
-		Messages: make([]presentation.Message, 0, len(result.Messages)),
+		Messages: presentation.FromMessages(result.Messages, false),
 		Count:    result.Count,
 		HasMore:  result.HasMore,
 	}
-
-	for _, m := range result.Messages {
-		out.Messages = append(out.Messages, presentation.FromMessage(m, false))
-	}
-
-	if result.HasMore && result.NextID > 0 {
-		state.OffsetID = result.NextID
-		out.NextCursor = formatMessagePageCursor(state)
-		out.PaginationHint = "More messages available. Call GetMessages again with next_cursor copied verbatim into cursor and omit every other field."
-	}
+	out.NextCursor, out.PaginationHint = pageCursorResult(result, state, "GetMessages", "messages")
 
 	// Optionally fetch scheduled messages. A failure in the scheduled sub-fetch
 	// should not fail the whole tool — log a warning and continue with an
@@ -148,9 +139,7 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 			})
 			out.ScheduledFetchError = fmt.Sprintf("scheduled messages unavailable: %v", err)
 		} else {
-			for _, m := range scheduled.Messages {
-				out.ScheduledMessages = append(out.ScheduledMessages, presentation.FromMessage(m, true))
-			}
+			out.ScheduledMessages = presentation.FromMessages(scheduled.Messages, true)
 		}
 	}
 

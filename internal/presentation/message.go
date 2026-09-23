@@ -82,6 +82,16 @@ type Message struct {
 	Replies    *messages.RepliesInfo   `json:"replies,omitempty"`
 }
 
+// FromMessages presents msgs in order. The result is never nil, so an empty
+// page serialises as [] rather than null.
+func FromMessages(msgs []messages.Message, scheduled bool) []Message {
+	out := make([]Message, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, FromMessage(m, scheduled))
+	}
+	return out
+}
+
 func FromMessage(m messages.Message, scheduled bool) Message {
 	id := FormatRegularRef(m.ID)
 	if scheduled {

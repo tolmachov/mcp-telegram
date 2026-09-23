@@ -249,9 +249,5 @@ func (p *PinnedChatsProvider) handlePinnedChat(
 		return nil, fmt.Errorf("fetching messages: %w", err)
 	}
 
-	presented := make([]presentation.Message, 0, len(lastMessages.Messages))
-	for _, message := range lastMessages.Messages {
-		presented = append(presented, presentation.FromMessage(message, false))
-	}
-	return jsonResource(request.Params.URI, PinnedChatResource{Chat: chat, Messages: presented})
+	return jsonResource(request.Params.URI, PinnedChatResource{Chat: chat, Messages: presentation.FromMessages(lastMessages.Messages, false)})
 }

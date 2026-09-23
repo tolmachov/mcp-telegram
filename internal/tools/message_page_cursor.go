@@ -1,6 +1,10 @@
 package tools
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/tolmachov/mcp-telegram/internal/messages"
+)
 
 const messagePageCursorVersion = 1
 
@@ -35,6 +39,18 @@ func (c messagePageCursor) cursorVersion() int { return c.Version }
 func formatMessagePageCursor(c messagePageCursor) string {
 	c.Version = messagePageCursorVersion
 	return encodeCursor(c)
+}
+
+// pageCursorResult returns the cursor continuing state after result, and the
+// hint telling the model how to use it, when Telegram has more; both are empty
+// on the last page. tool names the tool to call again and noun what the next
+// page holds.
+func pageCursorResult(result *messages.FetchResult, state messagePageCursor, tool, noun string) (cursor, hint string) {
+	if !result.HasMore || result.NextID <= 0 {
+		return "", ""
+	}
+	state.OffsetID = result.NextID
+	return formatMessagePageCursor(state), fmt.Sprintf("More %s available. Call %s again with next_cursor copied verbatim into cursor and omit every other field.", noun, tool)
 }
 
 func parseMessagePageCursor(raw, kind string) (messagePageCursor, error) {

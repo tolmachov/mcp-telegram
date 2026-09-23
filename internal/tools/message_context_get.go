@@ -78,10 +78,7 @@ func (h *MessageContextGetHandler) handle(ctx context.Context, req *mcp.CallTool
 	out := &getMessageContextOutput{
 		ChatID:   in.ChatID,
 		AnchorID: presentation.FormatRegularRef(msgID),
-		Messages: make([]presentation.Message, 0, len(result.Messages)),
-	}
-	for _, m := range result.Messages {
-		out.Messages = append(out.Messages, presentation.FromMessage(m, false))
+		Messages: presentation.FromMessages(result.Messages, false),
 	}
 	out.Count = len(out.Messages)
 	return nil, out, nil

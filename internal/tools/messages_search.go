@@ -168,20 +168,11 @@ func (h *MessagesSearchHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	out := &searchMessagesOutput{
 		ChatID:   in.ChatID,
 		Query:    query,
-		Messages: make([]presentation.Message, 0, len(result.Messages)),
+		Messages: presentation.FromMessages(result.Messages, false),
 		Count:    result.Count,
 		HasMore:  result.HasMore,
 	}
-
-	for _, m := range result.Messages {
-		out.Messages = append(out.Messages, presentation.FromMessage(m, false))
-	}
-
-	if result.HasMore && result.NextID > 0 {
-		state.OffsetID = result.NextID
-		out.NextCursor = formatMessagePageCursor(state)
-		out.PaginationHint = "More matches available. Call SearchMessages again with next_cursor copied verbatim into cursor and omit every other field."
-	}
+	out.NextCursor, out.PaginationHint = pageCursorResult(result, state, "SearchMessages", "matches")
 
 	return nil, out, nil
 }
