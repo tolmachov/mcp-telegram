@@ -169,7 +169,7 @@ func TestSweepIsolatesPanickingPart(t *testing.T) {
 	const sid = "0123456789abcdef0123456789abcdef"
 	const family = "fedcba9876543210fedcba9876543210"
 	require.NoError(t, store.Revoke(ctx, allowedUser, sid))
-	created, err := sessionstore.RedeemCode(ctx, store, family, sid, base.Add(time.Hour))
+	created, err := sessionstore.RedeemCode(ctx, store, family, base.Add(time.Hour))
 	require.NoError(t, err)
 	require.True(t, created)
 

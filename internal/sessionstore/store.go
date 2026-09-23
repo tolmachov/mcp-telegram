@@ -191,7 +191,6 @@ func parseSessionBase(base string) (userID tgid.UserID, sid string, ok bool) {
 // GrantRecord is the persisted refresh-grant state of one authorization-code
 // family.
 type GrantRecord struct {
-	SID        string    `json:"sid"`
 	Generation int64     `json:"generation"`
 	ExpiresAt  time.Time `json:"expires_at"`
 	Revoked    bool      `json:"revoked,omitempty"`
@@ -227,8 +226,8 @@ const grantCASAttempts = 4
 // RedeemCode atomically creates generation zero for a new OAuth grant. The
 // family is the authorization code's random jti, so an existing record means
 // the code was already redeemed and false is returned.
-func RedeemCode(ctx context.Context, s Store, family, sid string, expiresAt time.Time) (bool, error) {
-	created, err := writeGrant(ctx, s, family, GrantRecord{SID: sid, ExpiresAt: expiresAt}, 0)
+func RedeemCode(ctx context.Context, s Store, family string, expiresAt time.Time) (bool, error) {
+	created, err := writeGrant(ctx, s, family, GrantRecord{ExpiresAt: expiresAt}, 0)
 	if err != nil {
 		return false, fmt.Errorf("creating grant: %w", err)
 	}

@@ -231,8 +231,8 @@ func (s *encryptedStore) DeleteRevoked(ctx context.Context, userID tgid.UserID, 
 	return nil
 }
 
-// Grant records carry no secret either (a session id and counters), so they
-// pass straight through too.
+// Grant records carry no secret either (counters and an expiry), so they pass
+// straight through too.
 
 func (s *encryptedStore) LoadGrant(ctx context.Context, family string) (GrantRecord, int64, error) {
 	if !ValidSID(family) {
@@ -246,7 +246,7 @@ func (s *encryptedStore) LoadGrant(ctx context.Context, family string) (GrantRec
 }
 
 func (s *encryptedStore) StoreGrant(ctx context.Context, family string, grant GrantRecord, version int64) error {
-	if !ValidSID(family) || !ValidSID(grant.SID) {
+	if !ValidSID(family) {
 		return ErrInvalidSID
 	}
 	if err := s.inner.StoreGrant(ctx, family, grant, version); err != nil {

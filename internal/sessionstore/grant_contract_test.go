@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"testing"
 	"time"
 
@@ -30,6 +31,28 @@ func TestGCSGrantCorruptionFailsWithoutOverwrite(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, r.Close())
 	assert.Equal(t, "not-json", string(data), "a failed read must not rewrite authorization state")
+}
+
+// TestGrantLoadsPersistedRecord pins the persisted grant JSON: a record written
+// by an earlier build, including the session id it used to carry, still loads.
+func TestGrantLoadsPersistedRecord(t *testing.T) {
+	const persisted = `{"sid":"0123456789abcdef0123456789abcdef","generation":2,"expires_at":"2026-01-02T03:04:05Z","revoked":true,"write_id":"W"}`
+	want := GrantRecord{Generation: 2, ExpiresAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), Revoked: true, WriteID: "W"}
+
+	fs := newTestFS(t)
+	require.NoError(t, os.WriteFile(fs.grantPath(testGrantFamily), []byte(persisted), 0o600))
+	gcs := NewTestGCS(t)
+	w := gcs.bucket.Object(grantObjectName(testGrantFamily)).NewWriter(t.Context())
+	_, err := io.WriteString(w, persisted)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	for name, b := range map[string]backend{"fs": fs, "gcs": gcs} {
+		got, version, err := b.LoadGrant(t.Context(), testGrantFamily)
+		require.NoError(t, err, name)
+		assert.NotZero(t, version, name)
+		assert.Equal(t, want, got, name)
+	}
 }
 
 // TestGrantRotationZeroIsRefusal pins that an outcome nobody set cannot pass
@@ -62,7 +85,7 @@ func (s *alwaysConflicting) StoreGrant(context.Context, string, GrantRecord, int
 func TestUpdateGrantGivesUp(t *testing.T) {
 	ctx := t.Context()
 	inner := Encrypted(newTestFS(t), newCipher(t, testIssuer, newKey(t)))
-	created, err := RedeemCode(ctx, inner, testGrantFamily, testSID, time.Now().Add(time.Hour))
+	created, err := RedeemCode(ctx, inner, testGrantFamily, time.Now().Add(time.Hour))
 	require.NoError(t, err)
 	require.True(t, created)
 
@@ -99,7 +122,7 @@ func (s *unreadableAfterWrite) StoreGrant(context.Context, string, GrantRecord, 
 func TestWriteGrantReportsAnUnknownOutcome(t *testing.T) {
 	ctx := t.Context()
 	inner := Encrypted(newTestFS(t), newCipher(t, testIssuer, newKey(t)))
-	created, err := RedeemCode(ctx, inner, testGrantFamily, testSID, time.Now().Add(time.Hour))
+	created, err := RedeemCode(ctx, inner, testGrantFamily, time.Now().Add(time.Hour))
 	require.NoError(t, err)
 	require.True(t, created)
 

@@ -1176,7 +1176,7 @@ func TestRefreshStoreErrorIs503(t *testing.T) {
 			a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
 			clientID := registerClient(t, ts, testRedirectURI)
 			now := a.now()
-			redeemed, err := sessionstore.RedeemCode(context.Background(), store, family, sid, now.Add(time.Hour))
+			redeemed, err := sessionstore.RedeemCode(context.Background(), store, family, now.Add(time.Hour))
 			require.NoError(t, err)
 			require.True(t, redeemed)
 			refresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
