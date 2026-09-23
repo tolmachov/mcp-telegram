@@ -205,6 +205,47 @@ func TestMarkAsReadIsolatesBadChannel(t *testing.T) {
 	assert.Zero(t, inv.Remaining())
 }
 
+// TestMarkAsReadSharedLookupFailureFailsEveryChannel verifies a shared
+// top-message lookup failing for a reason that is neither systemic nor about
+// one channel fails every channel with it — without repeating the lookup per
+// channel — while the batch's other chats are still read.
+func TestMarkAsReadSharedLookupFailureFailsEveryChannel(t *testing.T) {
+	const firstID, secondID, groupID = int64(91), int64(92), int64(93)
+	script := []telegramfake.InvokeFunc{
+		notUserStep(t, firstID),
+		resolveChannelStep(t, firstID, 1),
+		notUserStep(t, secondID),
+		resolveChannelStep(t, secondID, 2),
+	}
+	script = append(script, basicGroupSteps(t, groupID)...)
+	script = append(script,
+		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetPeerDialogsRequest, _ *tg.MessagesPeerDialogs) error {
+			require.Len(t, req.Peers, 2)
+			return tgerr.New(500, "INTERNAL_SERVER_ERROR")
+		}),
+		telegramfake.Typed(func(_ context.Context, req *tg.MessagesReadHistoryRequest, _ *tg.MessagesAffectedMessages) error {
+			assert.Equal(t, &tg.InputPeerChat{ChatID: groupID}, req.Peer)
+			return nil
+		}),
+	)
+	inv := telegramfake.New(script...)
+	h := NewMessageReadHandler(tgclient.NewResolver(t.Context(), tg.NewClient(inv)))
+
+	errRes, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, MarkAsReadInput{ChatIDs: []int64{firstID, secondID, groupID}})
+	require.NoError(t, err)
+	require.Nil(t, errRes)
+	require.NotNil(t, out)
+	assert.Equal(t, []int64{groupID}, out.SuccessIDs)
+	require.Len(t, out.Failures, 2)
+	for i, id := range []int64{firstID, secondID} {
+		assert.Equal(t, id, out.Failures[i].ChatID)
+		assert.Contains(t, out.Failures[i].Error, "INTERNAL_SERVER_ERROR")
+	}
+	assert.Equal(t, 3, out.TotalChats)
+	assert.Empty(t, out.SkippedIDs)
+	assert.Zero(t, inv.Remaining(), "no per-channel lookup follows")
+}
+
 // TestMarkAsReadFloodWaitMidReadSkipsRest verifies a flood wait while reading
 // one chat stops the batch there, keeping the chats already read.
 func TestMarkAsReadFloodWaitMidReadSkipsRest(t *testing.T) {

@@ -128,15 +128,31 @@ func (h *MessageReadHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		}
 	}
 
-	// Telegram fails the shared lookup as a whole for one bad channel, so
-	// unless the failure is systemic each channel then looks up its own top
-	// message and only the bad one fails.
 	tops, err := h.topMessages(ctx, channelIDs)
-	if err != nil {
-		if tgclient.IsSystemic(err) {
-			return stopped(pending, err)
-		}
+	switch {
+	case err == nil:
+	case tgclient.IsSystemic(err):
+		return stopped(pending, err)
+	case tgclient.IsPeerSpecific(err):
+		// Telegram fails the shared lookup as a whole for one bad channel,
+		// so each channel looks up its own top message and only the bad one
+		// fails.
+		mcpLog(ctx, req.Session, logLevelWarning, "MarkAsRead", map[string]any{
+			"error":    err.Error(),
+			"fallback": "looking up each channel's top message on its own",
+		})
 		tops = nil
+	default:
+		// Anything else would fail each channel's own lookup alike: every
+		// channel fails with it, and only the other chats are still read.
+		mcpLog(ctx, req.Session, logLevelWarning, "MarkAsRead", map[string]any{
+			"error":    err.Error(),
+			"chat_ids": channelIDs,
+		})
+		for _, chatID := range channelIDs {
+			results = append(results, markReadResult{chatID: chatID, err: err})
+		}
+		pending = slices.DeleteFunc(pending, func(chatID int64) bool { return slices.Contains(channelIDs, chatID) })
 	}
 
 	for i, chatID := range pending {
@@ -212,8 +228,9 @@ func (h *MessageReadHandler) topMessages(ctx context.Context, channelIDs []int64
 }
 
 // markChatAsRead marks a single chat as read. tops holds the channels' top
-// message IDs from the shared lookup, or is nil when that lookup failed, in
-// which case a channel looks up its own.
+// message IDs from the shared lookup, or is nil when that lookup failed on a
+// bad channel (tgclient.IsPeerSpecific), in which case a channel looks up its
+// own.
 func (h *MessageReadHandler) markChatAsRead(ctx context.Context, chatID int64, isChannel bool, tops map[int64]int) error {
 	if isChannel && tops == nil {
 		own, err := h.topMessages(ctx, []int64{chatID})

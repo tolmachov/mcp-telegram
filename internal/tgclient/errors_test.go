@@ -26,3 +26,25 @@ func TestIsSystemic(t *testing.T) {
 	// A wrapped systemic error stays systemic.
 	assert.True(t, IsSystemic(fmt.Errorf("resolving @x: %w", context.Canceled)))
 }
+
+// TestIsPeerSpecific separates failures about one named peer, which a batch may
+// isolate by retrying its peers one by one, from failures that would fail
+// every peer alike.
+func TestIsPeerSpecific(t *testing.T) {
+	for _, err := range []error{
+		tgerr.New(400, "CHANNEL_INVALID"),
+		tgerr.New(400, "PEER_ID_INVALID"),
+		tgerr.New(406, "CHANNEL_PRIVATE"),
+		fmt.Errorf("getting top messages: %w", tgerr.New(400, "CHANNEL_PRIVATE")),
+		&PeerError{ID: 5, Err: errors.New("no such chat")},
+	} {
+		assert.True(t, IsPeerSpecific(err), "%v is about one peer", err)
+	}
+	for _, err := range []error{
+		errors.New("connection reset by peer"),
+		tgerr.New(500, "INTERNAL_SERVER_ERROR"),
+		tgerr.New(400, "LIMIT_INVALID"),
+	} {
+		assert.False(t, IsPeerSpecific(err), "%v would fail every peer alike", err)
+	}
+}

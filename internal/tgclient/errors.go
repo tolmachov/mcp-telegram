@@ -48,6 +48,17 @@ func ShouldRefreshPeer(err error) bool {
 	return tgerr.Is(err, "PEER_ID_INVALID", "CHANNEL_INVALID", "CHAT_ID_INVALID")
 }
 
+// IsPeerSpecific reports whether err, which is not systemic (callers test
+// IsSystemic first), is about one peer a request named — a stale or invalid ID
+// or access hash, a chat that failed to resolve, a channel this account cannot
+// access — so a batch Telegram failed as a whole may retry its peers one by one
+// to isolate the bad one. Any other error would fail each of them alike.
+func IsPeerSpecific(err error) bool {
+	var pe *PeerError
+	return ShouldRefreshPeer(err) || errors.As(err, &pe) ||
+		tgerr.Is(err, "CHANNEL_PRIVATE", "CHANNEL_PUBLIC_GROUP_NA", "PEER_ID_NOT_SUPPORTED", "USER_BANNED_IN_CHANNEL")
+}
+
 // PeerError is a failure to resolve a chat ID to a peer. Tool layers detect
 // it to point the caller at the chat-discovery tools.
 type PeerError struct {
