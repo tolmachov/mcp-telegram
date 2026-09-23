@@ -112,7 +112,7 @@ type Server struct {
 	// Telegram connection (and, on darwin, without a Keychain prompt). New
 	// points it at Server.authProbe; only tests replace it.
 	authProbeFn func(context.Context) (account string, authorized bool, err error)
-	// probeMu serializes authProbe — see its doc comment for why concurrent
+	// probeMu serialises authProbe — see its doc comment for why concurrent
 	// probes on one stored session are a hazard rather than just waste.
 	probeMu sync.Mutex
 }

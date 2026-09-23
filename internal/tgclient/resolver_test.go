@@ -141,7 +141,7 @@ func TestResolverDoesNotCacheErrors(t *testing.T) {
 	p, err := r.Resolve(t.Context(), 1555091578)
 	require.NoError(t, err, "the error must not have been cached; retry should succeed")
 	assert.Equal(t, &tg.InputPeerChannel{ChannelID: 1555091578, AccessHash: 999}, p.Input)
-	assert.Equal(t, 2, channelCalls, "the failed resolve must not be memoized")
+	assert.Equal(t, 2, channelCalls, "the failed resolve must not be memoised")
 }
 
 // TestResolverExpiresAndEvicts covers the TTL and the bound on the cache.

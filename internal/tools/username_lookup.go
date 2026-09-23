@@ -21,7 +21,7 @@ import (
 // chat_id in different tools. The accessors below all key off r.Peer — the
 // entity Telegram itself designates as the resolution — so every caller agrees.
 
-// resolvePublicUsername normalizes a public username (with or without a leading
+// resolvePublicUsername normalises a public username (with or without a leading
 // @), rejects empty input, and calls contacts.resolveUsername.
 func resolvePublicUsername(ctx context.Context, client *tg.Client, username string) (*tg.ContactsResolvedPeer, error) {
 	username = strings.TrimPrefix(strings.TrimSpace(username), "@")

@@ -23,9 +23,9 @@ import (
 //
 // Possession of a decryptable token is sufficient authorization to revoke it
 // (§2.1 — all our clients are public); expiry does not block revocation. A
-// recognized token whose tombstone cannot be written answers 503
+// recognised token whose tombstone cannot be written answers 503
 // temporarily_unavailable (§2.2.1) so the client retries instead of assuming
-// the grant is dead; every other outcome — including an unrecognized/invalid
+// the grant is dead; every other outcome — including an unrecognised/invalid
 // token — is 200, so there is no validity oracle. The reason class is logged
 // server-side, never the token.
 func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +46,7 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	sub, sid, family, clientID, opened := a.openRevocationTarget(token, r.PostForm.Get("token_type_hint"))
 	if !opened {
-		a.logger.Debug("revocation of an unrecognized token acknowledged")
+		a.logger.Debug("revocation of an unrecognised token acknowledged")
 		ok()
 		return
 	}
@@ -95,7 +95,7 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 // subject, session id, family and client id. Per RFC 7009 §2.1 token_type_hint
 // only orders the attempts: the hinted kind is tried first, then the other
 // kind. A token with a malformed grant identity (forged or corrupt) counts as
-// unrecognized, so revocation never touches storage with it.
+// unrecognised, so revocation never touches storage with it.
 func (a *AuthServer) openRevocationTarget(token, hint string) (sub, sid, family, clientID string, ok bool) {
 	tryRefresh := func() bool {
 		rc, err := openBlob(a.sealer, refreshBlob, token, a.now())

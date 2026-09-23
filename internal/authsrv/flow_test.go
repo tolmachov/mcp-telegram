@@ -314,7 +314,7 @@ func pollLogin(t *testing.T, ts *httptest.Server, loginID string) pollResponse {
 }
 
 // finishLogin completes the fake flow and polls until the login is
-// finalized, returning the code and state delivered to the redirect URI.
+// finalised, returning the code and state delivered to the redirect URI.
 func finishLogin(t *testing.T, ts *httptest.Server, loginID string, flow *fakeFlow, user LoginUser, session []byte) (code, gotState string) {
 	t.Helper()
 	flow.complete(user, session)
@@ -465,7 +465,7 @@ func TestFullAuthorizationFlow(t *testing.T) {
 	assert.Equal(t, "waiting", pr.Status)
 	assert.Equal(t, 2, pr.QRRev)
 
-	// Scan confirmed: the poll finalizes the login and hands out the code.
+	// Scan confirmed: the poll finalises the login and hands out the code.
 	code, gotState := finishLogin(t, ts, loginID, flow,
 		LoginUser{ID: allowedUser, Username: "durov"}, sessionBytes)
 	assert.Equal(t, "client-state-1", gotState)
@@ -1004,8 +1004,8 @@ func TestVerifierRejections(t *testing.T) {
 }
 
 // TestRevokeUnrecognizedTokenAcknowledged pins RFC 7009 §2.2: an
-// unrecognized/garbage/empty token is acknowledged with 200 (no validity
-// oracle) and never touches storage. A recognized token whose tombstone cannot
+// unrecognised/garbage/empty token is acknowledged with 200 (no validity
+// oracle) and never touches storage. A recognised token whose tombstone cannot
 // be written is the ONE case that returns non-200 (503, TestRevokeStoreError).
 func TestRevokeUnrecognizedTokenAcknowledged(t *testing.T) {
 	_, ts := newTestServer(t, testConfig(t), sessionstoretest.New(t), neverStartLogin)
@@ -1124,7 +1124,7 @@ func (s *failRevokeStore) Revoke(context.Context, tgid.UserID, string) error {
 	return errors.New("simulated revoke failure")
 }
 
-// TestRevokeStoreError pins that a recognized token whose tombstone cannot be
+// TestRevokeStoreError pins that a recognised token whose tombstone cannot be
 // written yields 503 (temporarily_unavailable), NOT 200 — answering 200 would
 // tell the client the grant is dead while the refresh keeps minting.
 func TestRevokeStoreError(t *testing.T) {

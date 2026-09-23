@@ -610,7 +610,7 @@ func extractSender(peer any, users map[int64]string, chats map[int64]string) (in
 		id = p.GetChatID()
 		name = chats[id]
 	default:
-		slog.Warn("extractSender: unrecognized peer type", "type", fmt.Sprintf("%T", peer))
+		slog.Warn("extractSender: unrecognised peer type", "type", fmt.Sprintf("%T", peer))
 		return 0, unknownSender
 	}
 

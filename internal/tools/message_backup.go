@@ -322,7 +322,7 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 		return errResult(err.Error()), nil, nil
 	}
 
-	// Initialize progress tracker. Token may be nil if the client did not request progress;
+	// Initialise the progress tracker. Token may be nil if the client did not request progress;
 	// in that case backupProgress.Send becomes a no-op via sendProgressWithToken.
 	progress := newBackupProgress(
 		ctx,

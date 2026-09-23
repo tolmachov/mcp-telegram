@@ -23,7 +23,7 @@ func NewSamplingProvider(session *mcp.ServerSession) *SamplingProvider {
 }
 
 // ErrSamplingUnsupported is returned when the connected MCP client did not
-// declare the sampling capability during initialization. Callers should surface
+// declare the sampling capability during initialisation. Callers should surface
 // this clearly so the user can switch to a non-sampling provider (anthropic,
 // gemini, ollama) via the --summarize-provider flag.
 var ErrSamplingUnsupported = errors.New("client does not support MCP sampling; configure --summarize-provider=anthropic|gemini|ollama (and the matching API key) to use a direct LLM provider instead")

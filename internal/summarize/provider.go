@@ -204,7 +204,7 @@ func retryDelay(retryAfter string, attempt int) time.Duration {
 		}
 	}
 	base := 200 * time.Millisecond * time.Duration(1<<(attempt-1))
-	// Small bounded jitter prevents synchronized retries without introducing a
+	// Small bounded jitter prevents synchronised retries without introducing a
 	// shared pseudo-random generator into request handling.
 	return base + time.Duration(time.Now().UnixNano()%int64(100*time.Millisecond))
 }

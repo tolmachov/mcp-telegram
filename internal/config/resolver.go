@@ -30,7 +30,7 @@ func NewResolver(values Values) (*Resolver, error) {
 	}
 	store, err := NewStore()
 	if err != nil {
-		return nil, fmt.Errorf("initializing secure config store: %w", err)
+		return nil, fmt.Errorf("initialising secure config store: %w", err)
 	}
 	return &Resolver{values: values, store: store}, nil
 }

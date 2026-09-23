@@ -72,7 +72,7 @@ func TestAliasForUnknownCanonicalPassesThrough(t *testing.T) {
 func TestAliasListIsSorted(t *testing.T) {
 	// The ordering is part of the user-visible error message; verify it
 	// really is sorted so the message is stable across Go's map-iteration
-	// randomization.
+	// randomisation.
 	got := aliasList()
 	assert.True(t, len(got) >= 2, "need at least two aliases to verify ordering")
 	sorted := make([]string, len(got))

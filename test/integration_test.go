@@ -171,7 +171,7 @@ func setupClientWithTimeout(t *testing.T, timeout time.Duration) (*client.Client
 	case res := <-initDone:
 		if res.err != nil {
 			cleanup()
-			require.NoError(t, res.err, "failed to initialize")
+			require.NoError(t, res.err, "failed to initialise")
 		}
 		serverInfo = res.info
 	case err := <-serverDone:
@@ -860,7 +860,7 @@ func TestGetMessagesStructuredContent(t *testing.T) {
 	require.NoError(t, err, "marshaling StructuredContent")
 	t.Logf("StructuredContent: %s", string(raw))
 	var parsed map[string]any
-	require.NoError(t, json.Unmarshal(raw, &parsed), "StructuredContent is not JSON-serializable")
+	require.NoError(t, json.Unmarshal(raw, &parsed), "StructuredContent is not JSON-serialisable")
 
 	// FetchResult embeds the expected fields.
 	for _, key := range []string{"chat_id", "messages", "count", "has_more"} {
@@ -947,7 +947,7 @@ func TestGetMessagesDateFilter(t *testing.T) {
 // TestResolveMessageLinkPrivate exercises the private-channel branch of
 // ResolveMessageLink (the t.me/c/… form). This branch is fully offline
 // and does not require any env vars: we feed a synthetic link and verify
-// the -100 prefix conversion.
+// the chat ID comes back as the bare channel ID from the URL, unprefixed.
 func TestResolveMessageLinkPrivate(t *testing.T) {
 	c, ctx, cleanup := setupClient(t)
 	defer cleanup()

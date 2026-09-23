@@ -256,7 +256,7 @@ type pollResponse struct {
 }
 
 // handleLoginPoll reports the state of a pending login and, exactly once per
-// successful login, finalizes it: allowlist check, session persistence, and
+// successful login, finalises it: allowlist check, session persistence, and
 // authorization-code minting.
 func (a *AuthServer) handleLoginPoll(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -286,7 +286,7 @@ func (a *AuthServer) handleLoginPoll(w http.ResponseWriter, r *http.Request) {
 		})
 	case LoginDone:
 		if !p.tryConsume() {
-			// Another poll is finalizing; report waiting until it finishes.
+			// Another poll is finalising; report waiting until it finishes.
 			a.writeJSON(w, http.StatusOK, &pollResponse{Status: "waiting"})
 			return
 		}

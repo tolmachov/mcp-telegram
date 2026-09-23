@@ -118,7 +118,7 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	// should not fail the whole tool — log a warning and continue with an
 	// empty list so the caller still gets the regular history.
 	if in.IncludeScheduled {
-		// Always initialize as a non-nil empty slice so JSON emits "[]" rather
+		// Always initialise as a non-nil empty slice so JSON emits "[]" rather
 		// than omitting the field — clients/LLMs then see an unambiguous
 		// "no pending scheduled messages" signal.
 		out.ScheduledMessages = make([]presentation.Message, 0)

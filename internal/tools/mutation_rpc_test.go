@@ -47,7 +47,7 @@ func TestEditMessageIDRangeThroughMCP(t *testing.T) {
 		notUserStep(t, 41),
 		resolveChannelStep(t, 41, 91),
 		telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesEditMessageRequest, out *tg.UpdatesBox) error {
-			// Check the target after TL serialization, where a Go int could
+			// Check the target after TL serialisation, where a Go int could
 			// otherwise silently wrap to another message's signed int32 ID.
 			var buf bin.Buffer
 			require.NoError(t, rpc.Encode(&buf))

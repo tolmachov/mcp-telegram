@@ -121,7 +121,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		return errRes, nil, nil
 	}
 
-	// Normalize and validate mode first so the LLM gets a clear error when
+	// Normalise and validate mode first so the LLM gets a clear error when
 	// it misspells the value instead of silently falling back to "send".
 	mode := in.Mode
 	switch mode {

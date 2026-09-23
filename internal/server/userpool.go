@@ -95,7 +95,7 @@ const (
 //
 // Every field except ready is protected by userPool.mu. The ready channel is
 // only closed while holding that mutex and is the publication edge for build
-// results. Lifecycle transitions are centralized in completeBuildLocked,
+// results. Lifecycle transitions are centralised in completeBuildLocked,
 // evictLocked, release and Close.
 type userEntry struct {
 	key           poolKey
@@ -451,7 +451,7 @@ func (p *userPool) countForUserLocked(id tgid.UserID) int {
 // cleanup, NOT the correctness mechanism: revocation is guaranteed by the
 // durable tombstone (the refresh gate checks Revoked). It removes the entry
 // from the map immediately. Idle entries close synchronously; busy entries
-// drain until their last release or the centralized janitor reaches userPoolEvictGrace.
+// drain until their last release or the centralised janitor reaches userPoolEvictGrace.
 func (p *userPool) EvictSession(userID tgid.UserID, sid string) {
 	key := poolKey{id: userID, sid: sid}
 	p.mu.Lock()

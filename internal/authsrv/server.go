@@ -58,7 +58,7 @@ func New(
 	invalidate func(userID tgid.UserID, sid string),
 ) (*AuthServer, error) {
 	// Work on a private copy: a caller mutating cfg after construction must
-	// not desynchronize the sealer's AAD from the metadata endpoints.
+	// not desynchronise the sealer's AAD from the metadata endpoints.
 	if cfg == nil {
 		return nil, fmt.Errorf("invalid auth config: auth config must not be nil")
 	}

@@ -29,7 +29,7 @@ type itemBackend interface {
 	List(prefix string) (map[string][]byte, error)
 }
 
-// Vault serializes same-process operations but performs every read against the
+// Vault serialises same-process operations but performs every read against the
 // Keychain. There is deliberately no process cache: another process updating a
 // key is immediately visible and independent items cannot suffer lost updates.
 type Vault struct {

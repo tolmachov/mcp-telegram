@@ -1,6 +1,6 @@
 // Package prompts registers MCP prompts that guide multi-step Telegram workflows.
 //
-// Prompts are short, parameterized recipes that an MCP client can render as a
+// Prompts are short, parameterised recipes that an MCP client can render as a
 // slash-command or quick action. Each prompt expands into a user message that
 // instructs the assistant which mcp-telegram tools to call and in what order.
 package prompts

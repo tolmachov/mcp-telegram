@@ -292,9 +292,9 @@ func (s gcsSession) LoadSession(ctx context.Context) ([]byte, error) {
 
 func (s gcsSession) StoreSession(ctx context.Context, data []byte) error {
 	// Give the writer its own cancelable context so a failed Write can ABORT the
-	// upload rather than commit it. storage.Writer.Close finalizes the object;
+	// upload rather than commit it. storage.Writer.Close finalises the object;
 	// calling it after a partial write could publish a truncated/0-byte blob.
-	// Canceling the context makes Close return without finalizing.
+	// Canceling the context makes Close return without finalising.
 	wctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	w := newWriter(wctx, s.object)

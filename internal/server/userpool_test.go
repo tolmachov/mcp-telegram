@@ -23,7 +23,7 @@ import (
 const testWWWAuthenticate = `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"`
 
 // waitFor polls cond until it holds or a short deadline elapses, failing the
-// test on timeout. Used to synchronize on concurrent pool state (e.g. a waiter
+// test on timeout. Used to synchronise on concurrent pool state (e.g. a waiter
 // attaching to an in-flight build) without racy fixed sleeps.
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()

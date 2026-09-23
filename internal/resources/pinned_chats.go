@@ -39,7 +39,7 @@ type PinnedChatsProvider struct {
 	// mu guards currentURIs/sortedFingerprints. doRefresh commits them only after
 	// the server registry has been updated, so a reader holding mu sees fields
 	// that match what is actually registered (never an interim "about to apply"
-	// state). Refreshes are additionally serialized by the singleflight, so mu is
+	// state). Refreshes are additionally serialised by the singleflight, so mu is
 	// really just future-proofing for a second reader.
 	mu          sync.Mutex
 	currentURIs []string // track current pinned resource URIs for cleanup (unsorted, preserves Telegram order)
@@ -127,7 +127,7 @@ func (p *PinnedChatsProvider) doRefresh(ctx context.Context) error {
 
 	// Apply the change to the registry BEFORE committing the state fields below,
 	// so currentURIs/sortedFingerprints never claim "applied" for a set that is
-	// not actually registered. doRefresh is serialized against itself by the
+	// not actually registered. doRefresh is serialised against itself by the
 	// singleflight in RefreshResources, so no concurrent refresh can observe the
 	// interim state; the only reader of these fields is doRefresh itself.
 

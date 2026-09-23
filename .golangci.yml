@@ -57,15 +57,27 @@ linters:
       ignore-rules:
         - behaviour
         - cancelled
+        - centralised
+        - finalised
+        - finalises
+        - finalising
         - honours
+        - initialise
+        - initialising
         - marshalled
         - marshalling
         - minimise
         - recognised
         - recognises
         - sanitise
+        - serialisation
+        - serialise
+        - serialised
         - serialises
         - serialising
+        - summarises
+        - synchronise
+        - synchronised
         - unrecognised
 
 issues:

@@ -31,7 +31,7 @@ type Message struct {
 	Replies    *RepliesInfo   `json:"replies,omitempty"`
 }
 
-// RepliesInfo summarizes the discussion thread attached to a message: the
+// RepliesInfo summarises the discussion thread attached to a message: the
 // comment section under a channel post, or the reply thread of a group
 // message / forum-topic root. It's derived from tg.Message.Replies and tells
 // the caller that a thread exists and how big it is, so it can decide whether

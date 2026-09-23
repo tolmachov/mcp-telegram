@@ -30,7 +30,7 @@ func (a *AuthServer) authServerMetadata() *oauthex.AuthServerMeta {
 		RegistrationEndpoint:  iss + "/register",
 		RevocationEndpoint:    iss + "/revoke",
 		// Tokens are opaque sealed blobs, not JWS, so the key set is empty.
-		// The field is still populated because AuthServerMeta serializes
+		// The field is still populated because AuthServerMeta serialises
 		// jwks_uri unconditionally.
 		JWKSURI:                           iss + "/jwks.json",
 		ResponseTypesSupported:            []string{"code"},

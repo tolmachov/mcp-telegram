@@ -18,7 +18,7 @@ import (
 
 // callTool registers tools on a fresh server, connects an in-memory client,
 // and calls one tool. Going through the real SDK is the point: the bug being
-// guarded against lives in how the SDK serializes handler results.
+// guarded against lives in how the SDK serialises handler results.
 func callTool(t *testing.T, register func(*mcp.Server), name string, args map[string]any) *mcp.CallToolResult {
 	t.Helper()
 	cs := connectToolClient(t, register)

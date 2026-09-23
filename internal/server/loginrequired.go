@@ -234,7 +234,7 @@ func accountSuffix(account string) string {
 // not a failed check, while a cancelled or incomplete probe stays an error
 // and is never reported as a dead session.
 //
-// It is serialized by probeMu. The login-required server holds no Telegram
+// It is serialised by probeMu. The login-required server holds no Telegram
 // connection of its own, but the *session* is shared: the SDK dispatches tool
 // calls concurrently, and each probe is a fresh client on the stored auth key.
 // Two live clients on one key is the AUTH_KEY_DUPLICATED hazard the user pool
