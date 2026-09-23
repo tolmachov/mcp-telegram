@@ -509,37 +509,11 @@ func (h *AddChatsToFolderHandler) handle(ctx context.Context, req *mcp.CallToolR
 		return errResult("chats is required: one or more @usernames or numeric chat IDs to add."), nil, nil
 	}
 
-	filter, errRes := findEditableFolder(ctx, h.client, in.FolderID)
+	added, present, skipped, errRes := editFolderChats(ctx, req, h.client, "AddChatsToFolder", in.FolderID, in.Chats, "added to", applyAdditions)
 	if errRes != nil {
 		return errRes, nil, nil
 	}
-
-	peers, skipped, ferr := resolveChatRefs(ctx, h.client, in.Chats)
-	if ferr != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, "AddChatsToFolder", map[string]any{"folder_id": in.FolderID, "error": ferr.Error()})
-		return errResult(fmt.Sprintf("Aborted updating folder %d: %v. Retry once the condition clears.", in.FolderID, ferr)), nil, nil
-	}
-
-	out := &AddChatsToFolderResult{FolderID: in.FolderID, Skipped: skipped}
-	out.Added, out.AlreadyPresent = applyAdditions(filter, peers)
-
-	if len(out.Added) == 0 {
-		// Nothing changed. Distinguish a benign no-op (everything already in the
-		// folder) from a total failure (every reference skipped) so the latter
-		// surfaces as an error instead of a successful-looking empty result.
-		if len(out.AlreadyPresent) == 0 && len(out.Skipped) > 0 {
-			return errResult(fmt.Sprintf("None of the chats could be added to folder %d: %s. Verify the references with ResolveUsername or SearchChats.", in.FolderID, formatSkipped(out.Skipped))), nil, nil
-		}
-		return nil, out, nil // skip the write
-	}
-
-	updReq := &tg.MessagesUpdateDialogFilterRequest{ID: in.FolderID}
-	updReq.SetFilter(filter)
-	if _, err := h.client.MessagesUpdateDialogFilter(ctx, updReq); err != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, "AddChatsToFolder", map[string]any{"folder_id": in.FolderID, "error": err.Error()})
-		return errResult(fmt.Sprintf("Failed to update folder %d: %v", in.FolderID, err)), nil, nil
-	}
-	return nil, out, nil
+	return nil, &AddChatsToFolderResult{FolderID: in.FolderID, Added: added, AlreadyPresent: present, Skipped: skipped}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -587,37 +561,59 @@ func (h *RemoveChatsFromFolderHandler) handle(ctx context.Context, req *mcp.Call
 		return errResult("chats is required: one or more @usernames or numeric chat IDs to remove."), nil, nil
 	}
 
-	filter, errRes := findEditableFolder(ctx, h.client, in.FolderID)
+	removed, absent, skipped, errRes := editFolderChats(ctx, req, h.client, "RemoveChatsFromFolder", in.FolderID, in.Chats, "removed from", applyRemovals)
 	if errRes != nil {
 		return errRes, nil, nil
 	}
+	return nil, &RemoveChatsFromFolderResult{FolderID: in.FolderID, Removed: removed, NotPresent: absent, Skipped: skipped}, nil
+}
 
-	peers, skipped, ferr := resolveChatRefs(ctx, h.client, in.Chats)
+// editFolderChats resolves chats, applies them to folder folderID with apply,
+// and writes the folder back when that changed anything. changed and unchanged
+// are apply's split of the resolved chats; verb ("added to", "removed from")
+// words the error for a call where every reference was skipped. errRes is
+// non-nil on any failure.
+func editFolderChats(
+	ctx context.Context,
+	req *mcp.CallToolRequest,
+	client *tg.Client,
+	tool string,
+	folderID int,
+	chats []string,
+	verb string,
+	apply func(*tg.DialogFilter, []tg.InputPeerClass) (changed, unchanged []int64),
+) (changed, unchanged []int64, skipped []FolderSkippedChat, errRes *mcp.CallToolResult) {
+	filter, errRes := findEditableFolder(ctx, client, folderID)
+	if errRes != nil {
+		return nil, nil, nil, errRes
+	}
+
+	peers, skipped, ferr := resolveChatRefs(ctx, client, chats)
 	if ferr != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, "RemoveChatsFromFolder", map[string]any{"folder_id": in.FolderID, "error": ferr.Error()})
-		return errResult(fmt.Sprintf("Aborted updating folder %d: %v. Retry once the condition clears.", in.FolderID, ferr)), nil, nil
+		mcpLog(ctx, req.Session, logLevelWarning, tool, map[string]any{"folder_id": folderID, "error": ferr.Error()})
+		return nil, nil, nil, errResult(fmt.Sprintf("Aborted updating folder %d: %v. Retry once the condition clears.", folderID, ferr))
 	}
 
-	out := &RemoveChatsFromFolderResult{FolderID: in.FolderID, Skipped: skipped}
-	out.Removed, out.NotPresent = applyRemovals(filter, peers)
-
-	if len(out.Removed) == 0 {
-		// Nothing changed: tell a total failure (all skipped) apart from a
-		// benign no-op (none of the chats were in the folder).
-		if len(out.NotPresent) == 0 && len(out.Skipped) > 0 {
-			return errResult(fmt.Sprintf("None of the chats could be removed from folder %d: %s. Verify the references with ResolveUsername or SearchChats.", in.FolderID, formatSkipped(out.Skipped))), nil, nil
+	changed, unchanged = apply(filter, peers)
+	if len(changed) == 0 {
+		// Nothing changed. Distinguish a benign no-op (every chat already in the
+		// wanted state) from a total failure (every reference skipped) so the
+		// latter surfaces as an error instead of a successful-looking empty result.
+		if len(unchanged) == 0 && len(skipped) > 0 {
+			return nil, nil, nil, errResult(fmt.Sprintf("None of the chats could be %s folder %d: %s. Verify the references with ResolveUsername or SearchChats.", verb, folderID, formatSkipped(skipped)))
 		}
-		return nil, out, nil // skip the write
+		return changed, unchanged, skipped, nil // skip the write
 	}
+	// Only a removal can leave the folder without an inclusion.
 	if !filterHasInclusion(filter) {
-		return errResult(fmt.Sprintf("Removing those chats would leave folder %d empty, which Telegram doesn't allow. Use DeleteFolder to remove the folder instead.", in.FolderID)), nil, nil
+		return nil, nil, nil, errResult(fmt.Sprintf("Removing those chats would leave folder %d empty, which Telegram doesn't allow. Use DeleteFolder to remove the folder instead.", folderID))
 	}
 
-	updReq := &tg.MessagesUpdateDialogFilterRequest{ID: in.FolderID}
+	updReq := &tg.MessagesUpdateDialogFilterRequest{ID: folderID}
 	updReq.SetFilter(filter)
-	if _, err := h.client.MessagesUpdateDialogFilter(ctx, updReq); err != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, "RemoveChatsFromFolder", map[string]any{"folder_id": in.FolderID, "error": err.Error()})
-		return errResult(fmt.Sprintf("Failed to update folder %d: %v", in.FolderID, err)), nil, nil
+	if _, err := client.MessagesUpdateDialogFilter(ctx, updReq); err != nil {
+		mcpLog(ctx, req.Session, logLevelWarning, tool, map[string]any{"folder_id": folderID, "error": err.Error()})
+		return nil, nil, nil, errResult(fmt.Sprintf("Failed to update folder %d: %v", folderID, err))
 	}
-	return nil, out, nil
+	return changed, unchanged, skipped, nil
 }
