@@ -379,7 +379,7 @@ func TestVerifierRejectsMalformedSubjectAndForeignResource(t *testing.T) {
 		grantClaims: grantClaims{
 			Resource:   a.cfg.IssuerURL,
 			SessionID:  "0123456789abcdef0123456789abcdef",
-			SessionKey: make([]byte, sessionKeyLen),
+			SessionKey: sessionstore.NewSessionKey(),
 			Family:     "fedcba9876543210fedcba9876543210",
 		},
 		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Minute).Unix(),

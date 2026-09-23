@@ -50,7 +50,7 @@ type grantClaims struct {
 // storage or a new token.
 func (g grantClaims) valid(issuer string) bool {
 	return sessionstore.ValidSID(g.SessionID) && sessionstore.ValidSID(g.Family) &&
-		len(g.SessionKey) == sessionKeyLen && normalizeResource(g.Resource) == issuer
+		sessionstore.ValidSessionKey(g.SessionKey) && normalizeResource(g.Resource) == issuer
 }
 
 // codeClaims is the sealed authorization code handed to the client's

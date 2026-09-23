@@ -26,12 +26,6 @@ const hkdfInfoSession = "mcp-telegram/sessionstore/aead/v3"
 // sessionBlobVersion is the mandatory first byte of every supported blob.
 const sessionBlobVersion = 0x03
 
-// userKeyLen is the required length of a v3 per-session key (matches the key
-// authsrv mints). Enforced in aeadFor so a short/low-entropy key can never seal
-// or open a v3 blob — the split-key protection must not silently degrade if an
-// upstream bug ever passes a malformed key.
-const userKeyLen = 32
-
 // ErrCorruptSession is returned by LoadSession when a stored blob exists but
 // cannot be decrypted (a rotated-away key, an issuer/AAD mismatch, a
 // truncated object, or tampering). It is deliberately distinct from
@@ -57,10 +51,8 @@ func NewCipher(ring *keyring.Ring, issuer string) *Cipher {
 }
 
 // aeadFor returns the AEAD derived from both the master and per-session key.
+// The Encrypted store has already checked userKey (ValidSessionKey).
 func (c *Cipher) aeadFor(k keyring.Key, userKey []byte) (cipher.AEAD, error) {
-	if len(userKey) != userKeyLen {
-		return nil, fmt.Errorf("sessionstore: session key must be %d bytes, got %d", userKeyLen, len(userKey))
-	}
 	aeadKey, err := hkdf.Key(sha256.New, k.Master, userKey, hkdfInfoSession, 32)
 	if err != nil {
 		return nil, fmt.Errorf("deriving v3 AEAD key: %w", err)
@@ -106,7 +98,7 @@ func (c *Cipher) open(userID tgid.UserID, userKey, blob []byte) ([]byte, error) 
 	}
 	aead, err := c.aeadFor(key, userKey)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrCorruptSession, err)
+		return nil, err
 	}
 	headerLen := 2 + aead.NonceSize()
 	if len(blob) < headerLen {
@@ -140,9 +132,16 @@ func (*encryptedStore) encrypted() {}
 // malformed session id or grant family (see ValidSID).
 var ErrInvalidSID = errors.New("sessionstore: invalid session id")
 
-// brokenSession is returned by Session for an invalid sid; every operation
-// fails with the same error so the mismatch surfaces immediately instead of
-// building a path from unvalidated input.
+// ErrInvalidSessionKey is returned by the Encrypted store's sessions when the
+// caller presents a malformed per-session key (see ValidSessionKey). It is
+// deliberately not ErrCorruptSession: nothing is wrong with the stored blob or
+// the master keys.
+var ErrInvalidSessionKey = errors.New("sessionstore: invalid session key")
+
+// brokenSession is returned by Session for an invalid sid or session key;
+// every operation fails with the same error so the mismatch surfaces
+// immediately instead of building a path from unvalidated input or deriving a
+// weakened key.
 type brokenSession struct{ err error }
 
 func (b brokenSession) LoadSession(context.Context) ([]byte, error) { return nil, b.err }
@@ -151,6 +150,9 @@ func (b brokenSession) StoreSession(context.Context, []byte) error  { return b.e
 func (s *encryptedStore) Session(userID tgid.UserID, sid string, userKey []byte) session.Storage {
 	if !ValidSID(sid) {
 		return brokenSession{err: ErrInvalidSID}
+	}
+	if !ValidSessionKey(userKey) {
+		return brokenSession{err: ErrInvalidSessionKey}
 	}
 	return &encryptedSession{
 		inner:   s.inner.Session(userID, sid),
@@ -267,8 +269,7 @@ func (s *encryptedSession) LoadSession(ctx context.Context) ([]byte, error) {
 	return plaintext, nil
 }
 
-// StoreSession seals data first; aeadFor refuses a missing or short userKey,
-// so nothing is written without a proper per-session key.
+// StoreSession seals data first, so nothing is written unencrypted.
 func (s *encryptedSession) StoreSession(ctx context.Context, data []byte) error {
 	blob, err := s.cipher.seal(s.userID, s.userKey, data)
 	if err != nil {

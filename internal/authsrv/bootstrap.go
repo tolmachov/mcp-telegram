@@ -2,6 +2,7 @@ package authsrv
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -9,6 +10,8 @@ import (
 	"time"
 
 	"rsc.io/qr"
+
+	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
 )
 
 // Pending-login registry limits. The TTL matches Telegram's own QR login
@@ -80,11 +83,7 @@ func (p *pendingLogin) tryConsume() bool {
 // reservePending atomically consumes admission capacity before the expensive
 // MTProto login flow is started. The reservation is activated afterwards.
 func (a *AuthServer) reservePending(request, ip string) (*pendingLogin, error) {
-	id, err := randomHex(16) // 128-bit login identifier
-	if err != nil {
-		return nil, err
-	}
-	p := &pendingLogin{id: id, request: request, created: a.now(), ip: ip}
+	p := &pendingLogin{id: rand.Text(), request: request, created: a.now(), ip: ip}
 
 	a.pendingMu.Lock()
 	a.sweepExpiredLocked(a.now())
@@ -107,7 +106,7 @@ func (a *AuthServer) reservePending(request, ip string) (*pendingLogin, error) {
 			return nil, errTooManyLogins
 		}
 	}
-	a.pending[id] = p
+	a.pending[p.id] = p
 	a.pendingMu.Unlock()
 	return p, nil
 }
@@ -351,12 +350,7 @@ func (a *AuthServer) finalizeLogin(ctx context.Context, w http.ResponseWriter, p
 	// object) and a fresh random key (folded into the session encryption, carried
 	// only in the tokens below). Concurrent logins for one account therefore do
 	// not overwrite each other.
-	sid, sessionKey, err := newSessionCreds()
-	if err != nil {
-		a.logger.Error("generating session credentials failed", "user_id", user.ID, "err", err)
-		fail("Internal error. Start over from your MCP client.")
-		return
-	}
+	sid, sessionKey := sessionstore.NewSID(), sessionstore.NewSessionKey()
 	if err := a.store.Session(user.ID, sid, sessionKey).StoreSession(ctx, data); err != nil {
 		a.logger.Error("storing telegram session failed", "user_id", user.ID, "err", err)
 		fail("Storing the Telegram session failed. Start over from your MCP client.")
@@ -375,19 +369,13 @@ func (a *AuthServer) finalizeLogin(ctx context.Context, w http.ResponseWriter, p
 	}()
 
 	now := a.now()
-	family, err := randomHex(sessionIDLen)
-	if err != nil {
-		a.logger.Error("generating authorization code id failed", "err", err)
-		fail("Internal error. Start over from your MCP client.")
-		return
-	}
 	code, err := sealBlob(a.sealer, codeBlob, codeClaims{
 		Subject:       user.ID.String(),
 		Username:      user.Username,
 		ClientID:      sc.ClientID,
 		RedirectURI:   sc.RedirectURI,
 		CodeChallenge: sc.CodeChallenge,
-		grantClaims:   grantClaims{Resource: sc.Resource, SessionID: sid, SessionKey: sessionKey, Family: family},
+		grantClaims:   grantClaims{Resource: sc.Resource, SessionID: sid, SessionKey: sessionKey, Family: sessionstore.NewSID()},
 		IssuedAt:      now.Unix(),
 	})
 	if err != nil {

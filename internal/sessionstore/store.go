@@ -19,6 +19,7 @@ package sessionstore
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -29,8 +30,37 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
-// sidHexLen is the character length of a session id: hex of 16 random bytes.
-const sidHexLen = 32
+// sidBytes is the number of random bytes in a session id: 128 bits is
+// collision-safe across a deployment's sessions.
+const sidBytes = 16
+
+// sidHexLen is the character length of a session id, the hex of sidBytes.
+const sidHexLen = 2 * sidBytes
+
+// sessionKeyLen is the byte length of a per-session key, the AES-256 key size.
+const sessionKeyLen = 32
+
+// NewSID returns a fresh random session id. Grant families use the same
+// format, so it mints those too.
+func NewSID() string {
+	b := make([]byte, sidBytes)
+	_, _ = rand.Read(b) // crypto/rand.Read never returns an error
+	return hex.EncodeToString(b)
+}
+
+// NewSessionKey returns a fresh random per-session key, the share of the
+// session encryption key that lives only in the client's OAuth token. It is a
+// secret: never log it.
+func NewSessionKey() []byte {
+	k := make([]byte, sessionKeyLen)
+	_, _ = rand.Read(k) // crypto/rand.Read never returns an error
+	return k
+}
+
+// ValidSessionKey reports whether k is a well-formed per-session key — the
+// length NewSessionKey mints. A shorter key would weaken the split-key
+// protection, so the Encrypted store refuses any other.
+func ValidSessionKey(k []byte) bool { return len(k) == sessionKeyLen }
 
 // ValidSID reports whether s is a well-formed session id — exactly sidHexLen
 // lowercase hex characters. Session ids reach this layer as an object-name /
@@ -91,7 +121,8 @@ const (
 // session; its LoadSession must return session.ErrNotFound when that session
 // does not exist yet (gotd's "start unauthenticated" signal). userKey is the
 // per-session secret from the OAuth token that is mixed into the AEAD key.
-// Both sid and userKey are mandatory.
+// Both sid and userKey are mandatory and must be well formed (ValidSID,
+// ValidSessionKey).
 //
 // Exists is a cheap probe used by token refresh to force a re-login after a
 // session was deleted. Delete removes one session; the user pool deletes a

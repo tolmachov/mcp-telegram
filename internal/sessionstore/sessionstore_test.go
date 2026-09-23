@@ -85,7 +85,9 @@ func TestCipherOpensGoldenBlob(t *testing.T) {
 }
 
 func TestCipherRejectsWrongUserAndKey(t *testing.T) {
-	key1, key2 := newKey(t), newKey(t)
+	// Fixed keys with distinct key IDs, so the foreign ring fails on the ID
+	// lookup every run rather than on it or the AEAD depending on the draw.
+	key1, key2 := rotationKeys()
 	c1 := newCipher(t, testIssuer, key1)
 	uk := userKeyForTest(t)
 	blob, err := c1.seal(1, uk, []byte("secret"))
@@ -329,11 +331,14 @@ func TestFSSplitKeyNotMasterDecryptable(t *testing.T) {
 		t.Fatalf("on-disk v3 blob must start with version byte %#x, got %#v", sessionBlobVersion, raw[:1])
 	}
 
-	// An attacker with the bucket + the master key but no token (empty userKey)
-	// cannot read the session.
-	masterOnly := Encrypted(backend, cipher)
-	if _, err := masterOnly.Session(user, sid, nil).LoadSession(ctx); !errors.Is(err, ErrCorruptSession) {
-		t.Errorf("master-only load of a v3 session: err = %v, want ErrCorruptSession", err)
+	// An attacker with the bucket + the master key but no token cannot read
+	// the session: a guessed per-session key does not decrypt it, and a
+	// missing one is refused outright.
+	if _, err := store.Session(user, sid, userKeyForTest(t)).LoadSession(ctx); !errors.Is(err, ErrCorruptSession) {
+		t.Errorf("load of a v3 session with a guessed key: err = %v, want ErrCorruptSession", err)
+	}
+	if _, err := store.Session(user, sid, nil).LoadSession(ctx); !errors.Is(err, ErrInvalidSessionKey) {
+		t.Errorf("master-only load of a v3 session: err = %v, want ErrInvalidSessionKey", err)
 	}
 	// With the per-session key it decrypts.
 	got, err := store.Session(user, sid, uk).LoadSession(ctx)
@@ -365,25 +370,42 @@ func TestStoreRejectsMissingSessionIdentity(t *testing.T) {
 	}
 }
 
-// TestCipherRejectsWrongLengthUserKey pins that a v3 user key must be
-// exactly userKeyLen bytes: a short/oversized key fails closed on both seal and
-// open rather than silently sealing a weak split-key blob.
-func TestCipherRejectsWrongLengthUserKey(t *testing.T) {
-	c := newCipher(t, testIssuer, newKey(t))
+// TestEncryptedStoreRejectsWrongLengthSessionKey pins that a per-session key
+// must be exactly the minted length: a short or oversized key fails closed on
+// both store and load, before any blob is sealed or opened, and with its own
+// error rather than ErrCorruptSession, which would blame the stored blob or the
+// master keys.
+func TestEncryptedStoreRejectsWrongLengthSessionKey(t *testing.T) {
+	ctx := t.Context()
+	store := Encrypted(newTestFS(t), newCipher(t, testIssuer, newKey(t)))
 	const user = tgid.UserID(91)
-	for _, bad := range [][]byte{make([]byte, 1), make([]byte, 16), make([]byte, 31), make([]byte, 33)} {
-		if _, err := c.seal(user, bad, []byte("x")); err == nil {
-			t.Errorf("seal with a %d-byte user key must be refused", len(bad))
+	if err := store.Session(user, testSID, userKeyForTest(t)).StoreSession(ctx, []byte("mtproto")); err != nil {
+		t.Fatalf("StoreSession with a valid key: %v", err)
+	}
+	for _, bad := range [][]byte{nil, make([]byte, 1), make([]byte, 16), make([]byte, 31), make([]byte, 33)} {
+		if err := store.Session(user, testSID, bad).StoreSession(ctx, []byte("x")); !errors.Is(err, ErrInvalidSessionKey) {
+			t.Errorf("StoreSession with a %d-byte key: err = %v, want ErrInvalidSessionKey", len(bad), err)
+		}
+		_, err := store.Session(user, testSID, bad).LoadSession(ctx)
+		if !errors.Is(err, ErrInvalidSessionKey) || errors.Is(err, ErrCorruptSession) {
+			t.Errorf("LoadSession with a %d-byte key: err = %v, want ErrInvalidSessionKey only", len(bad), err)
 		}
 	}
-	// A blob sealed with a correct key must not open under a wrong-length key.
-	good := userKeyForTest(t)
-	blob, err := c.seal(user, good, []byte("mtproto"))
-	if err != nil {
-		t.Fatalf("seal with a valid key: %v", err)
+}
+
+// TestNewSessionIdentityIsValid guards against drift between minting and
+// validation: a minted sid, family or key must always validate, or every fresh
+// session would fail on its first use.
+func TestNewSessionIdentityIsValid(t *testing.T) {
+	sid, other := NewSID(), NewSID()
+	if !ValidSID(sid) {
+		t.Errorf("NewSID() = %q, which ValidSID rejects", sid)
 	}
-	if _, err := c.open(user, make([]byte, 16), blob); err == nil {
-		t.Error("open with a wrong-length user key must be refused")
+	if sid == other {
+		t.Errorf("two NewSID calls returned the same id %q", sid)
+	}
+	if key := NewSessionKey(); !ValidSessionKey(key) {
+		t.Errorf("NewSessionKey() returned %d bytes, which ValidSessionKey rejects", len(key))
 	}
 }
 

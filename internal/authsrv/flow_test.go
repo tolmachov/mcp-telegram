@@ -266,7 +266,7 @@ func registerNamedClient(t *testing.T, ts *httptest.Server, name string, redirec
 	return reg.ClientID
 }
 
-var loginIDRe = regexp.MustCompile(`var loginID = "([0-9a-f]{32})";`)
+var loginIDRe = regexp.MustCompile(`var loginID = "([A-Z2-7]{26})";`)
 
 // startAuthorize drives GET /authorize and returns the loginID parsed out of
 // the rendered QR page.
@@ -476,7 +476,8 @@ func TestFullAuthorizationFlow(t *testing.T) {
 	cc, err := openBlob(a.sealer, codeBlob, code, a.now())
 	require.NoError(t, err)
 	require.True(t, sessionstore.ValidSID(cc.SessionID), "code must carry a well-formed session id")
-	require.Len(t, cc.SessionKey, sessionKeyLen)
+	require.True(t, sessionstore.ValidSessionKey(cc.SessionKey), "code must carry a well-formed session key")
+	require.True(t, sessionstore.ValidSID(cc.Family), "code must carry a well-formed grant family")
 	stored, err := store.Session(allowedUser, cc.SessionID, cc.SessionKey).LoadSession(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, sessionBytes, stored)
@@ -1209,16 +1210,6 @@ func TestVerifierRejectsMalformedSessionID(t *testing.T) {
 	require.NoError(t, err)
 	_, err = a.Verifier()(context.Background(), token, nil)
 	assert.ErrorIs(t, err, auth.ErrInvalidToken)
-}
-
-// TestNewSessionCredsValid guards against drift between the sid minting length
-// (sessionIDLen) and the validator length (sessionstore.ValidSID): a minted sid
-// must always validate, or every fresh session would 401 on its first refresh.
-func TestNewSessionCredsValid(t *testing.T) {
-	sid, key, err := newSessionCreds()
-	require.NoError(t, err)
-	assert.True(t, sessionstore.ValidSID(sid), "a freshly minted sid must pass validSessionID")
-	assert.Len(t, key, sessionKeyLen)
 }
 
 // TestRevokeInvalidatesLiveSession pins that revocation tears down the live
