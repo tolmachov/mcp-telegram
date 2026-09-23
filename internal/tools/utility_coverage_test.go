@@ -144,7 +144,7 @@ func TestReadOnlyHandlersUseExpectedRPCs(t *testing.T) {
 				return nil
 			}),
 		)
-		errRes, out, err := NewChatInfoGetHandler(tgclient.NewResolver(tg.NewClient(inv))).handle(t.Context(), &mcp.CallToolRequest{}, GetChatInfoInput{ChatID: channelID})
+		errRes, out, err := NewChatInfoGetHandler(tgclient.NewResolver(t.Context(), tg.NewClient(inv))).handle(t.Context(), &mcp.CallToolRequest{}, GetChatInfoInput{ChatID: channelID})
 		require.NoError(t, err)
 		require.Nil(t, errRes)
 		require.NotNil(t, out)
@@ -205,8 +205,8 @@ func TestBackupMessagesWritesAtomicallyInsideConfiguredPath(t *testing.T) {
 		}),
 	)
 	client := tg.NewClient(inv)
-	provider := messages.NewProvider(tgclient.NewResolver(client), 100_000)
-	handler := NewMessageBackupHandler(tgclient.NewResolver(client), provider, []string{dir})
+	provider := messages.NewProvider(tgclient.NewResolver(t.Context(), client), 100_000)
+	handler := NewMessageBackupHandler(tgclient.NewResolver(t.Context(), client), provider, []string{dir})
 
 	errRes, out, err := handler.handle(t.Context(), &mcp.CallToolRequest{}, BackupMessagesInput{
 		ChatID: channelID, Filepath: target, Limit: 1,
@@ -255,7 +255,7 @@ func TestBackupMessagesSavesPartialOnFloodWait(t *testing.T) {
 	inv := partialBackupScript(t, channelID, func() error {
 		return &tgerr.Error{Code: 420, Message: "FLOOD_WAIT_30", Type: "FLOOD_WAIT", Argument: 30}
 	})
-	peers := tgclient.NewResolver(tg.NewClient(inv))
+	peers := tgclient.NewResolver(t.Context(), tg.NewClient(inv))
 	handler := NewMessageBackupHandler(peers, messages.NewProvider(peers, 100_000), []string{dir})
 
 	errRes, out, err := handler.handle(t.Context(), &mcp.CallToolRequest{}, BackupMessagesInput{ChatID: channelID, Filepath: target})
@@ -284,7 +284,7 @@ func TestBackupMessagesSavesPartialOnCancel(t *testing.T) {
 		cancel()
 		return context.Canceled
 	})
-	peers := tgclient.NewResolver(tg.NewClient(inv))
+	peers := tgclient.NewResolver(t.Context(), tg.NewClient(inv))
 	handler := NewMessageBackupHandler(peers, messages.NewProvider(peers, 100_000), []string{dir})
 
 	res, out, err := handler.handle(ctx, &mcp.CallToolRequest{}, BackupMessagesInput{ChatID: channelID, Filepath: target})

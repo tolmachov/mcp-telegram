@@ -23,8 +23,8 @@ const (
 	// GetChats cursors: newer loads by other readers must not end a
 	// pagination in progress, but neither may they pile up.
 	chatsCursorSnapshots = 8
-	// chatsLoadTimeout bounds one shared load, which runs detached from the
-	// callers waiting on it.
+	// chatsLoadTimeout bounds one shared load, which runs on the cache's
+	// lifetime rather than on any of the callers waiting on it.
 	chatsLoadTimeout = 10 * time.Minute
 )
 
@@ -49,6 +49,8 @@ type ChatsSnapshot struct {
 // cursor keeps paging the listing it started on while other readers refresh.
 // Safe for concurrent use.
 type ChatsCache struct {
+	// life is the lifetime of the cache's owner; loads run on it.
+	life context.Context
 	load ChatsLoader
 
 	mu sync.Mutex
@@ -74,9 +76,11 @@ type chatsFlight struct {
 	nextID   int
 }
 
-// NewChatsCache creates a cache that fills itself through load.
-func NewChatsCache(load ChatsLoader) *ChatsCache {
-	return &ChatsCache{load: load}
+// NewChatsCache creates a cache that fills itself through load. life is the
+// lifetime of the cache's owner: every load runs on it, so ending it cancels
+// a load in progress and fails whoever waits on it.
+func NewChatsCache(life context.Context, load ChatsLoader) *ChatsCache {
+	return &ChatsCache{life: life, load: load}
 }
 
 // Load returns the newest snapshot. It fetches a new one when the cache is
@@ -85,9 +89,10 @@ func NewChatsCache(load ChatsLoader) *ChatsCache {
 // never by one already running.
 //
 // Concurrent fetches share one load. It belongs to none of its callers: it
-// runs on a context detached from the one that started it (bounded by
-// chatsLoadTimeout), each caller waits on its own ctx, and onProgress hears
-// the load's progress only while its caller waits.
+// runs on the cache's lifetime (see NewChatsCache) bounded by
+// chatsLoadTimeout, never on a caller's context or its values; each caller
+// waits on its own ctx, and onProgress hears the load's progress only while
+// its caller waits.
 func (c *ChatsCache) Load(ctx context.Context, onProgress ProgressFunc, refresh bool) (*ChatsSnapshot, error) {
 	f, snap, err := c.join(ctx, refresh)
 	if f == nil {
@@ -113,7 +118,7 @@ func (c *ChatsCache) join(ctx context.Context, refresh bool) (*chatsFlight, *Cha
 		}
 		f := c.flight
 		if f == nil {
-			f = c.startLocked(ctx)
+			f = c.startLocked()
 		}
 		if f.seq >= minSeq {
 			c.mu.Unlock()
@@ -154,19 +159,19 @@ func (c *ChatsCache) newest() *ChatsSnapshot {
 	return c.snaps[len(c.snaps)-1]
 }
 
-// startLocked starts a new load on a context detached from ctx. c.mu must be
-// held.
-func (c *ChatsCache) startLocked(ctx context.Context) *chatsFlight {
+// startLocked starts a new load. c.mu must be held.
+func (c *ChatsCache) startLocked() *chatsFlight {
 	c.started++
 	f := &chatsFlight{seq: c.started, done: make(chan struct{}), watchers: make(map[int]ProgressFunc)}
 	c.flight = f
-	go c.run(context.WithoutCancel(ctx), f)
+	go c.run(f)
 	return f
 }
 
-// run performs the load for f and publishes its snapshot.
-func (c *ChatsCache) run(ctx context.Context, f *chatsFlight) {
-	ctx, cancel := context.WithTimeout(ctx, chatsLoadTimeout)
+// run performs the load for f on the cache's lifetime and publishes its
+// snapshot.
+func (c *ChatsCache) run(f *chatsFlight) {
+	ctx, cancel := context.WithTimeout(c.life, chatsLoadTimeout)
 	defer cancel()
 	result, err := c.load(ctx, f.progress)
 

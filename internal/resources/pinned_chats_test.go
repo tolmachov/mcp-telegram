@@ -101,9 +101,9 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 }
 
-func newTestProvider(inv *pinnedInvoker, logger *slog.Logger, nServers int) (*PinnedChatsProvider, []*mcp.Server) {
+func newTestProvider(t *testing.T, inv *pinnedInvoker, logger *slog.Logger, nServers int) (*PinnedChatsProvider, []*mcp.Server) {
 	api := tg.NewClient(inv)
-	msgProvider := messages.NewProvider(tgclient.NewResolver(api), 100_000)
+	msgProvider := messages.NewProvider(tgclient.NewResolver(t.Context(), api), 100_000)
 	servers := make([]*mcp.Server, nServers)
 	for i := range servers {
 		servers[i] = mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
@@ -152,7 +152,7 @@ func listResources(t *testing.T, srv *mcp.Server) map[string]string {
 func TestPinnedChatsMirroredOntoAllServers(t *testing.T) {
 	inv := &pinnedInvoker{}
 	inv.set(fakeChat{id: 111, name: "Alice"}, fakeChat{id: 222, name: "Bob"})
-	p, servers := newTestProvider(inv, quietLogger(), 3)
+	p, servers := newTestProvider(t, inv, quietLogger(), 3)
 
 	require.NoError(t, p.RefreshResources(context.Background()))
 
@@ -180,7 +180,7 @@ func TestPinnedRefreshReorderIsNoOp(t *testing.T) {
 	a := fakeChat{id: 111, name: "Alice"}
 	b := fakeChat{id: 222, name: "Bob"}
 	inv.set(a, b)
-	p, _ := newTestProvider(inv, quietLogger(), 1)
+	p, _ := newTestProvider(t, inv, quietLogger(), 1)
 
 	require.NoError(t, p.RefreshResources(context.Background()))
 	firstOrder := append([]string(nil), p.currentURIs...)
@@ -202,7 +202,7 @@ func TestPinnedRefreshReorderIsNoOp(t *testing.T) {
 func TestPinnedRefreshReregistersOnRename(t *testing.T) {
 	inv := &pinnedInvoker{}
 	inv.set(fakeChat{id: 111, name: "Alice"})
-	p, servers := newTestProvider(inv, quietLogger(), 1)
+	p, servers := newTestProvider(t, inv, quietLogger(), 1)
 
 	require.NoError(t, p.RefreshResources(context.Background()))
 	before := listResources(t, servers[0])
@@ -226,7 +226,7 @@ func TestPinnedRefreshUnpinRemovesResource(t *testing.T) {
 	alice := fakeChat{id: 111, name: "Alice"}
 	bob := fakeChat{id: 222, name: "Bob"}
 	inv.set(alice, bob)
-	p, servers := newTestProvider(inv, quietLogger(), 2)
+	p, servers := newTestProvider(t, inv, quietLogger(), 2)
 
 	require.NoError(t, p.RefreshResources(context.Background()))
 	for i, srv := range servers {
@@ -252,7 +252,7 @@ func TestPinnedRefreshUnpinRemovesResource(t *testing.T) {
 func TestRefreshResourcesWrapsError(t *testing.T) {
 	inv := &pinnedInvoker{}
 	inv.setErr(errors.New("boom"))
-	p, _ := newTestProvider(inv, quietLogger(), 1)
+	p, _ := newTestProvider(t, inv, quietLogger(), 1)
 
 	err := p.RefreshResources(context.Background())
 	require.Error(t, err)
@@ -267,7 +267,7 @@ func TestNewPinnedChatsProviderWarnsWithoutServers(t *testing.T) {
 	var buf syncBuffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	api := tg.NewClient(&pinnedInvoker{})
-	msgProvider := messages.NewProvider(tgclient.NewResolver(api), 100_000)
+	msgProvider := messages.NewProvider(tgclient.NewResolver(t.Context(), api), 100_000)
 
 	NewPinnedChatsProvider(api, msgProvider, logger) // no servers
 
@@ -285,7 +285,7 @@ func TestWatchInBackgroundInitialFailureLogsError(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	inv := &pinnedInvoker{}
 	inv.setErr(errors.New("auth expired"))
-	p, _ := newTestProvider(inv, logger, 1)
+	p, _ := newTestProvider(t, inv, logger, 1)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := p.WatchInBackground(ctx, time.Hour)
@@ -311,7 +311,7 @@ func TestWatchInBackgroundInitialFailureLogsError(t *testing.T) {
 func TestWatchInBackgroundZeroIntervalDisables(t *testing.T) {
 	inv := &pinnedInvoker{}
 	inv.set(fakeChat{id: 111, name: "Alice"})
-	p, _ := newTestProvider(inv, quietLogger(), 1)
+	p, _ := newTestProvider(t, inv, quietLogger(), 1)
 
 	done := p.WatchInBackground(context.Background(), 0)
 
@@ -332,7 +332,7 @@ func TestWatchInBackgroundNegativeIntervalWarns(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	inv := &pinnedInvoker{}
 	inv.set(fakeChat{id: 111, name: "Alice"})
-	p, _ := newTestProvider(inv, logger, 1)
+	p, _ := newTestProvider(t, inv, logger, 1)
 
 	done := p.WatchInBackground(context.Background(), -30*time.Second)
 

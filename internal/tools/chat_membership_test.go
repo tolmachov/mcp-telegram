@@ -140,7 +140,7 @@ func (f *leaveChatInvoker) Invoke(_ context.Context, input bin.Encoder, output b
 func TestLeaveChatConfirmBypassesElicitation(t *testing.T) {
 	newHandler := func() (*LeaveChatHandler, *leaveChatInvoker) {
 		inv := &leaveChatInvoker{channelID: 555, accessHash: 999}
-		return NewLeaveChatHandler(tgclient.NewResolver(tg.NewClient(inv))), inv
+		return NewLeaveChatHandler(tgclient.NewResolver(t.Context(), tg.NewClient(inv))), inv
 	}
 
 	t.Run("confirm true leaves without elicitation", func(t *testing.T) {
@@ -160,7 +160,7 @@ func TestLeaveChatConfirmBypassesElicitation(t *testing.T) {
 
 	t.Run("a supergroup reports its own kind", func(t *testing.T) {
 		inv := &leaveChatInvoker{channelID: 556, accessHash: 998, megagroup: true}
-		h := NewLeaveChatHandler(tgclient.NewResolver(tg.NewClient(inv)))
+		h := NewLeaveChatHandler(tgclient.NewResolver(t.Context(), tg.NewClient(inv)))
 		errRes, out, err := h.handle(context.Background(), &mcp.CallToolRequest{}, LeaveChatInput{
 			Chat:    "@testgroup",
 			Confirm: true,

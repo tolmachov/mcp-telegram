@@ -14,7 +14,7 @@ import (
 
 func TestChatsResourceServesSharedSnapshot(t *testing.T) {
 	loads := 0
-	cache := tgdata.NewChatsCache(func(context.Context, tgdata.ProgressFunc) (*tgdata.ChatsList, error) {
+	cache := tgdata.NewChatsCache(t.Context(), func(context.Context, tgdata.ProgressFunc) (*tgdata.ChatsList, error) {
 		loads++
 		return &tgdata.ChatsList{Chats: []tgdata.ChatInfo{{ID: 1, Name: "Alpha"}}, Count: 1, Truncated: true}, nil
 	})

@@ -166,7 +166,7 @@ func (f *deleteInvoker) Invoke(_ context.Context, input bin.Encoder, output bin.
 
 func runDelete(t *testing.T, inv *deleteInvoker, ids ...string) (*mcp.CallToolResult, *DeleteMessagesResult) {
 	t.Helper()
-	h := NewMessageDeleteHandler(tgclient.NewResolver(tg.NewClient(inv)))
+	h := NewMessageDeleteHandler(tgclient.NewResolver(t.Context(), tg.NewClient(inv)))
 	errRes, out, err := h.handle(context.Background(), &mcp.CallToolRequest{}, DeleteMessagesInput{
 		ChatID:     testBasicChatID,
 		MessageIDs: ids,
@@ -278,7 +278,7 @@ func TestDeleteMessagesChannelError(t *testing.T) {
 	inv.admin = true
 	inv.deleteErr = tgerr.New(403, "MESSAGE_DELETE_FORBIDDEN")
 	inv.add(42, false)
-	h := NewMessageDeleteHandler(tgclient.NewResolver(tg.NewClient(inv)))
+	h := NewMessageDeleteHandler(tgclient.NewResolver(t.Context(), tg.NewClient(inv)))
 	_, out, err := h.handle(context.Background(), &mcp.CallToolRequest{}, DeleteMessagesInput{
 		ChatID:     testChannelID,
 		MessageIDs: []string{"42"},
@@ -335,7 +335,7 @@ func TestDeleteMessagesConfirmGate(t *testing.T) {
 	t.Run("unconfirmed without session never reaches the API", func(t *testing.T) {
 		inv := newBasicGroupInvoker()
 		inv.add(42, true)
-		h := NewMessageDeleteHandler(tgclient.NewResolver(tg.NewClient(inv)))
+		h := NewMessageDeleteHandler(tgclient.NewResolver(t.Context(), tg.NewClient(inv)))
 		errRes, out, err := h.handle(context.Background(), &mcp.CallToolRequest{}, DeleteMessagesInput{
 			ChatID:     testBasicChatID,
 			MessageIDs: []string{"42"},

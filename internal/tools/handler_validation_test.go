@@ -436,7 +436,7 @@ func TestSearchMessagesGlobalDateInversionValidation(t *testing.T) {
 // MessageReadHandler.handle. Client is nil — safe because every test case
 // returns before any Telegram API call.
 func TestMarkAsReadHandlerValidation(t *testing.T) {
-	h := NewMessageReadHandler(tgclient.NewResolver(nil))
+	h := NewMessageReadHandler(tgclient.NewResolver(t.Context(), nil))
 	ctx := context.Background()
 
 	cases := []struct {
@@ -471,7 +471,7 @@ func TestMarkAsReadHandlerValidation(t *testing.T) {
 // an inverted date window before making any Telegram API call. to_date is
 // exclusive, so an equal or earlier to_date yields an empty window.
 func TestBackupMessagesDateInversionValidation(t *testing.T) {
-	h := NewMessageBackupHandler(tgclient.NewResolver(nil), nil, nil)
+	h := NewMessageBackupHandler(tgclient.NewResolver(t.Context(), nil), nil, nil)
 	ctx := context.Background()
 
 	errRes, _, err := h.handle(ctx, nil, BackupMessagesInput{

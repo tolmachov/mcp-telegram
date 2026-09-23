@@ -59,7 +59,7 @@ func TestGetChatInfoMatchesEntityByID(t *testing.T) {
 		},
 	})
 
-	info, err := GetChatInfo(context.Background(), tgclient.NewResolver(client), 555)
+	info, err := GetChatInfo(context.Background(), tgclient.NewResolver(t.Context(), client), 555)
 	require.NoError(t, err)
 	assert.Equal(t, int64(555), info.ID, "ID must come from the resolved peer, not the echoed argument")
 	assert.Equal(t, "Correct Supergroup", info.Name, "must match the entity by ID, not take the first")
@@ -79,7 +79,7 @@ func TestGetChatInfoNoMatchingEntityErrors(t *testing.T) {
 		},
 	})
 
-	_, err := GetChatInfo(context.Background(), tgclient.NewResolver(client), 555)
+	_, err := GetChatInfo(context.Background(), tgclient.NewResolver(t.Context(), client), 555)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "555")
 }

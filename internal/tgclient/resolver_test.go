@@ -54,7 +54,7 @@ func TestResolverCachesSuccess(t *testing.T) {
 		entered: make(chan struct{}, 16),
 		gate:    make(chan struct{}),
 	}
-	r := NewResolver(tg.NewClient(inv))
+	r := NewResolver(t.Context(), tg.NewClient(inv))
 	want := &tg.InputPeerChannel{ChannelID: 1555091578, AccessHash: 999}
 
 	var wg sync.WaitGroup
@@ -85,7 +85,7 @@ func TestResolverSharedProbeOutlivesCaller(t *testing.T) {
 		entered: make(chan struct{}, 16),
 		gate:    make(chan struct{}),
 	}
-	r := NewResolver(tg.NewClient(inv))
+	r := NewResolver(t.Context(), tg.NewClient(inv))
 
 	firstCtx, cancelFirst := context.WithCancel(t.Context())
 	firstErr := make(chan error, 1)
@@ -115,6 +115,64 @@ func TestResolverSharedProbeOutlivesCaller(t *testing.T) {
 	assert.Equal(t, int32(1), calls.Load())
 }
 
+// ctxKey tags a caller's context so a test can tell whether a probe saw it.
+type ctxKey struct{}
+
+// valueSpy records whether a call's context carried a ctxKey value.
+type valueSpy struct {
+	gatedInvoker
+	sawCaller chan bool
+}
+
+func (v valueSpy) Invoke(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
+	v.sawCaller <- ctx.Value(ctxKey{}) != nil
+	return v.gatedInvoker.Invoke(ctx, input, output)
+}
+
+// TestResolverProbeRunsOnItsLifetime pins that a shared probe runs on the
+// resolver's lifetime, not on its first caller's context: it carries none of
+// that caller's values, and ending the lifetime (the assembly closing) cancels
+// it and fails every caller waiting on it.
+func TestResolverProbeRunsOnItsLifetime(t *testing.T) {
+	var calls atomic.Int32
+	inv := valueSpy{
+		gatedInvoker: gatedInvoker{
+			inner:   fakeInvoker{channels: channelClientHandler(&calls, func() int64 { return 999 })},
+			entered: make(chan struct{}, 16),
+			gate:    make(chan struct{}),
+		},
+		sawCaller: make(chan bool, 16),
+	}
+	life, end := context.WithCancel(t.Context())
+	r := NewResolver(life, tg.NewClient(inv))
+
+	const waiters = 3
+	errs := make(chan error, waiters)
+	caller := context.WithValue(t.Context(), ctxKey{}, "first caller")
+	go func() {
+		_, err := r.Resolve(caller, 5)
+		errs <- err
+	}()
+	<-inv.entered
+	assert.False(t, <-inv.sawCaller, "the probe must not carry its first caller's values")
+	for range waiters - 1 {
+		go func() {
+			_, err := r.Resolve(t.Context(), 5)
+			errs <- err
+		}()
+	}
+
+	end()
+	for range waiters {
+		err := <-errs
+		require.ErrorIs(t, err, context.Canceled, "ending the lifetime fails the waiters")
+		var pe *PeerError
+		require.ErrorAs(t, err, &pe)
+	}
+	_, ok := r.cached(5)
+	assert.False(t, ok, "a cancelled probe caches nothing")
+}
+
 // TestResolverDoesNotCacheErrors is the core contract: a transient failure
 // (e.g. FLOOD_WAIT) must be retried on the next call, never remembered as a
 // permanent negative. The invoker fails once, then succeeds.
@@ -131,7 +189,7 @@ func TestResolverDoesNotCacheErrors(t *testing.T) {
 			}}, nil
 		},
 	})
-	r := NewResolver(client)
+	r := NewResolver(t.Context(), client)
 
 	_, err := r.Resolve(t.Context(), 1555091578)
 	var pe *PeerError
@@ -147,7 +205,7 @@ func TestResolverDoesNotCacheErrors(t *testing.T) {
 // TestResolverExpiresAndEvicts covers the TTL and the bound on the cache.
 func TestResolverExpiresAndEvicts(t *testing.T) {
 	var calls atomic.Int32
-	r := NewResolver(channelClient(&calls, func() int64 { return 1 }))
+	r := NewResolver(t.Context(), channelClient(&calls, func() int64 { return 1 }))
 	now := time.Unix(0, 0)
 	r.now = func() time.Time { return now }
 
@@ -167,7 +225,7 @@ func TestResolverExpiresAndEvicts(t *testing.T) {
 // TestResolverEvictionPrefersExpired verifies a full cache makes room by
 // dropping expired entries, keeping every live one.
 func TestResolverEvictionPrefersExpired(t *testing.T) {
-	r := NewResolver(nil)
+	r := NewResolver(t.Context(), nil)
 	now := time.Unix(0, 0)
 	r.now = func() time.Time { return now }
 
@@ -193,7 +251,7 @@ func TestResolverEvictionPrefersExpired(t *testing.T) {
 func TestWithPeerRetriesStaleHashOnce(t *testing.T) {
 	var calls atomic.Int32
 	hash := int64(1)
-	r := NewResolver(channelClient(&calls, func() int64 { return hash }))
+	r := NewResolver(t.Context(), channelClient(&calls, func() int64 { return hash }))
 
 	var seen []int64
 	got, err := WithPeer(t.Context(), r, 5, func(p Peer) (int64, error) {
@@ -220,7 +278,7 @@ func TestWithPeerRetriesStaleHashOnce(t *testing.T) {
 // retried.
 func TestWithPeerKeepingPartial(t *testing.T) {
 	var calls atomic.Int32
-	r := NewResolver(channelClient(&calls, func() int64 { return 1 }))
+	r := NewResolver(t.Context(), channelClient(&calls, func() int64 { return 1 }))
 	attempts := 0
 	progressed := func(n int) bool { return n > 0 }
 	got, err := WithPeerKeepingPartial(t.Context(), r, 5, progressed, func(Peer) (int, error) {
@@ -249,7 +307,7 @@ func TestWithPeerKeepingPartial(t *testing.T) {
 func TestWithPeersRefreshesEveryPeer(t *testing.T) {
 	var calls atomic.Int32
 	hash := int64(1)
-	r := NewResolver(channelClient(&calls, func() int64 { return hash }))
+	r := NewResolver(t.Context(), channelClient(&calls, func() int64 { return hash }))
 
 	var seen [][2]int64
 	_, err := WithPeers(t.Context(), r, []int64{5, 6}, func(p []Peer) (bool, error) {
@@ -270,7 +328,7 @@ func TestWithPeersRefreshesEveryPeer(t *testing.T) {
 func TestWithPeersFromDropsStalePeers(t *testing.T) {
 	var calls atomic.Int32
 	hash := int64(1)
-	r := NewResolver(channelClient(&calls, func() int64 { return hash }))
+	r := NewResolver(t.Context(), channelClient(&calls, func() int64 { return hash }))
 	named := Peer{Input: &tg.InputPeerUser{UserID: 9, AccessHash: 90}}
 
 	resolves := 0

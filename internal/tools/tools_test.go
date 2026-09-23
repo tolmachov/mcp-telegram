@@ -177,12 +177,12 @@ func TestRequireExplicitConfirmation(t *testing.T) {
 
 func TestEveryToolHandlerRegisters(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
-	cache := tgdata.NewChatsCache(nil)
+	cache := tgdata.NewChatsCache(t.Context(), nil)
 	handlers := []Handler{
 		NewMeGetHandler(nil),
 		NewChatsGetHandler(cache),
 		NewChatsSearchHandler(nil, cache),
-		NewChatInfoGetHandler(tgclient.NewResolver(nil)),
+		NewChatInfoGetHandler(tgclient.NewResolver(t.Context(), nil)),
 		NewMessagesGetHandler(nil),
 		NewMessagesSearchHandler(nil),
 		NewMessagesSearchGlobalHandler(nil),
@@ -194,20 +194,20 @@ func TestEveryToolHandlerRegisters(t *testing.T) {
 		NewChatSummarizeHandler(nil, nil),
 		NewMediaGetHandler(nil, 1),
 		NewGetFoldersHandler(nil),
-		NewMessageBackupHandler(tgclient.NewResolver(nil), nil, []string{t.TempDir()}),
-		NewMessageSendHandler(tgclient.NewResolver(nil)),
-		NewMessageReadHandler(tgclient.NewResolver(nil)),
-		NewMessageEditHandler(tgclient.NewResolver(nil)),
-		NewMessageDeleteHandler(tgclient.NewResolver(nil)),
-		NewMessageForwardHandler(tgclient.NewResolver(nil)),
-		NewSetReactionHandler(tgclient.NewResolver(nil)),
-		NewJoinChatHandler(tgclient.NewResolver(nil)),
-		NewLeaveChatHandler(tgclient.NewResolver(nil)),
-		NewChatMuteHandler(tgclient.NewResolver(nil)),
-		NewCreateFolderHandler(tgclient.NewResolver(nil)),
+		NewMessageBackupHandler(tgclient.NewResolver(t.Context(), nil), nil, []string{t.TempDir()}),
+		NewMessageSendHandler(tgclient.NewResolver(t.Context(), nil)),
+		NewMessageReadHandler(tgclient.NewResolver(t.Context(), nil)),
+		NewMessageEditHandler(tgclient.NewResolver(t.Context(), nil)),
+		NewMessageDeleteHandler(tgclient.NewResolver(t.Context(), nil)),
+		NewMessageForwardHandler(tgclient.NewResolver(t.Context(), nil)),
+		NewSetReactionHandler(tgclient.NewResolver(t.Context(), nil)),
+		NewJoinChatHandler(tgclient.NewResolver(t.Context(), nil)),
+		NewLeaveChatHandler(tgclient.NewResolver(t.Context(), nil)),
+		NewChatMuteHandler(tgclient.NewResolver(t.Context(), nil)),
+		NewCreateFolderHandler(tgclient.NewResolver(t.Context(), nil)),
 		NewDeleteFolderHandler(nil),
-		NewAddChatsToFolderHandler(tgclient.NewResolver(nil)),
-		NewRemoveChatsFromFolderHandler(tgclient.NewResolver(nil)),
+		NewAddChatsToFolderHandler(tgclient.NewResolver(t.Context(), nil)),
+		NewRemoveChatsFromFolderHandler(tgclient.NewResolver(t.Context(), nil)),
 	}
 	RegisterTools(server, handlers)
 }

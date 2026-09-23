@@ -87,7 +87,7 @@ func makeChats(n int) []tgdata.ChatInfo {
 // seededChatsCache returns a cache already holding one snapshot of chats.
 func seededChatsCache(t *testing.T, chats []tgdata.ChatInfo, truncated bool) (*tgdata.ChatsCache, *tgdata.ChatsSnapshot) {
 	t.Helper()
-	cache := tgdata.NewChatsCache(func(context.Context, tgdata.ProgressFunc) (*tgdata.ChatsList, error) {
+	cache := tgdata.NewChatsCache(t.Context(), func(context.Context, tgdata.ProgressFunc) (*tgdata.ChatsList, error) {
 		return &tgdata.ChatsList{Chats: chats, Count: len(chats), Truncated: truncated}, nil
 	})
 	snap, err := cache.Load(t.Context(), nil, false)
@@ -220,7 +220,7 @@ func TestHandleWithCursorErrors(t *testing.T) {
 	})
 
 	t.Run("unloaded cache", func(t *testing.T) {
-		h2 := &ChatsGetHandler{cache: tgdata.NewChatsCache(nil)}
+		h2 := &ChatsGetHandler{cache: tgdata.NewChatsCache(t.Context(), nil)}
 		cursor := FormatChatsCursor(0, 0)
 		result, out, _ := h2.handleWithCursor(cursor, 10)
 		if out != nil {

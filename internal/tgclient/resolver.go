@@ -13,9 +13,9 @@ import (
 const (
 	peerCacheMaxEntries = 4096
 	peerCacheTTL        = time.Hour
-	// peerResolveTimeout bounds one shared resolve, which runs detached from
-	// the callers waiting on it: up to three probes, each of which may sit
-	// out a flood wait.
+	// peerResolveTimeout bounds one shared resolve, which runs on the
+	// resolver's lifetime rather than on any of the callers waiting on it: up
+	// to three probes, each of which may sit out a flood wait.
 	peerResolveTimeout = 5 * time.Minute
 )
 
@@ -30,6 +30,8 @@ type peerCacheEntry struct {
 // ID into one Telegram probe, and owns the stale-access-hash retry (WithPeer
 // and its variants).
 type Resolver struct {
+	// life is the lifetime of the resolver's owner; probes run on it.
+	life   context.Context
 	client *tg.Client
 
 	mu   sync.RWMutex
@@ -38,9 +40,12 @@ type Resolver struct {
 	now  func() time.Time
 }
 
-// NewResolver creates a resolver over client.
-func NewResolver(client *tg.Client) *Resolver {
+// NewResolver creates a resolver over client. life is the lifetime of the
+// resolver's owner: every probe runs on it, so ending it cancels a probe in
+// progress and fails whoever waits on it.
+func NewResolver(life context.Context, client *tg.Client) *Resolver {
 	return &Resolver{
+		life:   life,
 		client: client,
 		byID:   make(map[int64]peerCacheEntry),
 		now:    time.Now,
@@ -55,9 +60,10 @@ func (r *Resolver) Client() *tg.Client { return r.client }
 // retried on the next call. Every failure is a *PeerError.
 //
 // Concurrent cold resolves of id share one probe. It belongs to none of them:
-// it runs on a context detached from the caller that started it (bounded by
-// peerResolveTimeout), and each caller waits on its own ctx, so one caller
-// giving up neither fails the others nor wastes the probe.
+// it runs on the resolver's lifetime (see NewResolver) bounded by
+// peerResolveTimeout, never on a caller's context or its values, and each
+// caller waits on its own ctx, so one caller giving up neither fails the
+// others nor wastes the probe.
 func (r *Resolver) Resolve(ctx context.Context, id int64) (Peer, error) {
 	if peer, ok := r.cached(id); ok {
 		return peer, nil
@@ -66,7 +72,7 @@ func (r *Resolver) Resolve(ctx context.Context, id int64) (Peer, error) {
 		if peer, ok := r.cached(id); ok {
 			return peer, nil
 		}
-		probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), peerResolveTimeout)
+		probeCtx, cancel := context.WithTimeout(r.life, peerResolveTimeout)
 		defer cancel()
 		peer, err := resolvePeer(probeCtx, r.client, id)
 		if err != nil {

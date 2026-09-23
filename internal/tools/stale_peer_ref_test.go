@@ -45,7 +45,7 @@ func TestLeaveChatRetriesStaleHash(t *testing.T) {
 		resolveChannelStep(t, 41, 2),
 		leave(2, nil),
 	)
-	h := NewLeaveChatHandler(tgclient.NewResolver(tg.NewClient(inv)))
+	h := NewLeaveChatHandler(tgclient.NewResolver(t.Context(), tg.NewClient(inv)))
 	errRes, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, LeaveChatInput{Chat: "41", Confirm: true})
 	require.NoError(t, err)
 	require.Nil(t, errRes)
@@ -89,7 +89,7 @@ func TestAddChatsToFolderRetriesStaleHash(t *testing.T) {
 		resolveChannelStep(t, 41, 2),
 		update(2, nil),
 	)
-	h := NewAddChatsToFolderHandler(tgclient.NewResolver(tg.NewClient(inv)))
+	h := NewAddChatsToFolderHandler(tgclient.NewResolver(t.Context(), tg.NewClient(inv)))
 	errRes, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, AddChatsToFolderInput{FolderID: 5, Chats: []string{"41"}})
 	require.NoError(t, err)
 	require.Nil(t, errRes)

@@ -35,7 +35,7 @@ func (l *countingLoader) load(context.Context, ProgressFunc) (*ChatsList, error)
 func TestChatsCacheLoad(t *testing.T) {
 	t.Run("cold load fetches, warm load reuses, refresh re-fetches", func(t *testing.T) {
 		l := &countingLoader{truncated: true}
-		c := NewChatsCache(l.load)
+		c := NewChatsCache(t.Context(), l.load)
 
 		snap1, err := c.Load(t.Context(), nil, false)
 		require.NoError(t, err)
@@ -66,7 +66,7 @@ func TestChatsCacheLoad(t *testing.T) {
 
 	t.Run("stale snapshot is re-fetched", func(t *testing.T) {
 		l := &countingLoader{}
-		c := NewChatsCache(l.load)
+		c := NewChatsCache(t.Context(), l.load)
 		snap, err := c.Load(t.Context(), nil, false)
 		require.NoError(t, err)
 
@@ -78,13 +78,13 @@ func TestChatsCacheLoad(t *testing.T) {
 	})
 
 	t.Run("unloaded cache has no snapshot", func(t *testing.T) {
-		_, ok := NewChatsCache(nil).Snapshot(0)
+		_, ok := NewChatsCache(t.Context(), nil).Snapshot(0)
 		assert.False(t, ok)
 	})
 
 	t.Run("concurrent cold loads are singleflighted", func(t *testing.T) {
 		l := &countingLoader{entered: make(chan struct{}), release: make(chan struct{})}
-		c := NewChatsCache(l.load)
+		c := NewChatsCache(t.Context(), l.load)
 		const callers = 8
 		var wg sync.WaitGroup
 		ids := make(chan int64, callers)
@@ -113,7 +113,7 @@ func TestChatsCacheLoad(t *testing.T) {
 
 	t.Run("retained snapshots are bounded in age and number", func(t *testing.T) {
 		l := &countingLoader{}
-		c := NewChatsCache(l.load)
+		c := NewChatsCache(t.Context(), l.load)
 		first, err := c.Load(t.Context(), nil, false)
 		require.NoError(t, err)
 
@@ -138,7 +138,7 @@ func TestChatsCacheLoad(t *testing.T) {
 
 	t.Run("loader error is not cached", func(t *testing.T) {
 		calls := 0
-		c := NewChatsCache(func(context.Context, ProgressFunc) (*ChatsList, error) {
+		c := NewChatsCache(t.Context(), func(context.Context, ProgressFunc) (*ChatsList, error) {
 			calls++
 			if calls == 1 {
 				return nil, errors.New("boom")
@@ -155,7 +155,7 @@ func TestChatsCacheLoad(t *testing.T) {
 
 	t.Run("shared load outlives the caller that started it", func(t *testing.T) {
 		l := newGatedLoader()
-		c := NewChatsCache(l.load)
+		c := NewChatsCache(t.Context(), l.load)
 
 		firstCtx, cancelFirst := context.WithCancel(t.Context())
 		firstErr := make(chan error, 1)
@@ -182,9 +182,44 @@ func TestChatsCacheLoad(t *testing.T) {
 		assert.Equal(t, int64(1), l.calls.Load())
 	})
 
+	t.Run("load runs on the cache's lifetime", func(t *testing.T) {
+		type ctxKey struct{}
+		sawCaller := make(chan bool, 1)
+		l := newGatedLoader()
+		life, end := context.WithCancel(t.Context())
+		c := NewChatsCache(life, func(ctx context.Context, onProgress ProgressFunc) (*ChatsList, error) {
+			sawCaller <- ctx.Value(ctxKey{}) != nil
+			return l.load(ctx, onProgress)
+		})
+
+		const waiters = 3
+		errs := make(chan error, waiters)
+		heard := func(int, string) {}
+		go func() {
+			_, err := c.Load(context.WithValue(t.Context(), ctxKey{}, "first caller"), heard, false)
+			errs <- err
+		}()
+		<-l.entered
+		assert.False(t, <-sawCaller, "the load must not carry its first caller's values")
+		for range waiters - 1 {
+			go func() {
+				_, err := c.Load(t.Context(), heard, false)
+				errs <- err
+			}()
+		}
+		require.Eventually(t, func() bool { return c.watchers() == waiters }, time.Second, time.Millisecond, "every caller joins the load")
+
+		end() // what closing the assembly does
+		for range waiters {
+			require.ErrorIs(t, <-errs, context.Canceled, "ending the lifetime fails the waiters")
+		}
+		assert.Empty(t, c.snaps, "a cancelled load retains nothing")
+		assert.Equal(t, int64(1), l.calls.Load())
+	})
+
 	t.Run("refresh does not join a load that started before it", func(t *testing.T) {
 		l := newGatedLoader()
-		c := NewChatsCache(l.load)
+		c := NewChatsCache(t.Context(), l.load)
 
 		stale := make(chan *ChatsSnapshot, 1)
 		go func() {
@@ -214,7 +249,7 @@ func TestChatsCacheLoad(t *testing.T) {
 
 	t.Run("progress reaches only the callers still waiting", func(t *testing.T) {
 		l := newGatedLoader()
-		c := NewChatsCache(l.load)
+		c := NewChatsCache(t.Context(), l.load)
 		var firstHeard, secondHeard atomic.Int64
 
 		firstCtx, cancelFirst := context.WithCancel(t.Context())

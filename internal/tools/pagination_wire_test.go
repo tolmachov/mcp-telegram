@@ -111,7 +111,7 @@ func TestPaginationThroughMCP(t *testing.T) {
 					return nil
 				}), page(false), page(true),
 			)
-			provider := messages.NewProvider(tgclient.NewResolver(tg.NewClient(inv)), 100_000)
+			provider := messages.NewProvider(tgclient.NewResolver(t.Context(), tg.NewClient(inv)), 100_000)
 			cs := connectToolClient(t, func(s *mcp.Server) {
 				switch name {
 				case "GetMessages":
