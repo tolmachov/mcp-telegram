@@ -51,7 +51,7 @@ func TestAuthorizeBeforeStartFailsWithoutLaunchingTelegram(t *testing.T) {
 	a, err := New(testConfig(t), slog.New(slog.DiscardHandler), sessionstore.NewMemory(), func(context.Context) (LoginFlow, error) {
 		starts++
 		return newFakeFlow(), nil
-	}, nil)
+	}, noInvalidate)
 	require.NoError(t, err)
 	t.Cleanup(a.Close)
 	mux := http.NewServeMux()
@@ -78,7 +78,7 @@ func TestAuthorizeBeforeStartFailsWithoutLaunchingTelegram(t *testing.T) {
 }
 
 func TestAuthLifecycleAndPanicIsolationBranches(t *testing.T) {
-	a, err := New(testConfig(t), slog.New(slog.DiscardHandler), sessionstore.NewMemory(), neverStartLogin, nil)
+	a, err := New(testConfig(t), slog.New(slog.DiscardHandler), sessionstore.NewMemory(), neverStartLogin, noInvalidate)
 	require.NoError(t, err)
 	assert.Error(t, a.Start(nil)) //nolint:staticcheck // Explicitly verifies the public nil-context rejection.
 	require.NoError(t, a.Start(t.Context()))
@@ -91,7 +91,7 @@ func TestAuthLifecycleAndPanicIsolationBranches(t *testing.T) {
 	a.runLoop("test", func(context.Context) { panic("loop panic") }, t.Context())
 
 	// A malicious LoginFlow.Abort cannot unwind the pending-login sweeper.
-	b, err := New(testConfig(t), slog.New(slog.DiscardHandler), sessionstore.NewMemory(), neverStartLogin, nil)
+	b, err := New(testConfig(t), slog.New(slog.DiscardHandler), sessionstore.NewMemory(), neverStartLogin, noInvalidate)
 	require.NoError(t, err)
 	flow := panicAbortFlow{newFakeFlow()}
 	require.NoError(t, b.addPending("request", flow, "127.0.0.1"))
@@ -201,7 +201,7 @@ func TestFinalizeLoginRejectsIncompleteOrInvalidFlows(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			a, err := New(testConfig(t), slog.New(slog.DiscardHandler), tt.store, neverStartLogin, nil)
+			a, err := New(testConfig(t), slog.New(slog.DiscardHandler), tt.store, neverStartLogin, noInvalidate)
 			require.NoError(t, err)
 			t.Cleanup(a.Close)
 			state := tt.state
@@ -229,7 +229,7 @@ func TestFinalizeLoginRejectsIncompleteOrInvalidFlows(t *testing.T) {
 
 func TestFinalizeLoginCleansSessionWhenRedirectCannotBeBuilt(t *testing.T) {
 	store := sessionstore.NewMemory()
-	a, err := New(testConfig(t), slog.New(slog.DiscardHandler), store, neverStartLogin, nil)
+	a, err := New(testConfig(t), slog.New(slog.DiscardHandler), store, neverStartLogin, noInvalidate)
 	require.NoError(t, err)
 	t.Cleanup(a.Close)
 	state, err := sealBlob(a.sealer, stateBlob, stateClaims{
@@ -304,7 +304,7 @@ func TestRegistrationRejectsInvalidMetadata(t *testing.T) {
 func TestAuthorizeRejectsProtocolErrorsAndLoginStartFailure(t *testing.T) {
 	a, err := New(testConfig(t), slog.New(slog.DiscardHandler), sessionstore.NewMemory(), func(context.Context) (LoginFlow, error) {
 		return nil, errors.New("simulated Telegram startup failure")
-	}, nil)
+	}, noInvalidate)
 	require.NoError(t, err)
 	t.Cleanup(a.Close)
 	require.NoError(t, a.Start(t.Context()))

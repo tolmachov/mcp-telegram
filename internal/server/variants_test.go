@@ -26,6 +26,10 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// noWire stands in for the resources/prompts wiring the tool-listing tests
+// do not exercise.
+func noWire(*mcp.Server) {}
+
 // noopInvoker satisfies tg.Invoker without a network. Listing tools never calls
 // Telegram, so Invoke should never run; it errors loudly if it somehow does.
 type noopInvoker struct{}
@@ -82,8 +86,8 @@ func TestVariantHandlerSplit(t *testing.T) {
 	full, research := buildTestHandlers(t)
 	impl := &mcp.Implementation{Name: "mcp-telegram", Version: "test"}
 
-	fullNames := listToolNames(t, newInner(impl, nil, full, nil, false, testLogger()))
-	researchNames := listToolNames(t, newInner(impl, nil, research, nil, false, testLogger()))
+	fullNames := listToolNames(t, newInner(impl, nil, full, noWire, false, testLogger()))
+	researchNames := listToolNames(t, newInner(impl, nil, research, noWire, false, testLogger()))
 
 	assert.Len(t, fullNames, 29, "full variant exposes every tool")
 	assert.Len(t, researchNames, 15, "research variant excludes local filesystem writes")
@@ -113,7 +117,7 @@ func TestBuildVariantsServerMetadata(t *testing.T) {
 	full, research := buildTestHandlers(t)
 	impl := &mcp.Implementation{Name: "mcp-telegram", Version: "test"}
 
-	vs, inners := buildVariantsServer(impl, nil, full, research, nil, testLogger())
+	vs, inners := buildVariantsServer(impl, nil, full, research, noWire, testLogger())
 	require.Len(t, inners, 3, "one inner server per variant")
 
 	got := vs.Variants()
@@ -178,8 +182,8 @@ func TestVariantCompactShortensDescriptions(t *testing.T) {
 	full, _ := buildTestHandlers(t)
 	impl := &mcp.Implementation{Name: "mcp-telegram", Version: "test"}
 
-	fullNames := listToolNames(t, newInner(impl, nil, full, nil, false, testLogger()))
-	compactNames := listToolNames(t, newInner(impl, nil, full, nil, true, testLogger()))
+	fullNames := listToolNames(t, newInner(impl, nil, full, noWire, false, testLogger()))
+	compactNames := listToolNames(t, newInner(impl, nil, full, noWire, true, testLogger()))
 
 	require.Len(t, compactNames, len(fullNames), "compact keeps every tool, only trims descriptions")
 
@@ -279,7 +283,7 @@ func TestBuildVariantsServerPreservesFullDescriptions(t *testing.T) {
 	full, research := buildTestHandlers(t)
 	impl := &mcp.Implementation{Name: "mcp-telegram", Version: "test"}
 
-	vs, inners := buildVariantsServer(impl, nil, full, research, nil, testLogger())
+	vs, inners := buildVariantsServer(impl, nil, full, research, noWire, testLogger())
 	require.Len(t, inners, 3)
 	require.NotNil(t, vs)
 
@@ -305,8 +309,8 @@ func TestResearchVariantShortensDescriptions(t *testing.T) {
 	full, research := buildTestHandlers(t)
 	impl := &mcp.Implementation{Name: "mcp-telegram", Version: "test"}
 
-	fullBaseline := listToolNames(t, newInner(impl, nil, full, nil, false, testLogger()))
-	_, inners := buildVariantsServer(impl, nil, full, research, nil, testLogger())
+	fullBaseline := listToolNames(t, newInner(impl, nil, full, noWire, false, testLogger()))
+	_, inners := buildVariantsServer(impl, nil, full, research, noWire, testLogger())
 	researchNames := listToolNames(t, inners[2])
 
 	require.Contains(t, researchNames, "GetChats")
@@ -324,7 +328,7 @@ func TestResearchVariantShortensDescriptions(t *testing.T) {
 func TestRankedVariantsStableUnderHints(t *testing.T) {
 	full, research := buildTestHandlers(t)
 	impl := &mcp.Implementation{Name: "mcp-telegram", Version: "test"}
-	vs, _ := buildVariantsServer(impl, nil, full, research, nil, testLogger())
+	vs, _ := buildVariantsServer(impl, nil, full, research, noWire, testLogger())
 
 	hints := variants.VariantHints{Hints: map[string]any{
 		variants.HintContextSize: "compact",
@@ -386,7 +390,7 @@ func TestCompactMiddlewareIgnoresNonListMethods(t *testing.T) {
 func TestOverrideVariantSelection(t *testing.T) {
 	full, research := buildTestHandlers(t)
 	impl := &mcp.Implementation{Name: "mcp-telegram", Version: "test"}
-	fullBaseline := listToolNames(t, newInner(impl, nil, full, nil, false, testLogger()))
+	fullBaseline := listToolNames(t, newInner(impl, nil, full, noWire, false, testLogger()))
 
 	cases := []struct {
 		id          string
@@ -404,7 +408,7 @@ func TestOverrideVariantSelection(t *testing.T) {
 
 			// Drive the exact constructor runHappy's override branch uses, so the
 			// mode → (handlers, compaction) decision stays pinned to one place.
-			srv := newInnerForMode(impl, nil, full, research, d.mode, nil, testLogger())
+			srv := newInnerForMode(impl, nil, full, research, d.mode, noWire, testLogger())
 			names := listToolNames(t, srv)
 
 			assert.Len(t, names, tc.wantTools)
@@ -489,7 +493,7 @@ func listToolsThroughProxy(t *testing.T, vs *variants.Server, variantID string) 
 func TestVariantsProxyDispatchCompacts(t *testing.T) {
 	full, research := buildTestHandlers(t)
 	impl := &mcp.Implementation{Name: "mcp-telegram", Version: "test"}
-	vs, _ := buildVariantsServer(impl, nil, full, research, nil, testLogger())
+	vs, _ := buildVariantsServer(impl, nil, full, research, noWire, testLogger())
 
 	fullNames := listToolsThroughProxy(t, vs, variantFull)
 	compactNames := listToolsThroughProxy(t, vs, variantCompact)

@@ -38,19 +38,11 @@ type AuthServer struct {
 	sweepDone   chan struct{}
 
 	// invalidate tears down any live client assembly for a (userID, sid)
-	// session so it cannot re-store the blob after we delete it. Nil when no pool is wired
-	// (tests, or a caller that does not run the user pool).
+	// session so it cannot re-store the blob after we delete it.
 	invalidate func(userID tgid.UserID, sid string)
 
 	pendingMu sync.Mutex
 	pending   map[string]*pendingLogin
-}
-
-// invalidateSession invokes the configured invalidator, if any.
-func (a *AuthServer) invalidateSession(userID tgid.UserID, sid string) {
-	if a.invalidate != nil {
-		a.invalidate(userID, sid)
-	}
 }
 
 // New validates cfg and builds the authorization server. store persists the
@@ -79,6 +71,9 @@ func New(
 	}
 	if startLogin == nil {
 		return nil, fmt.Errorf("start-login function is required")
+	}
+	if invalidate == nil {
+		return nil, fmt.Errorf("session invalidator is required")
 	}
 	ring, err := newKeyRing(cfgCopy.TokenKeys)
 	if err != nil {

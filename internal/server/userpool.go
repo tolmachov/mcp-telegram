@@ -47,7 +47,9 @@ const (
 	userPoolMaxPerUser = 4
 	// userPoolJanitorInterval is how often idle entries are collected.
 	userPoolJanitorInterval = time.Minute
-	// userPoolEvictGrace is the default evictGrace (see the userPool field).
+	// userPoolEvictGrace bounds how long a busy revoked assembly may drain. A
+	// single janitor timer handles every deadline; entries never create
+	// competing time.AfterFunc callbacks.
 	userPoolEvictGrace = time.Minute
 	initializeBurst    = 3
 )
@@ -135,19 +137,14 @@ type userPool struct {
 	build              userHandlerBuilder
 	// baseCtx is the server-lifetime context builds run on, so canceling one
 	// request cannot poison a build other requests will share.
-	baseCtx  context.Context
-	maxUsers int
-	now      func() time.Time
-	logger   *slog.Logger
+	baseCtx context.Context
+	now     func() time.Time
+	logger  *slog.Logger
 	// wwwAuthenticate is sent on pool-issued 401s (dead session) so MCP
 	// clients discover the OAuth metadata and re-run the login flow, matching
 	// the header RequireBearerToken sends on token failures.
 	wwwAuthenticate string
-	// evictGrace bounds how long a busy revoked assembly may drain. A single
-	// janitor timer handles every deadline; entries never create competing
-	// time.AfterFunc callbacks.
-	evictGrace time.Duration
-	wake       chan struct{}
+	wake            chan struct{}
 }
 
 func newUserPool(baseCtx context.Context, build userHandlerBuilder, wwwAuthenticate string, logger *slog.Logger) *userPool {
@@ -157,11 +154,9 @@ func newUserPool(baseCtx context.Context, build userHandlerBuilder, wwwAuthentic
 		initializeLimiters: map[tgid.UserID]*rate.Limiter{},
 		build:              build,
 		baseCtx:            baseCtx,
-		maxUsers:           userPoolMaxUsers,
 		now:                time.Now,
 		logger:             logger,
 		wwwAuthenticate:    wwwAuthenticate,
-		evictGrace:         userPoolEvictGrace,
 		wake:               make(chan struct{}, 1),
 	}
 }
@@ -196,7 +191,7 @@ func (p *userPool) serveUser(w http.ResponseWriter, r *http.Request, user *auths
 	}
 	switch {
 	case errors.Is(err, errPoolFull):
-		p.logger.Warn("user pool at capacity, rejecting request", "user", user.ID, "cap", p.maxUsers)
+		p.logger.Warn("user pool at capacity, rejecting request", "user", user.ID, "cap", userPoolMaxUsers)
 		w.Header().Set("Retry-After", "60")
 		http.Error(w, "server is at capacity, retry later", http.StatusServiceUnavailable)
 		return
@@ -299,7 +294,7 @@ func (p *userPool) entryFor(ctx context.Context, user *authsrv.UserIdentity) (*u
 			}
 			evictions = append(evictions, eviction{ek, closer, "evicted account's own least-recently-used assembly (per-account cap)"})
 		}
-		if len(p.entries) >= p.maxUsers {
+		if len(p.entries) >= userPoolMaxUsers {
 			ek, closer, ok := p.takeOneEvictableLocked(nil)
 			if !ok {
 				p.mu.Unlock()
@@ -365,7 +360,7 @@ func (p *userPool) completeBuild(e *userEntry, asm builtAssembly, buildErr error
 	e.handler, e.closer, e.health = asm.Handler, asm.Closer, asm.Health
 	if e.state == entryBuildingEvicted {
 		e.state = entryDraining
-		e.evictDeadline = p.now().Add(p.evictGrace)
+		e.evictDeadline = p.now().Add(userPoolEvictGrace)
 		p.retired[e] = struct{}{}
 	} else {
 		e.state = entryActive
@@ -435,7 +430,7 @@ func (p *userPool) countForUserLocked(id tgid.UserID) int {
 // cleanup, NOT the correctness mechanism: revocation is guaranteed by the
 // durable tombstone (the refresh gate checks Revoked). It removes the entry
 // from the map immediately. Idle entries close synchronously; busy entries
-// drain until their last release or the centralized janitor reaches evictGrace.
+// drain until their last release or the centralized janitor reaches userPoolEvictGrace.
 func (p *userPool) EvictSession(userID tgid.UserID, sid string) {
 	key := poolKey{id: userID, sid: sid}
 	p.mu.Lock()
@@ -546,7 +541,7 @@ func (p *userPool) evictLocked(e *userEntry, force bool) io.Closer {
 	case entryActive:
 		if !force && e.inflight > 0 {
 			e.state = entryDraining
-			e.evictDeadline = p.now().Add(p.evictGrace)
+			e.evictDeadline = p.now().Add(userPoolEvictGrace)
 			p.retired[e] = struct{}{}
 			return nil
 		}

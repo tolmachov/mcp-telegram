@@ -190,14 +190,7 @@ func (s *Server) fillProbedStatus(ctx context.Context, status *LoginRequiredStat
 	probeCtx, cancel := context.WithTimeout(ctx, authProbeTimeout)
 	defer cancel()
 
-	// New always wires this up; the fallback keeps a Server built without it
-	// (as some tests do) from panicking instead of probing.
-	probe := s.authProbeFn
-	if probe == nil {
-		probe = s.authProbe
-	}
-
-	account, authorized, err := probe(probeCtx)
+	account, authorized, err := s.authProbeFn(probeCtx)
 	if err != nil && probeCtx.Err() != nil && ctx.Err() == nil {
 		// Our own ceiling fired, not one the host imposed on the tool call —
 		// only then is naming authProbeTimeout accurate.
@@ -246,7 +239,7 @@ func accountSuffix(account string) string {
 // connection of its own, but the *session* is shared: the SDK dispatches tool
 // calls concurrently, and each probe is a fresh client on the stored auth key.
 // Two live clients on one key is the AUTH_KEY_DUPLICATED hazard the user pool
-// goes to some length to avoid (see userpool.evictGrace), and this tool
+// goes to some length to avoid (see userPoolEvictGrace), and this tool
 // actively invites a concurrent `mcp-telegram login` in another terminal — so
 // at least keep our own probes from stacking. The 20s ceiling on each one
 // bounds how long a caller can queue behind another.

@@ -427,12 +427,10 @@ func (s *Server) runHappy(ctx context.Context, client *telegram.Client) error {
 	// in a Telegram call) holding up shutdown indefinitely. If it ever fires we
 	// are abandoning a live goroutine that will then touch a torn-down server —
 	// a real correctness hazard, so it logs at Error, not Warn.
-	if pinnedDone != nil {
-		select {
-		case <-pinnedDone:
-		case <-time.After(5 * time.Second):
-			s.logger.Error("pinned-chat watcher did not exit in 5s; abandoning", "pinned_refresh", s.pinnedRefresh)
-		}
+	select {
+	case <-pinnedDone:
+	case <-time.After(5 * time.Second):
+		s.logger.Error("pinned-chat watcher did not exit in 5s; abandoning", "pinned_refresh", s.pinnedRefresh)
 	}
 	if runErr != nil {
 		return fmt.Errorf("running MCP server: %w", runErr)

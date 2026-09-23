@@ -280,17 +280,18 @@ func TestUserPoolFullRejectsWith503(t *testing.T) {
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
 		return okAssembly(), nil
 	}, testWWWAuthenticate, discardLogger())
-	pool.maxUsers = 1
 
-	if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
-		t.Fatalf("first user status = %d, want 200", rec.Code)
+	for id := tgid.UserID(1); id <= userPoolMaxUsers; id++ {
+		if rec := poolRequest(t, pool, id); rec.Code != http.StatusOK {
+			t.Fatalf("user %d status = %d, want 200", id, rec.Code)
+		}
 	}
-	// The single entry is idle (inflight 0) → LRU eviction makes room.
-	if rec := poolRequest(t, pool, 2); rec.Code != http.StatusOK {
-		t.Fatalf("second user status = %d, want 200 after LRU eviction", rec.Code)
+	// Every entry is idle (inflight 0) → LRU eviction makes room.
+	if rec := poolRequest(t, pool, userPoolMaxUsers+1); rec.Code != http.StatusOK {
+		t.Fatalf("user past the cap status = %d, want 200 after LRU eviction", rec.Code)
 	}
-	if pool.size() != 1 {
-		t.Errorf("pool size = %d, want 1", pool.size())
+	if pool.size() != userPoolMaxUsers {
+		t.Errorf("pool size = %d, want %d", pool.size(), userPoolMaxUsers)
 	}
 }
 
@@ -537,10 +538,11 @@ func TestUserPoolCloseDuringBuild(t *testing.T) {
 }
 
 // TestUserPoolEvictSessionGraceForceClose pins the eviction grace bound: a
-// built assembly still held by a hung in-flight request past evictGrace is
-// force-closed by the pool's single janitor timer, and the eventual release()
-// does not double-close. It also pins that a still-building entry is only
-// eligible for a deadline after its closer has been published.
+// built assembly still held by a hung in-flight request past
+// userPoolEvictGrace is force-closed by the pool's single janitor timer, and
+// the eventual release() does not double-close. It also pins that a
+// still-building entry is only eligible for a deadline after its closer has
+// been published.
 func TestUserPoolEvictSessionGraceForceClose(t *testing.T) {
 	t.Run("busy built entry force-closed after grace", func(t *testing.T) {
 		var closes atomic.Int64
@@ -550,7 +552,8 @@ func TestUserPoolEvictSessionGraceForceClose(t *testing.T) {
 				Closer:  closerFunc(func() error { closes.Add(1); return nil }),
 			}, nil
 		}, testWWWAuthenticate, discardLogger())
-		pool.evictGrace = 10 * time.Millisecond
+		var skew atomic.Int64
+		pool.now = func() time.Time { return time.Now().Add(time.Duration(skew.Load())) }
 		janitorCtx, cancelJanitor := context.WithCancel(t.Context())
 		defer cancelJanitor()
 		go pool.janitor(janitorCtx)
@@ -567,6 +570,8 @@ func TestUserPoolEvictSessionGraceForceClose(t *testing.T) {
 		if got := closes.Load(); got != 0 {
 			t.Fatalf("busy entry closed synchronously (%d); the close must wait for release or the grace timer", got)
 		}
+		skew.Store(int64(2 * userPoolEvictGrace))
+		pool.signalJanitor()
 		deadline := time.Now().Add(5 * time.Second)
 		for closes.Load() == 0 && time.Now().Before(deadline) {
 			time.Sleep(time.Millisecond)
@@ -593,16 +598,17 @@ func TestUserPoolEvictSessionGraceForceClose(t *testing.T) {
 				Closer:  closerFunc(func() error { closes.Add(1); return nil }),
 			}, nil
 		}, testWWWAuthenticate, discardLogger())
-		pool.evictGrace = 10 * time.Millisecond
+		var skew atomic.Int64
+		pool.now = func() time.Time { return time.Now().Add(time.Duration(skew.Load())) }
 
 		done := make(chan int, 1)
 		go func() { done <- poolRequest(t, pool, 1).Code }()
 		<-entered
 
 		pool.EvictSession(1, "") // the build has no closer to schedule yet
-		// Give an incorrectly scheduled deadline ample time to run before the
-		// closer exists.
-		time.Sleep(100 * time.Millisecond)
+		// Push the clock well past the grace so an incorrectly scheduled
+		// deadline would already be due before the closer exists.
+		skew.Store(int64(2 * userPoolEvictGrace))
 		close(release)
 		<-done
 		if got := closes.Load(); got != 1 {

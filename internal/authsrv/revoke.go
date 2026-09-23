@@ -94,7 +94,7 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	// Best-effort: drop the pooled assembly so the connection is freed promptly.
 	// Not required for correctness (the tombstone is) and may be a no-op.
-	a.invalidateSession(userID, sid)
+	a.invalidate(userID, sid)
 	a.logger.Info("token revoked", "user_id", userID, "session", sid)
 	ok()
 }

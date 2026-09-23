@@ -153,12 +153,10 @@ func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 		pinnedDone := pinnedProvider.WatchInBackground(watchCtx, s.pinnedRefresh)
 		closers = append(closers, closerFunc(func() error {
 			cancelWatch()
-			if pinnedDone != nil {
-				select {
-				case <-pinnedDone:
-				case <-time.After(5 * time.Second):
-					s.logger.Error("pinned-chat watcher did not exit in 5s; abandoning", "user", user.ID)
-				}
+			select {
+			case <-pinnedDone:
+			case <-time.After(5 * time.Second):
+				s.logger.Error("pinned-chat watcher did not exit in 5s; abandoning", "user", user.ID)
 			}
 			return nil
 		}))

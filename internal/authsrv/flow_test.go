@@ -209,8 +209,11 @@ func testConfig(t *testing.T) *Config {
 // limiter is made effectively unlimited so protocol tests are not coupled to
 // the budget.
 func newTestServer(t *testing.T, cfg *Config, store sessionstore.Store, start StartLoginFunc) (*AuthServer, *httptest.Server) {
-	return newTestServerWithInvalidator(t, cfg, store, start, nil)
+	return newTestServerWithInvalidator(t, cfg, store, start, noInvalidate)
 }
+
+// noInvalidate is the session invalidator for tests that run no user pool.
+func noInvalidate(tgid.UserID, string) {}
 
 func newTestServerWithInvalidator(t *testing.T, cfg *Config, store sessionstore.Store, start StartLoginFunc, invalidate func(tgid.UserID, string)) (*AuthServer, *httptest.Server) {
 	t.Helper()

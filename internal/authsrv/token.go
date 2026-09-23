@@ -149,7 +149,7 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 			if revokeErr := a.store.Revoke(r.Context(), userID, rc.SessionID); revokeErr != nil {
 				a.logger.Error("refresh replay session revocation failed", "user_id", userID, "err", revokeErr)
 			}
-			a.invalidateSession(userID, rc.SessionID)
+			a.invalidate(userID, rc.SessionID)
 			a.logger.Warn("refresh replay revoked grant", "user_id", userID, "session", rc.SessionID)
 		}
 		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "refresh token replayed or grant expired; log in again")

@@ -66,21 +66,3 @@ func TestPeerCacheResolveDoesNotCacheErrors(t *testing.T) {
 	assert.Equal(t, &tg.InputPeerChannel{ChannelID: 1555091578, AccessHash: 999}, p)
 	assert.Equal(t, 2, channelCalls, "the failed resolve must not be memoized")
 }
-
-// TestPeerCacheNilReceiver documents that a nil *PeerCache resolves without
-// caching and without panicking, so cache-less call sites need no guard.
-func TestPeerCacheNilReceiver(t *testing.T) {
-	ctx := context.Background()
-	client := tg.NewClient(fakeInvoker{
-		channels: func(ids []tg.InputChannelClass) (tg.MessagesChatsClass, error) {
-			return &tg.MessagesChats{Chats: []tg.ChatClass{
-				&tg.Channel{ID: 1555091578, AccessHash: 999},
-			}}, nil
-		},
-	})
-
-	var c *PeerCache
-	p, err := c.Resolve(ctx, client, 1555091578)
-	require.NoError(t, err)
-	assert.Equal(t, &tg.InputPeerChannel{ChannelID: 1555091578, AccessHash: 999}, p)
-}

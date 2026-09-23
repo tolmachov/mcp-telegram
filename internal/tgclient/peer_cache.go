@@ -36,9 +36,6 @@ func NewPeerCache() *PeerCache {
 }
 
 func (c *PeerCache) Resolve(ctx context.Context, client *tg.Client, id int64) (tg.InputPeerClass, error) {
-	if c == nil {
-		return ResolvePeer(ctx, client, id)
-	}
 	now := c.now()
 	c.mu.RLock()
 	entry, ok := c.byID[id]
@@ -86,9 +83,6 @@ func (c *PeerCache) removeExpiredLocked(now time.Time) {
 }
 
 func (c *PeerCache) Invalidate(id int64) {
-	if c == nil {
-		return
-	}
 	c.mu.Lock()
 	delete(c.byID, id)
 	c.mu.Unlock()

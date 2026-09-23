@@ -210,9 +210,7 @@ func compactToolsMiddleware(logger *slog.Logger) mcp.Middleware {
 func newInner(impl *mcp.Implementation, opts *mcp.ServerOptions, handlers []tools.Handler, wire func(*mcp.Server), compact bool, logger *slog.Logger) *mcp.Server {
 	s := mcp.NewServer(impl, opts)
 	tools.RegisterTools(s, handlers)
-	if wire != nil {
-		wire(s)
-	}
+	wire(s)
 	s.AddReceivingMiddleware(requestLogMiddleware(logger))
 	if compact {
 		s.AddReceivingMiddleware(compactToolsMiddleware(logger))
