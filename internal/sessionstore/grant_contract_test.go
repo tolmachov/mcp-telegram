@@ -2,6 +2,7 @@ package sessionstore
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -70,4 +71,43 @@ func TestUpdateGrantGivesUp(t *testing.T) {
 	require.ErrorIs(t, err, ErrGrantConflict)
 	assert.Equal(t, 8, store.loads)
 	assert.Equal(t, 4, store.stores)
+}
+
+// unreadableAfterWrite fails a grant write, and every read after it, with
+// its own errors.
+type unreadableAfterWrite struct {
+	Store
+	storeErr, loadErr error
+	wrote             bool
+}
+
+func (s *unreadableAfterWrite) LoadGrant(ctx context.Context, family string) (GrantRecord, int64, error) {
+	if s.wrote {
+		return GrantRecord{}, 0, s.loadErr
+	}
+	return s.Store.LoadGrant(ctx, family)
+}
+
+func (s *unreadableAfterWrite) StoreGrant(context.Context, string, GrantRecord, int64) error {
+	s.wrote = true
+	return s.storeErr
+}
+
+// TestWriteGrantReportsAnUnknownOutcome pins that a failed grant write whose
+// re-read fails too reports both errors — the write may have landed — rather
+// than only the write's, or a lost race to retry.
+func TestWriteGrantReportsAnUnknownOutcome(t *testing.T) {
+	ctx := t.Context()
+	inner := Encrypted(newTestFS(t), newCipher(t, testIssuer, newKey(t)))
+	created, err := RedeemCode(ctx, inner, testGrantFamily, testSID, time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	require.True(t, created)
+
+	for _, storeErr := range []error{ErrGrantConflict, errors.New("connection reset by peer")} {
+		store := &unreadableAfterWrite{Store: inner, storeErr: storeErr, loadErr: errors.New("bucket unavailable")}
+		_, err := RotateGrant(ctx, store, testGrantFamily, 0, time.Now())
+		require.ErrorIs(t, err, storeErr)
+		require.ErrorIs(t, err, store.loadErr)
+		assert.ErrorContains(t, err, "outcome unknown")
+	}
 }

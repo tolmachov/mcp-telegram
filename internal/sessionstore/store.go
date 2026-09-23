@@ -94,9 +94,10 @@ const (
 // Both sid and userKey are mandatory.
 //
 // Exists is a cheap probe used by token refresh to force a re-login after a
-// session was deleted. Delete removes one session; the pool builder calls it
-// when Telegram refuses a decryptable session (ErrSessionUnauthorized) and an
-// operator may call it to force a re-login. A session that fails to decrypt is
+// session was deleted. Delete removes one session; the user pool deletes a
+// decryptable session Telegram refused (ErrSessionUnauthorized) — whether a
+// client was starting on it or already running — and an operator may call it
+// to force a re-login. A session that fails to decrypt is
 // deliberately NOT deleted (see ErrCorruptSession).
 //
 // Revocation is durable and independent of the blob: Revoke writes a tombstone
@@ -304,14 +305,19 @@ func updateGrant(ctx context.Context, s Store, family string, change func(GrantR
 // first. A failed write is settled by re-reading: a write can land and still
 // report failure (a GCS retry of a request whose response was lost answers
 // 412, a transport error can follow a committed upload), and finding its own
-// WriteID in the store is what tells that apart from a lost race.
+// WriteID in the store is what tells that apart from a lost race. When the
+// re-read fails too, the outcome is unknown and the error carries both.
 func writeGrant(ctx context.Context, s Store, family string, grant GrantRecord, version int64) (bool, error) {
 	grant.WriteID = rand.Text()
 	err := s.StoreGrant(ctx, family, grant, version)
 	if err == nil {
 		return true, nil
 	}
-	if stored, _, loadErr := s.LoadGrant(ctx, family); loadErr == nil && stored.WriteID == grant.WriteID {
+	stored, _, loadErr := s.LoadGrant(ctx, family)
+	if loadErr != nil {
+		return false, fmt.Errorf("storing grant: outcome unknown, as re-reading it failed too: %w", errors.Join(err, loadErr))
+	}
+	if stored.WriteID == grant.WriteID {
 		return true, nil
 	}
 	if errors.Is(err, ErrGrantConflict) {
