@@ -171,7 +171,7 @@ func (h *ChatSummarizeHandler) parseSinceTime(in SummarizeChatInput) (time.Time,
 	if period == "" {
 		period = "month"
 	}
-	d, ok := summarize.Periods[period]
+	d, ok := summarize.Period(period)
 	if !ok {
 		return time.Time{}, fmt.Errorf("invalid period: %s (use one of: %s)", period, strings.Join(summarize.PeriodNames(), ", "))
 	}

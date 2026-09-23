@@ -31,18 +31,25 @@ Instructions:
 - Write in the same language as the messages
 - Output only the updated summary as plain text (markdown allowed)`
 
-// Periods maps each accepted "period" value of SummarizeChat and the summary
+// periods maps each accepted "period" value of SummarizeChat and the summary
 // prompts to how far back it looks.
-var Periods = map[string]time.Duration{
+var periods = map[string]time.Duration{
 	"day":   24 * time.Hour,
 	"week":  7 * 24 * time.Hour,
 	"month": 30 * 24 * time.Hour,
 }
 
-// PeriodNames returns the keys of Periods, shortest period first.
+// Period returns how far back the named period looks, or ok=false for a name
+// that is not one of PeriodNames.
+func Period(name string) (d time.Duration, ok bool) {
+	d, ok = periods[name]
+	return d, ok
+}
+
+// PeriodNames returns the accepted period names, shortest period first.
 func PeriodNames() []string {
-	return slices.SortedFunc(maps.Keys(Periods), func(a, b string) int {
-		return cmp.Compare(Periods[a], Periods[b])
+	return slices.SortedFunc(maps.Keys(periods), func(a, b string) int {
+		return cmp.Compare(periods[a], periods[b])
 	})
 }
 

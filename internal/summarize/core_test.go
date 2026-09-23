@@ -238,3 +238,12 @@ func TestSummarizeCountsCompletedBatches(t *testing.T) {
 		})
 	}
 }
+
+func TestPeriod(t *testing.T) {
+	assert.Equal(t, []string{"day", "week", "month"}, PeriodNames())
+	d, ok := Period("week")
+	require.True(t, ok)
+	assert.Equal(t, 7*24*time.Hour, d)
+	_, ok = Period("year")
+	assert.False(t, ok)
+}
