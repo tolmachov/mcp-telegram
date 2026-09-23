@@ -2,7 +2,6 @@ package resources
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -254,18 +253,5 @@ func (p *PinnedChatsProvider) handlePinnedChat(
 	for _, message := range lastMessages.Messages {
 		presented = append(presented, presentation.FromMessage(message, false))
 	}
-	result := PinnedChatResource{Chat: chat, Messages: presented}
-
-	data, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("marshaling response: %w", err)
-	}
-
-	return &mcp.ReadResourceResult{
-		Contents: []*mcp.ResourceContents{{
-			URI:      request.Params.URI,
-			MIMEType: "application/json",
-			Text:     string(data),
-		}},
-	}, nil
+	return jsonResource(request.Params.URI, PinnedChatResource{Chat: chat, Messages: presented})
 }

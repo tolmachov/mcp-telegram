@@ -1,7 +1,6 @@
 package authsrv
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
@@ -13,7 +12,7 @@ const ProtectedResourceMetadataPath = "/.well-known/oauth-protected-resource"
 
 // protectedResourceHandler serves the RFC 9728 protected resource metadata.
 func (a *AuthServer) protectedResourceHandler() http.Handler {
-	return jsonMetadataHandler(&oauthex.ProtectedResourceMetadata{
+	return a.jsonMetadataHandler(&oauthex.ProtectedResourceMetadata{
 		Resource:               a.cfg.IssuerURL,
 		AuthorizationServers:   []string{a.cfg.IssuerURL},
 		BearerMethodsSupported: []string{"header"},
@@ -47,11 +46,8 @@ type emptyJWKS struct{}
 func (emptyJWKS) MarshalJSON() ([]byte, error) { return []byte(`{"keys":[]}`), nil }
 
 // jsonMetadataHandler serves a static JSON document.
-func jsonMetadataHandler(v any) http.Handler {
+func (a *AuthServer) jsonMetadataHandler(v any) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(v); err != nil {
-			http.Error(w, "encoding error", http.StatusInternalServerError)
-		}
+		a.writeJSON(w, http.StatusOK, v)
 	})
 }

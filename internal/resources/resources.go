@@ -1,6 +1,9 @@
 package resources
 
 import (
+	"encoding/json"
+	"fmt"
+
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -16,4 +19,19 @@ func RegisterResources(s *mcp.Server, handlers []ResourceHandler) {
 	for _, r := range handlers {
 		r.Register(s)
 	}
+}
+
+// jsonResource renders v as the indented JSON contents of the resource at uri.
+func jsonResource(uri string, v any) (*mcp.ReadResourceResult, error) {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshaling %s: %w", uri, err)
+	}
+	return &mcp.ReadResourceResult{
+		Contents: []*mcp.ResourceContents{{
+			URI:      uri,
+			MIMEType: "application/json",
+			Text:     string(data),
+		}},
+	}, nil
 }

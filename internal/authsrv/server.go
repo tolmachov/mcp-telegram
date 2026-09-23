@@ -171,11 +171,11 @@ func (a *AuthServer) Close() {
 func (a *AuthServer) Routes(mux *http.ServeMux) {
 	rl := a.limiter
 	mux.Handle("GET /.well-known/oauth-protected-resource", a.protectedResourceHandler())
-	mux.Handle("GET /.well-known/oauth-authorization-server", jsonMetadataHandler(a.authServerMetadata()))
+	mux.Handle("GET /.well-known/oauth-authorization-server", a.jsonMetadataHandler(a.authServerMetadata()))
 	// Some clients probe the OIDC discovery path as a fallback; serve the
 	// same document there.
-	mux.Handle("GET /.well-known/openid-configuration", jsonMetadataHandler(a.authServerMetadata()))
-	mux.Handle("GET /jwks.json", jsonMetadataHandler(emptyJWKS{}))
+	mux.Handle("GET /.well-known/openid-configuration", a.jsonMetadataHandler(a.authServerMetadata()))
+	mux.Handle("GET /jwks.json", a.jsonMetadataHandler(emptyJWKS{}))
 	mux.Handle("POST /register", rl.wrap(http.HandlerFunc(a.handleRegister)))
 	mux.Handle("GET /authorize", rl.wrap(http.HandlerFunc(a.handleAuthorize)))
 	mux.Handle("GET /login/qr", rl.wrap(http.HandlerFunc(a.handleLoginQR)))

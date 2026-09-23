@@ -2,8 +2,6 @@ package resources
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -42,15 +40,5 @@ func (h *ChatsHandler) handle(ctx context.Context, _ *mcp.ReadResourceRequest) (
 	if err != nil {
 		return nil, err
 	}
-	data, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("marshaling chats: %w", err)
-	}
-	return &mcp.ReadResourceResult{
-		Contents: []*mcp.ResourceContents{{
-			URI:      "telegram://chats",
-			MIMEType: "application/json",
-			Text:     string(data),
-		}},
-	}, nil
+	return jsonResource("telegram://chats", result)
 }

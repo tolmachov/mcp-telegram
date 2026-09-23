@@ -2,7 +2,6 @@ package resources
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -47,19 +46,7 @@ func RegisterChatTemplate(s *mcp.Server, client *tg.Client) {
 		if err != nil {
 			return nil, fmt.Errorf("getting chat info for %d: %w", chatID, err)
 		}
-
-		data, err := json.MarshalIndent(info, "", "  ")
-		if err != nil {
-			return nil, fmt.Errorf("marshaling chat info: %w", err)
-		}
-
-		return &mcp.ReadResourceResult{
-			Contents: []*mcp.ResourceContents{{
-				URI:      request.Params.URI,
-				MIMEType: "application/json",
-				Text:     string(data),
-			}},
-		}, nil
+		return jsonResource(request.Params.URI, info)
 	})
 }
 
