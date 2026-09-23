@@ -91,14 +91,42 @@ func TestAuthLifecycleAndPanicIsolationBranches(t *testing.T) {
 	// A background-tick panic is isolated from its loop.
 	a.runIsolated("test", func() { panic("tick panic") })
 
-	// A malicious LoginFlow.Abort cannot unwind the pending-login sweeper.
-	b, err := New(testConfig(t), slog.New(slog.DiscardHandler), sessionstoretest.New(t), neverStartLogin, noInvalidate)
-	require.NoError(t, err)
-	flow := panicAbortFlow{newFakeFlow()}
-	require.NoError(t, b.addPending("request", flow, "127.0.0.1"))
-	b.now = func() time.Time { return time.Now().Add(pendingLoginTTL + time.Minute) }
-	b.runIsolated("test", b.sweepExpiredPending)
-	b.Close()
+}
+
+// TestPanickingAbortSparesOtherExpiredLogins pins that a LoginFlow.Abort that
+// panics neither unwinds the sweep nor keeps the other expired flows from
+// being aborted, on the janitor path and on the admission path, and does not
+// leave the registry locked.
+func TestPanickingAbortSparesOtherExpiredLogins(t *testing.T) {
+	for name, sweep := range map[string]func(*AuthServer){
+		"janitor":   (*AuthServer).sweepExpiredPending,
+		"admission": func(a *AuthServer) { require.NoError(t, a.addPending("request", newFakeFlow(), "")) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, err := New(testConfig(t), slog.New(slog.DiscardHandler), sessionstoretest.New(t), neverStartLogin, noInvalidate)
+			require.NoError(t, err)
+			t.Cleanup(a.Close)
+			// Map iteration order is random, so enough healthy flows surround
+			// the panicking one that some always come after it.
+			require.NoError(t, a.addPending("request", panicAbortFlow{newFakeFlow()}, ""))
+			healthy := make([]*fakeFlow, 4)
+			for i := range healthy {
+				healthy[i] = newFakeFlow()
+				require.NoError(t, a.addPending("request", healthy[i], ""))
+			}
+			a.now = func() time.Time { return time.Now().Add(pendingLoginTTL + time.Minute) }
+
+			assert.NotPanics(t, func() { sweep(a) })
+			for i, flow := range healthy {
+				assert.True(t, flow.wasAborted(), "healthy flow %d", i)
+			}
+			a.pendingMu.Lock()
+			for _, p := range a.pending {
+				assert.False(t, a.now().Sub(p.created) > pendingLoginTTL, "an expired login stayed registered")
+			}
+			a.pendingMu.Unlock()
+		})
+	}
 }
 
 func TestTokenAndIdentityDefensiveBranches(t *testing.T) {

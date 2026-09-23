@@ -150,11 +150,7 @@ func (a *AuthServer) Close() {
 		stale = append(stale, p)
 	}
 	a.pendingMu.Unlock()
-	for _, p := range stale {
-		if p.flow != nil {
-			p.flow.Abort()
-		}
-	}
+	a.abortLogins(stale...)
 }
 
 // Routes mounts every auth endpoint on mux. The MCP handler itself is mounted

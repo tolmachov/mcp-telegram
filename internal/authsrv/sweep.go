@@ -39,10 +39,10 @@ func (a *AuthServer) sessionSweeper(ctx context.Context) {
 	}
 }
 
-// runIsolated runs one background maintenance task (a janitor tick, one part
-// of a sweep), isolating everything else from its panic — a store backend
-// bug, a misbehaving LoginFlow.Abort. The panic is logged with its stack and
-// the other tasks, and later ticks, still run.
+// runIsolated runs one maintenance task (a login abort, one part of a sweep),
+// isolating everything else from its panic — a store backend bug, a
+// misbehaving LoginFlow.Abort. The panic is logged with its stack and the
+// other tasks, and later ticks, still run.
 func (a *AuthServer) runIsolated(task string, run func()) {
 	defer func() {
 		if recovered := recover(); recovered != nil {

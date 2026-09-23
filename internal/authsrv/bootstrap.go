@@ -86,29 +86,38 @@ func (a *AuthServer) reservePending(request, ip string) (*pendingLogin, error) {
 	p := &pendingLogin{id: rand.Text(), request: request, created: a.now(), ip: ip}
 
 	a.pendingMu.Lock()
-	a.sweepExpiredLocked(a.now())
+	stale := a.takeExpiredLocked(a.now())
+	err := a.admitLocked(p)
+	a.pendingMu.Unlock()
+	a.abortLogins(stale...)
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// admitLocked registers p unless the registry, or p's IP's share of it, is
+// full. It runs with pendingMu held.
+func (a *AuthServer) admitLocked(p *pendingLogin) error {
 	if len(a.pending) >= maxPendingLogins {
-		a.pendingMu.Unlock()
-		return nil, errTooManyLogins
+		return errTooManyLogins
 	}
 	// Per-IP cap: count this IP's live entries. The registry holds at most
 	// maxPendingLogins (16) entries, so the scan is trivially cheap and needs
 	// no separate counter to keep in sync across every removal path.
-	if ip != "" {
+	if p.ip != "" {
 		perIP := 0
 		for _, e := range a.pending {
-			if e.ip == ip {
+			if e.ip == p.ip {
 				perIP++
 			}
 		}
 		if perIP >= maxPendingLoginsPerIP {
-			a.pendingMu.Unlock()
-			return nil, errTooManyLogins
+			return errTooManyLogins
 		}
 	}
 	a.pending[p.id] = p
-	a.pendingMu.Unlock()
-	return p, nil
+	return nil
 }
 
 // reserveLivePending couples lifecycle admission with registry admission. The
@@ -150,9 +159,7 @@ func (a *AuthServer) lookupPending(id string) (*pendingLogin, bool) {
 	if ok && a.now().Sub(p.created) > pendingLoginTTL {
 		delete(a.pending, id)
 		a.pendingMu.Unlock()
-		if p.flow != nil {
-			p.flow.Abort()
-		}
+		a.abortLogins(p)
 		return nil, false
 	}
 	a.pendingMu.Unlock()
@@ -166,17 +173,14 @@ func (a *AuthServer) removePending(id string) {
 	p, ok := a.pending[id]
 	delete(a.pending, id)
 	a.pendingMu.Unlock()
-	if ok && p.flow != nil {
-		p.flow.Abort()
+	if ok {
+		a.abortLogins(p)
 	}
 }
 
-// sweepExpiredLocked evicts entries past the TTL and aborts their flows. It
-// runs with pendingMu held; calling Abort under the lock is safe because
-// Abort is non-blocking per the LoginFlow contract (it only cancels a
-// context). The two-pass structure (collect, then abort) keeps the abort
-// calls out of the map-iteration loop, not out of the lock.
-func (a *AuthServer) sweepExpiredLocked(now time.Time) {
+// takeExpiredLocked removes the entries past the TTL and returns them for the
+// caller to abort once pendingMu is released. It runs with pendingMu held.
+func (a *AuthServer) takeExpiredLocked(now time.Time) []*pendingLogin {
 	var stale []*pendingLogin
 	for id, p := range a.pending {
 		if now.Sub(p.created) > pendingLoginTTL {
@@ -184,9 +188,17 @@ func (a *AuthServer) sweepExpiredLocked(now time.Time) {
 			stale = append(stale, p)
 		}
 	}
-	for _, p := range stale {
+	return stale
+}
+
+// abortLogins aborts the flows of logins already removed from the registry.
+// Each Abort runs isolated and outside pendingMu, so one that panics neither
+// leaves the registry locked nor keeps the remaining flows from being
+// aborted.
+func (a *AuthServer) abortLogins(logins ...*pendingLogin) {
+	for _, p := range logins {
 		if p.flow != nil {
-			p.flow.Abort()
+			a.runIsolated("login abort", p.flow.Abort)
 		}
 	}
 }
@@ -194,8 +206,9 @@ func (a *AuthServer) sweepExpiredLocked(now time.Time) {
 // sweepExpiredPending is the janitor entry point (and a test seam).
 func (a *AuthServer) sweepExpiredPending() {
 	a.pendingMu.Lock()
-	defer a.pendingMu.Unlock()
-	a.sweepExpiredLocked(a.now())
+	stale := a.takeExpiredLocked(a.now())
+	a.pendingMu.Unlock()
+	a.abortLogins(stale...)
 }
 
 // janitor periodically sweeps expired pending logins until ctx is canceled.
@@ -208,7 +221,7 @@ func (a *AuthServer) janitor(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			a.runIsolated("login janitor", a.sweepExpiredPending)
+			a.sweepExpiredPending()
 		}
 	}
 }
