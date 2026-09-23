@@ -17,6 +17,21 @@ type Peer struct {
 	Chat  tg.ChatClass
 }
 
+// ID returns the bare chat ID the peer was resolved from, the key the
+// Resolver caches it under.
+func (p Peer) ID() int64 {
+	switch in := p.Input.(type) {
+	case *tg.InputPeerUser:
+		return in.UserID
+	case *tg.InputPeerChat:
+		return in.ChatID
+	case *tg.InputPeerChannel:
+		return in.ChannelID
+	default:
+		return 0
+	}
+}
+
 // peerProbe attempts to resolve a bare MTProto ID as one specific peer type.
 // It returns (peer, true, nil) on a match, (_, false, nil) when the ID is
 // definitively not that type (the caller falls through to the next probe), or

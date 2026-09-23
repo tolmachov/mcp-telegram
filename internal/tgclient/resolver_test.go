@@ -264,3 +264,44 @@ func TestWithPeersRefreshesEveryPeer(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, [][2]int64{{1, 1}, {2, 2}}, seen)
 }
+
+// TestWithPeersFromDropsStalePeers verifies a stale answer drops the peers op
+// was given from the cache and runs resolve and op once more.
+func TestWithPeersFromDropsStalePeers(t *testing.T) {
+	var calls atomic.Int32
+	hash := int64(1)
+	r := NewResolver(channelClient(&calls, func() int64 { return hash }))
+	named := Peer{Input: &tg.InputPeerUser{UserID: 9, AccessHash: 90}}
+
+	resolves := 0
+	var seen []int64
+	got, err := WithPeersFrom(r, func() ([]Peer, error) {
+		resolves++
+		peer, err := r.Resolve(t.Context(), 5)
+		return []Peer{peer, named}, err
+	}, func(p []Peer) (int64, error) {
+		h := p[0].Input.(*tg.InputPeerChannel).AccessHash
+		seen = append(seen, h)
+		if h == 1 {
+			hash = 2
+			return 0, tgerr.New(400, "CHANNEL_INVALID")
+		}
+		return h, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), got)
+	assert.Equal(t, []int64{1, 2}, seen)
+	assert.Equal(t, 2, resolves)
+
+	peer, err := r.Resolve(t.Context(), 5)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), peer.Input.(*tg.InputPeerChannel).AccessHash, "the fresh peer replaces the stale one in the cache")
+	assert.Equal(t, int32(2), calls.Load())
+}
+
+func TestPeerID(t *testing.T) {
+	assert.Equal(t, int64(1), Peer{Input: &tg.InputPeerUser{UserID: 1}}.ID())
+	assert.Equal(t, int64(2), Peer{Input: &tg.InputPeerChat{ChatID: 2}}.ID())
+	assert.Equal(t, int64(3), Peer{Input: &tg.InputPeerChannel{ChannelID: 3}}.ID())
+	assert.Zero(t, Peer{Input: &tg.InputPeerSelf{}}.ID())
+}

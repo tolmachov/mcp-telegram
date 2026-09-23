@@ -44,28 +44,28 @@ type FolderSkippedChat struct {
 // folder_peers.go.)
 
 // resolvePeerRef resolves a folder chat reference (a public @username or a
-// numeric chat ID) to an InputPeer of any kind, since folders can hold users,
+// numeric chat ID) to a peer of any kind, since folders can hold users,
 // channels and basic groups alike.
 //
 // A per-chat problem (typo, no shared dialog, invite link) is returned as a
 // non-empty reason string so batch callers can skip that one and keep going. A
 // systemic failure (rate limit, cancellation, dead session) is returned as a
 // non-nil fatal error so callers abort the whole batch instead of masking it.
-func resolvePeerRef(ctx context.Context, peers *tgclient.Resolver, ref string) (peer tg.InputPeerClass, reason string, fatal error) {
+func resolvePeerRef(ctx context.Context, peers *tgclient.Resolver, ref string) (peer tgclient.Peer, reason string, fatal error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
-		return nil, "empty chat reference", nil
+		return tgclient.Peer{}, "empty chat reference", nil
 	}
 	resolved, err := resolveChatRef(ctx, peers, ref)
 	switch {
 	case err == nil:
-		return resolved.Input, "", nil
+		return resolved, "", nil
 	case errors.Is(err, errInviteChatRef):
-		return nil, "is an invite link; join the chat first with JoinChat, then add it by @username or numeric ID", nil
+		return tgclient.Peer{}, "is an invite link; join the chat first with JoinChat, then add it by @username or numeric ID", nil
 	case tgclient.IsSystemic(err):
-		return nil, "", err
+		return tgclient.Peer{}, "", err
 	default:
-		return nil, err.Error(), nil
+		return tgclient.Peer{}, err.Error(), nil
 	}
 }
 
@@ -73,9 +73,9 @@ func resolvePeerRef(ctx context.Context, peers *tgclient.Resolver, ref string) (
 // per-chat skips. It aborts with a non-nil fatal error on a cancelled context
 // or the first systemic resolution failure (see tgclient.IsSystemic), so the
 // caller surfaces it rather than masking it as a successful no-op. Peers that
-// resolve to a form without a bare ID are skipped, so every returned peer is
-// safe to identify with peerBareID.
-func resolveChatRefs(ctx context.Context, resolver *tgclient.Resolver, refs []string) (peers []tg.InputPeerClass, skipped []FolderSkippedChat, fatal error) {
+// resolve to a form without a bare ID are skipped, so every returned peer's
+// Input is safe to identify with peerBareID.
+func resolveChatRefs(ctx context.Context, resolver *tgclient.Resolver, refs []string) (peers []tgclient.Peer, skipped []FolderSkippedChat, fatal error) {
 	for _, ref := range refs {
 		if err := ctx.Err(); err != nil {
 			return nil, skipped, err
@@ -88,13 +88,36 @@ func resolveChatRefs(ctx context.Context, resolver *tgclient.Resolver, refs []st
 			skipped = append(skipped, FolderSkippedChat{Chat: ref, Reason: reason})
 			continue
 		}
-		if _, _, ok := peerBareID(peer); !ok {
+		if _, _, ok := peerBareID(peer.Input); !ok {
 			skipped = append(skipped, FolderSkippedChat{Chat: ref, Reason: "resolved to an unsupported peer form"})
 			continue
 		}
 		peers = append(peers, peer)
 	}
 	return peers, skipped, nil
+}
+
+// resolveFolderChats is the resolve step of tgclient.WithPeersFrom for a
+// folder edit: it resolves refs, records the skipped ones in *skipped, and
+// fails as op on a systemic error.
+func resolveFolderChats(ctx context.Context, resolver *tgclient.Resolver, refs []string, op string, skipped *[]FolderSkippedChat) func() ([]tgclient.Peer, error) {
+	return func() ([]tgclient.Peer, error) {
+		peers, skips, fatal := resolveChatRefs(ctx, resolver, refs)
+		*skipped = skips
+		if fatal != nil {
+			return nil, failed(op, fatal)
+		}
+		return peers, nil
+	}
+}
+
+// peerInputs returns the InputPeers of peers.
+func peerInputs(peers []tgclient.Peer) []tg.InputPeerClass {
+	inputs := make([]tg.InputPeerClass, len(peers))
+	for i, peer := range peers {
+		inputs[i] = peer.Input
+	}
+	return inputs
 }
 
 // applyAdditions adds each peer to the folder's include list, de-duplicating
@@ -345,10 +368,18 @@ func (h *CreateFolderHandler) handle(ctx context.Context, _ *mcp.CallToolRequest
 	}
 	id := nextFolderID(folderIDs(filters))
 
-	peers, skipped, ferr := resolveChatRefs(ctx, h.peers, in.Chats)
-	if ferr != nil {
-		return nil, nil, failed(op, ferr)
+	var skipped []FolderSkippedChat
+	result, err := tgclient.WithPeersFrom(h.peers, resolveFolderChats(ctx, h.peers, in.Chats, op, &skipped), func(peers []tgclient.Peer) (*CreateFolderResult, error) {
+		return h.create(ctx, in, op, id, title, peerInputs(peers), skipped)
+	})
+	if err != nil {
+		return nil, nil, err
 	}
+	return nil, result, nil
+}
+
+// create writes folder id holding peers and the input's category flags.
+func (h *CreateFolderHandler) create(ctx context.Context, in CreateFolderInput, op string, id int, title string, peers []tg.InputPeerClass, skipped []FolderSkippedChat) (*CreateFolderResult, error) {
 	includePeers := make([]tg.InputPeerClass, 0, len(peers))
 	for _, peer := range peers {
 		if !containsPeer(includePeers, peer) {
@@ -356,7 +387,7 @@ func (h *CreateFolderHandler) handle(ctx context.Context, _ *mcp.CallToolRequest
 		}
 	}
 	if len(includePeers) == 0 && !in.hasCategoryInclude() {
-		return nil, nil, failedHint(op, fmt.Errorf("none of the provided chats could be resolved (%s) and no include_* flag was set, so the folder would be empty", formatSkipped(skipped)), "Check the chat references (try ResolveUsername or SearchChats) and retry.")
+		return nil, failedHint(op, fmt.Errorf("none of the provided chats could be resolved (%s) and no include_* flag was set, so the folder would be empty", formatSkipped(skipped)), "Check the chat references (try ResolveUsername or SearchChats) and retry.")
 	}
 
 	filter := &tg.DialogFilter{
@@ -376,11 +407,11 @@ func (h *CreateFolderHandler) handle(ctx context.Context, _ *mcp.CallToolRequest
 	updReq.SetFilter(filter)
 	if _, err := h.client.MessagesUpdateDialogFilter(ctx, updReq); err != nil {
 		if tgerr.Is(err, "DIALOG_FILTERS_TOO_MUCH") {
-			return nil, nil, failedHint(op, err, "You've reached the maximum number of folders. Delete one with DeleteFolder first, or a Telegram Premium subscription raises the limit.")
+			return nil, failedHint(op, err, "You've reached the maximum number of folders. Delete one with DeleteFolder first, or a Telegram Premium subscription raises the limit.")
 		}
-		return nil, nil, failed(op, err)
+		return nil, failed(op, err)
 	}
-	return nil, &CreateFolderResult{
+	return &CreateFolderResult{
 		FolderID:      id,
 		Title:         title,
 		IncludedCount: len(includePeers),
@@ -564,35 +595,42 @@ func editFolderChats(
 	apply func(*tg.DialogFilter, []tg.InputPeerClass) (changed, unchanged []int64),
 ) (changed, unchanged []int64, skipped []FolderSkippedChat, err error) {
 	op := fmt.Sprintf("update folder %d", folderID)
-	filter, err := findEditableFolder(ctx, peers.Client(), folderID, op)
+	stored, err := findEditableFolder(ctx, peers.Client(), folderID, op)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-
-	resolved, skipped, ferr := resolveChatRefs(ctx, peers, chats)
-	if ferr != nil {
-		return nil, nil, nil, failed(op, ferr)
-	}
-
-	changed, unchanged = apply(filter, resolved)
-	if len(changed) == 0 {
-		// Nothing changed. Distinguish a benign no-op (every chat already in the
-		// wanted state) from a total failure (every reference skipped) so the
-		// latter surfaces as an error instead of a successful-looking empty result.
-		if len(unchanged) == 0 && len(skipped) > 0 {
-			return nil, nil, nil, failedHint(op, fmt.Errorf("none of the chats could be %s it: %s", verb, formatSkipped(skipped)), "Verify the references with ResolveUsername or SearchChats.")
+	type edit struct{ changed, unchanged []int64 }
+	done, err := tgclient.WithPeersFrom(peers, resolveFolderChats(ctx, peers, chats, op, &skipped), func(resolved []tgclient.Peer) (edit, error) {
+		// Each attempt edits its own copy, so a retry starts from the folder
+		// as Telegram holds it.
+		filter := *stored
+		filter.PinnedPeers = slices.Clone(stored.PinnedPeers)
+		filter.IncludePeers = slices.Clone(stored.IncludePeers)
+		filter.ExcludePeers = slices.Clone(stored.ExcludePeers)
+		changed, unchanged := apply(&filter, peerInputs(resolved))
+		if len(changed) == 0 {
+			// Nothing changed. Distinguish a benign no-op (every chat already in
+			// the wanted state) from a total failure (every reference skipped) so
+			// the latter surfaces as an error instead of a successful-looking
+			// empty result.
+			if len(unchanged) == 0 && len(skipped) > 0 {
+				return edit{}, failedHint(op, fmt.Errorf("none of the chats could be %s it: %s", verb, formatSkipped(skipped)), "Verify the references with ResolveUsername or SearchChats.")
+			}
+			return edit{changed, unchanged}, nil // skip the write
 		}
-		return changed, unchanged, skipped, nil // skip the write
+		// Only a removal can leave the folder without an inclusion.
+		if !filterHasInclusion(&filter) {
+			return edit{}, failedHint(op, errors.New("removing those chats would leave the folder empty, which Telegram doesn't allow"), "Use DeleteFolder to remove the folder instead.")
+		}
+		updReq := &tg.MessagesUpdateDialogFilterRequest{ID: folderID}
+		updReq.SetFilter(&filter)
+		if _, err := peers.Client().MessagesUpdateDialogFilter(ctx, updReq); err != nil {
+			return edit{}, failed(op, err)
+		}
+		return edit{changed, unchanged}, nil
+	})
+	if err != nil {
+		return nil, nil, nil, err
 	}
-	// Only a removal can leave the folder without an inclusion.
-	if !filterHasInclusion(filter) {
-		return nil, nil, nil, failedHint(op, errors.New("removing those chats would leave the folder empty, which Telegram doesn't allow"), "Use DeleteFolder to remove the folder instead.")
-	}
-
-	updReq := &tg.MessagesUpdateDialogFilterRequest{ID: folderID}
-	updReq.SetFilter(filter)
-	if _, err := peers.Client().MessagesUpdateDialogFilter(ctx, updReq); err != nil {
-		return nil, nil, nil, failed(op, err)
-	}
-	return changed, unchanged, skipped, nil
+	return done.changed, done.unchanged, skipped, nil
 }

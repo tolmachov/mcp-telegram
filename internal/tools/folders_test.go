@@ -191,12 +191,12 @@ func TestResolvePeerRefLocalBranches(t *testing.T) {
 	ctx := context.Background()
 
 	peer, reason, fatal := resolvePeerRef(ctx, nil, "   ")
-	assert.Nil(t, peer)
+	assert.Zero(t, peer)
 	assert.NoError(t, fatal)
 	assert.Equal(t, "empty chat reference", reason)
 
 	peer, reason, fatal = resolvePeerRef(ctx, nil, "https://t.me/+AbCdEf")
-	assert.Nil(t, peer)
+	assert.Zero(t, peer)
 	assert.NoError(t, fatal)
 	assert.Contains(t, reason, "invite link")
 }

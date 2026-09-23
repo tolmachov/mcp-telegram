@@ -211,54 +211,75 @@ func (h *LeaveChatHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, i
 		return errRes, nil, nil
 	}
 
-	peer, err := resolveChatRef(ctx, h.peers, chat)
-	if errors.Is(err, errInviteChatRef) {
+	result, err := tgclient.WithPeersFrom(h.peers, func() ([]tgclient.Peer, error) {
+		peer, err := resolveChatRef(ctx, h.peers, chat)
+		if errors.Is(err, errInviteChatRef) {
+			return nil, err
+		}
+		if err != nil {
+			return nil, failedHint(fmt.Sprintf("resolve %q", chat), err, "The chat may not exist or you may not have access; use SearchChats or GetChats to verify.")
+		}
+		return []tgclient.Peer{peer}, nil
+	}, func(peers []tgclient.Peer) (*LeaveChatResult, error) {
+		return h.leave(ctx, chat, peers[0])
+	})
+	switch {
+	case errors.Is(err, errInviteChatRef):
 		return errResult("LeaveChat does not accept invite links. Pass the chat's @username or numeric ID instead (find it with GetChats or SearchChats)."), nil, nil
-	}
-	if err != nil {
-		return nil, nil, failedHint(fmt.Sprintf("resolve %q", chat), err, "The chat may not exist or you may not have access; use SearchChats or GetChats to verify.")
-	}
-
-	// Reject peers that cannot be left before issuing the mutation.
-	channel, isChannel := peer.Chat.(*tg.Channel)
-	chatPeer, isChat := peer.Input.(*tg.InputPeerChat)
-	if !isChannel && !isChat {
+	case errors.Is(err, errPrivateChat):
 		return errResult(fmt.Sprintf("%q is a private (one-to-one) chat, not a group or channel — there's nothing to leave. Use DeleteMessages or your client to clear the conversation instead.", chat)), nil, nil
+	case err != nil:
+		return nil, nil, err
 	}
-
-	if isChannel {
-		return h.leaveChannel(ctx, chat, channel)
-	}
-	return h.leaveBasicChat(ctx, chat, chatPeer)
+	return nil, result, nil
 }
 
-func (h *LeaveChatHandler) leaveChannel(ctx context.Context, chat string, channel *tg.Channel) (*mcp.CallToolResult, *LeaveChatResult, error) {
-	kind := tgdata.ChannelType(channel)
-	_, err := h.client.ChannelsLeaveChannel(ctx, channel.AsInput())
+// errPrivateChat rejects leaving a one-to-one chat, which has nothing to leave.
+var errPrivateChat = errors.New("a private chat cannot be left")
+
+// leave leaves the group or channel peer names.
+func (h *LeaveChatHandler) leave(ctx context.Context, chat string, peer tgclient.Peer) (*LeaveChatResult, error) {
+	if input, ok := peer.Input.(*tg.InputPeerChannel); ok {
+		return h.leaveChannel(ctx, chat, input, peer.Chat)
+	}
+	if basic, ok := peer.Input.(*tg.InputPeerChat); ok {
+		return h.leaveBasicChat(ctx, chat, basic)
+	}
+	return nil, errPrivateChat
+}
+
+// leaveChannel leaves the channel or supergroup input names; entity, the
+// resolved chat, only classifies it.
+func (h *LeaveChatHandler) leaveChannel(ctx context.Context, chat string, input *tg.InputPeerChannel, entity tg.ChatClass) (*LeaveChatResult, error) {
+	var kind tgdata.ChatType
+	if channel, ok := entity.(*tg.Channel); ok {
+		kind = tgdata.ChannelType(channel)
+	}
+	_, err := h.client.ChannelsLeaveChannel(ctx, &tg.InputChannel{ChannelID: input.ChannelID, AccessHash: input.AccessHash})
 	if err != nil {
 		if tgerr.Is(err, "USER_NOT_PARTICIPANT") {
-			return nil, &LeaveChatResult{Status: statusNotMember, Chat: chat, ChatID: channel.ID, Kind: kind}, nil
+			return &LeaveChatResult{Status: statusNotMember, Chat: chat, ChatID: input.ChannelID, Kind: kind}, nil
 		}
 		if tgerr.Is(err, "USER_CREATOR") {
-			return nil, nil, failedHint(fmt.Sprintf("leave %q", chat), err, "You are its owner: transfer ownership or delete the channel instead.")
+			return nil, failedHint(fmt.Sprintf("leave %q", chat), err, "You are its owner: transfer ownership or delete the channel instead.")
 		}
-		return nil, nil, failed(fmt.Sprintf("leave %q", chat), err)
+		return nil, failed(fmt.Sprintf("leave %q", chat), err)
 	}
-	return nil, &LeaveChatResult{Status: statusLeft, Chat: chat, ChatID: channel.ID, Kind: kind}, nil
+	return &LeaveChatResult{Status: statusLeft, Chat: chat, ChatID: input.ChannelID, Kind: kind}, nil
 }
 
-func (h *LeaveChatHandler) leaveBasicChat(ctx context.Context, chat string, p *tg.InputPeerChat) (*mcp.CallToolResult, *LeaveChatResult, error) {
+func (h *LeaveChatHandler) leaveBasicChat(ctx context.Context, chat string, p *tg.InputPeerChat) (*LeaveChatResult, error) {
 	_, err := h.client.MessagesDeleteChatUser(ctx, &tg.MessagesDeleteChatUserRequest{
 		ChatID: p.ChatID,
 		UserID: &tg.InputUserSelf{},
 	})
 	if err != nil {
 		if tgerr.Is(err, "USER_NOT_PARTICIPANT") {
-			return nil, &LeaveChatResult{Status: statusNotMember, Chat: chat, ChatID: p.ChatID, Kind: tgdata.ChatTypeGroup}, nil
+			return &LeaveChatResult{Status: statusNotMember, Chat: chat, ChatID: p.ChatID, Kind: tgdata.ChatTypeGroup}, nil
 		}
-		return nil, nil, failed(fmt.Sprintf("leave %q", chat), err)
+		return nil, failed(fmt.Sprintf("leave %q", chat), err)
 	}
-	return nil, &LeaveChatResult{Status: statusLeft, Chat: chat, ChatID: p.ChatID, Kind: tgdata.ChatTypeGroup}, nil
+	return &LeaveChatResult{Status: statusLeft, Chat: chat, ChatID: p.ChatID, Kind: tgdata.ChatTypeGroup}, nil
 }
 
 // classifyChatRef determines how a chat reference string should be interpreted:
@@ -307,10 +328,8 @@ var errInviteChatRef = errors.New("invite links name no chat until joined")
 // or a numeric chat ID — to the peer of whatever it names: a user, basic group
 // or channel, with its entity. Invite links are rejected with errInviteChatRef.
 //
-// A numeric ID goes through the resolver but without the stale-hash retry of
-// tgclient.WithPeer, which has to wrap the RPC that uses the peer: these
-// callers (LeaveChat, the folder tools) issue theirs later, over peers mixed
-// with username resolutions, so a stale cached hash fails that call.
+// Callers run it as the resolve step of tgclient.WithPeersFrom around the RPC
+// that uses the peer, so a stale cached hash is dropped and re-resolved.
 func resolveChatRef(ctx context.Context, peers *tgclient.Resolver, ref string) (tgclient.Peer, error) {
 	kind, value := classifyChatRef(ref)
 	switch kind {
