@@ -64,6 +64,7 @@ type Config struct {
 	// GeminiAPIKey and AnthropicAPIKey read their provider's API key. New
 	// calls only the one the configured provider needs, so a key that is not
 	// used is never read (on darwin, reading one can raise a Keychain prompt).
+	// A nil reader is a key that is not set.
 	GeminiAPIKey    func() (string, error)
 	AnthropicAPIKey func() (string, error)
 	BatchTokens     int // approximate number of tokens per batch for summarization
@@ -98,11 +99,15 @@ func (c Config) providerFor() (func(*mcp.ServerSession) Provider, error) {
 }
 
 // requiredKey reads provider's API key through read, telling a key that is
-// not set apart from one that is stored but could not be read.
+// not set (a nil read among them) apart from one that is stored but could
+// not be read.
 func requiredKey(read func() (string, error), env string, provider ProviderName) (string, error) {
-	key, err := read()
-	if err != nil {
-		return "", fmt.Errorf("the %s API key is unreadable (%w)", provider, err)
+	var key string
+	if read != nil {
+		var err error
+		if key, err = read(); err != nil {
+			return "", fmt.Errorf("the %s API key is unreadable (%w)", provider, err)
+		}
 	}
 	if key == "" {
 		return "", fmt.Errorf("the %s API key is not set: --summarize-provider=%s needs %s, or the key stored with `mcp-telegram config set %s <key>`", provider, provider, env, provider)

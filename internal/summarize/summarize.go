@@ -58,9 +58,12 @@ type ProgressCallback func(current, total int, message string)
 
 // Summarizer runs rolling chat summarization through one configured provider.
 // It holds no per-chat or per-session state, so one instance serves every
-// assembly.
+// assembly. One built by Unavailable fails every call instead.
 type Summarizer struct {
-	name ProviderName
+	// unavailable, when set, is what every Summarize call fails with, and
+	// the other fields are unset.
+	unavailable error
+	name        ProviderName
 	// providerFor returns the provider for one tool call. The direct-LLM
 	// providers are built once and ignore the session; sampling is a
 	// per-session operation, so it binds to the session of the call.
@@ -80,7 +83,15 @@ func New(cfg Config) (*Summarizer, error) {
 	return &Summarizer{name: cfg.Provider, providerFor: providerFor, batchTokens: cfg.BatchTokens}, nil
 }
 
-// ProviderName reports which provider this summarizer uses.
+// Unavailable returns a Summarizer whose every Summarize call fails with err:
+// summarisation is optional, so a configuration New rejects disables it
+// without failing anything else.
+func Unavailable(err error) *Summarizer {
+	return &Summarizer{unavailable: err}
+}
+
+// ProviderName reports which provider this summarizer uses; empty for one
+// built by Unavailable.
 func (s *Summarizer) ProviderName() ProviderName { return s.name }
 
 // Result includes provenance and degradation state for a bounded operation.
@@ -97,6 +108,9 @@ type Result struct {
 // or batch fails. session is the MCP session of the tool call (sampling
 // summarizes through it).
 func (s *Summarizer) Summarize(ctx context.Context, session *mcp.ServerSession, msgProvider *messages.Provider, chatID int64, goal string, since time.Time, maxMessages int, onProgress ProgressCallback) (Result, error) {
+	if s.unavailable != nil {
+		return Result{}, s.unavailable
+	}
 	// Fetch up to maxMessages messages since the given time.
 	opts := messages.FetchOptions{
 		Limit:    batchSize,

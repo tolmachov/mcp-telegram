@@ -94,11 +94,9 @@ type Server struct {
 	logger *slog.Logger
 	opts   Options
 
-	// summarizer serves SummarizeChat; summarizeErr is why opts.Summarize
-	// could not build one, which SummarizeChat reports (see
-	// summarizeUnavailable).
-	summarizer   *summarize.Summarizer
-	summarizeErr error
+	// summarizer serves SummarizeChat: built from opts.Summarize or, when
+	// that is misconfigured, one that reports why (see summarizeUnavailable).
+	summarizer *summarize.Summarizer
 
 	// openLocalSession opens the stored session of the single local account
 	// (the Keychain on darwin, the state-directory file elsewhere). New points
@@ -173,26 +171,25 @@ func New(opts Options) (*Server, error) {
 		}
 		return running, nil
 	}
-	srv.summarizer, srv.summarizeErr = summarize.New(opts.Summarize)
-	if srv.summarizeErr != nil {
-		logger.Warn("summarisation is misconfigured; SummarizeChat reports it and every other tool works", "err", srv.summarizeErr)
+	srv.summarizer, err = summarize.New(opts.Summarize)
+	if err != nil {
+		logger.Warn("summarisation is misconfigured; SummarizeChat reports it and every other tool works", "err", err)
+		srv.summarizer = summarize.Unavailable(summarizeUnavailable(opts.Transport, err))
 	}
 	srv.authProbeFn = srv.authProbe
 	return srv, nil
 }
 
 // summarizeUnavailable is what SummarizeChat fails with when summarisation is
-// misconfigured, or nil: the startup error and its fix. The settings are read
-// once, at startup, so the fix ends with the process reading them again.
-func (s *Server) summarizeUnavailable() error {
-	if s.summarizeErr == nil {
-		return nil
-	}
+// misconfigured: the startup error err and its fix on transport. The settings
+// are read once, at startup, so the fix ends with the process reading them
+// again.
+func summarizeUnavailable(transport string, err error) error {
 	reload := "reconnect this MCP server so it reads them again (in Claude Code: /mcp → select this server → Reconnect)"
-	if s.opts.Transport == TransportHTTP {
+	if transport == TransportHTTP {
 		reload = "restart the server so it reads them again"
 	}
-	return fmt.Errorf("summarisation is not available, as its settings were invalid at startup: %w. Fix the setting named — a flag or MCP_SUMMARIZE_* environment variable in this server's configuration, or an API key stored with `mcp-telegram config set` — then %s", s.summarizeErr, reload)
+	return fmt.Errorf("summarisation is not available, as its settings were invalid at startup: %w. Fix the setting named — a flag or MCP_SUMMARIZE_* environment variable in this server's configuration, or an API key stored with `mcp-telegram config set` — then %s", err, reload)
 }
 
 // Run starts the MCP server on the configured transport (stdio, or streamable
@@ -629,7 +626,7 @@ func (s *Server) buildHandlers(api *tg.Client, peers *tgclient.Resolver, msgProv
 		tools.NewGetForumTopicsHandler(msgProvider),
 		tools.NewUsernameResolveHandler(api),
 		tools.NewMessageLinkResolveHandler(api),
-		tools.NewChatSummarizeHandler(msgProvider, s.summarizer, s.summarizeUnavailable()),
+		tools.NewChatSummarizeHandler(msgProvider, s.summarizer),
 		tools.NewMediaGetHandler(api, s.opts.MediaMaxBytes),
 		tools.NewGetFoldersHandler(api),
 	}

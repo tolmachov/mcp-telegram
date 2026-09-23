@@ -477,17 +477,14 @@ func TestSummarizeMisconfigurationDisablesOnlySummarizeChat(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, logs.String(), "level=WARN")
 	assert.Contains(t, logs.String(), "the gemini API key is not set")
+	tgClient := newFakeClient()
+	srv.connectLocal = func(context.Context) (telegramClient, error) { return tgClient, nil }
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- srv.serveAssembly(t.Context(), newFakeClient()) }()
+	go func() { errCh <- srv.Run(t.Context()) }()
 	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil).
 		Connect(t.Context(), &mcp.IOTransport{Reader: clientR, Writer: clientW}, nil)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = cs.Close()
-		_ = clientW.Close()
-		<-errCh
-	})
 
 	listed, err := cs.ListTools(t.Context(), &mcp.ListToolsParams{})
 	require.NoError(t, err)
@@ -504,13 +501,27 @@ func TestSummarizeMisconfigurationDisablesOnlySummarizeChat(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, res.IsError)
 	text := res.Content[0].(*mcp.TextContent).Text
-	assert.Contains(t, text, "Failed to summarize chat: summarisation is not available")
+	assert.Contains(t, text, "Failed to summarize chat 1: summarisation is not available")
 	assert.Contains(t, text, "the gemini API key is not set")
 	assert.Contains(t, text, "MCP_SUMMARIZE_GEMINI_API_KEY")
 	assert.Contains(t, text, "Reconnect")
 
-	srv.opts.Transport = TransportHTTP
-	assert.ErrorContains(t, srv.summarizeUnavailable(), "restart the server")
+	res, err = cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "GetMe", Arguments: map[string]any{}})
+	require.NoError(t, err)
+	require.False(t, res.IsError, "every other tool works")
+	assert.Contains(t, res.Content[0].(*mcp.TextContent).Text, fakeSelf)
+
+	require.NoError(t, cs.Close())
+	_ = clientW.Close()
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return after the host disconnected")
+	}
+	assert.True(t, tgClient.isClosed(), "Run disconnects the client once the host leaves")
+
+	assert.ErrorContains(t, summarizeUnavailable(TransportHTTP, errors.New("bad")), "restart the server")
 }
 
 // blockingSession parks LoadSession until the client's own context ends, so

@@ -16,20 +16,16 @@ import (
 type ChatSummarizeHandler struct {
 	msgProvider *messages.Provider
 	summarizer  *summarize.Summarizer
-	// unavailable is why summarizer could not be built; every call then
-	// fails with it.
-	unavailable error
 }
 
-// NewChatSummarizeHandler creates a new ChatSummarizeHandler. unavailable is
-// non-nil, and summarizer nil, when summarisation is misconfigured: the tool
-// stays registered and every call reports unavailable, so the other tools keep
-// working.
-func NewChatSummarizeHandler(msgProvider *messages.Provider, summarizer *summarize.Summarizer, unavailable error) *ChatSummarizeHandler {
+// NewChatSummarizeHandler creates a new ChatSummarizeHandler. When
+// summarisation is misconfigured, summarizer is one built by
+// summarize.Unavailable: the tool stays registered and every call reports
+// why, so the other tools keep working.
+func NewChatSummarizeHandler(msgProvider *messages.Provider, summarizer *summarize.Summarizer) *ChatSummarizeHandler {
 	return &ChatSummarizeHandler{
 		msgProvider: msgProvider,
 		summarizer:  summarizer,
-		unavailable: unavailable,
 	}
 }
 
@@ -90,9 +86,6 @@ func (h *ChatSummarizeHandler) Register(s *mcp.Server) {
 }
 
 func (h *ChatSummarizeHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in SummarizeChatInput) (*mcp.CallToolResult, *SummarizeChatResult, error) {
-	if h.unavailable != nil {
-		return nil, nil, failed("summarize chat", h.unavailable)
-	}
 	if in.ChatID == 0 {
 		return errChatIDRequired(), nil, nil
 	}

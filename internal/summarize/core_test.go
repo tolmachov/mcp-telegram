@@ -54,6 +54,8 @@ func TestNewValidatesConfig(t *testing.T) {
 		{"gemini", Config{Provider: ProviderGemini, BatchTokens: 1, GeminiAPIKey: key("test-key"), AnthropicAPIKey: unread(t)}, ""},
 		{"gemini missing key", Config{Provider: ProviderGemini, BatchTokens: 1, GeminiAPIKey: key("")}, "the gemini API key is not set: --summarize-provider=gemini needs MCP_SUMMARIZE_GEMINI_API_KEY"},
 		{"gemini key unreadable", Config{Provider: ProviderGemini, BatchTokens: 1, GeminiAPIKey: func() (string, error) { return "", readErr }}, "keychain access denied"},
+		{"gemini no key reader", Config{Provider: ProviderGemini, BatchTokens: 1}, "the gemini API key is not set"},
+		{"anthropic no key reader", Config{Provider: ProviderAnthropic, BatchTokens: 1}, "the anthropic API key is not set"},
 		{"ollama", Config{Provider: ProviderOllama, BatchTokens: 1, OllamaURL: "http://localhost:11434", GeminiAPIKey: unread(t), AnthropicAPIKey: unread(t)}, ""},
 		{"ollama missing url", Config{Provider: ProviderOllama, BatchTokens: 1}, "OLLAMA_URL is required"},
 		{"anthropic", Config{Provider: ProviderAnthropic, BatchTokens: 1, AnthropicAPIKey: key("test-key"), GeminiAPIKey: unread(t)}, ""},
@@ -267,4 +269,12 @@ func TestKeyErrorsTellUnsetFromUnreadable(t *testing.T) {
 		AnthropicAPIKey: func() (string, error) { return "", nil },
 	})
 	assert.ErrorContains(t, err, "the anthropic API key is not set")
+}
+
+// TestUnavailableFailsEveryCall pins that a summarizer standing in for a
+// rejected configuration fails with the reason before touching Telegram.
+func TestUnavailableFailsEveryCall(t *testing.T) {
+	reason := errors.New("the gemini API key is not set")
+	_, err := Unavailable(reason).Summarize(t.Context(), nil, nil, 1, "recap", time.Time{}, 10, nil)
+	assert.ErrorIs(t, err, reason)
 }
