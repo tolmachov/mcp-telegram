@@ -32,7 +32,7 @@ type SummarizeChatInput struct {
 	ChatID      int64  `json:"chat_id" jsonschema:"The chat ID to summarize"`
 	Goal        string `json:"goal" jsonschema:"What you want from the summary. Examples: 'key points and decisions'\\, 'extract all action items and deadlines'\\, 'analyze sentiment and mood'\\, 'identify top 5 discussed topics'\\, 'create meeting minutes'"`
 	Period      string `json:"period,omitempty" jsonschema:"Time period to look back over (default: 'month')"`
-	Since       string `json:"since,omitempty" jsonschema:"Date in YYYY-MM-DD or RFC3339 format to start from (alternative to period\\, e.g.\\, '2024-01-15')"`
+	Since       string `json:"since,omitempty" jsonschema:"Date to start from (alternative to period): YYYY-MM-DD or YYYY-MM-DD HH:MM:SS in UTC\\, or RFC3339\\, e.g. '2024-01-15'"`
 }
 
 const (

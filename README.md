@@ -326,9 +326,9 @@ resolve as CLI flags → process environment → defaults. The binary never read
 | `MCP_SUMMARIZE_OLLAMA_URL` | Ollama API URL | `http://localhost:11434` |
 | `MCP_SUMMARIZE_GEMINI_API_KEY` | Google Gemini API key | - |
 | `MCP_SUMMARIZE_ANTHROPIC_API_KEY` | Anthropic API key | - |
-| `MCP_TELEGRAM_MEDIA_MAX_BYTES` | Max bytes `GetMedia` downloads | `52428800` |
+| `MCP_TELEGRAM_MEDIA_MAX_BYTES` | Max bytes `GetMedia` downloads; `0` or less removes the cap | `52428800` |
 | `MCP_TELEGRAM_RATE_LIMIT_RPS` | Telegram history RPS ceiling (must be positive) | `1` |
-| `MCP_TELEGRAM_PINNED_REFRESH_SECONDS` | Pinned resource polling interval | `30` |
+| `MCP_TELEGRAM_PINNED_REFRESH_SECONDS` | Pinned resource polling interval; `0` disables the watcher | `30` |
 | `MCP_TELEGRAM_FLOOD_WAIT_MAX_SECONDS` | Maximum handled `FLOOD_WAIT` (must be positive) | `60` |
 | `MCP_VARIANT` | Pin `full`, `compact`, or `research`; empty enables negotiation | empty |
 | `MCP_TRANSPORT` | MCP transport: `stdio` or `http` (streamable HTTP) | `stdio` |

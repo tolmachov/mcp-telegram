@@ -249,7 +249,7 @@ func HTTPAddrFlag() *cli.StringFlag {
 func AuthIssuerURLFlag() *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:    AuthIssuerURL,
-		Usage:   "Public base URL of this server (OAuth issuer). Required for the HTTP transport.",
+		Usage:   "Public base URL of this server (OAuth issuer), without a trailing slash. Required for the HTTP transport.",
 		Sources: cli.EnvVars("MCP_AUTH_ISSUER_URL"),
 	}
 }

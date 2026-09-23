@@ -23,26 +23,37 @@ context loading); admin and posting features are secondary. Two transports:
 - `internal/tgclient`, `internal/sessionstore`, `internal/secret`, `internal/config` —
   Telegram client and credential/session storage: macOS Keychain on darwin,
   file store in `*_other.go` (`//go:build !darwin`).
+- `internal/keyring` — the `MCP_AUTH_TOKEN_KEYS` master keys shared by the token
+  sealer and the session cipher; `internal/keyedlimit` — per-key token-bucket
+  limiter (auth endpoints, user pool); `internal/xdg` — state directory, atomic
+  file writes and the file-backed gotd session.
+- `internal/tgid`, `internal/presentation`, `internal/logging`, `internal/flags` —
+  shared id type, MCP-facing formats, the slog handler, CLI flags.
 - `internal/summarize`, `internal/prompts`, `internal/resources`, `internal/completion`.
+- `internal/testutil/telegram` — the scripted Telegram RPC fake for tests.
 - `test/` — integration tests (build tag `integration`).
 
 ## Adding a tool
 
 1. New file in `internal/tools`: an input struct (descriptions go in `jsonschema`
    tags; closed value sets via `inputSchemaWithEnums`) and a `Register` method.
-2. Register with `tools.AddTool`, not `mcp.AddTool` — it keeps error results from
-   reaching the client as an empty structured output. Use `tools.AddContentTool`
-   only for tools with no typed output (e.g. `GetMedia`).
-3. Return `errResult` only for input validation. Return every other failure as
+2. Register with `tools.AddTool` — never plain `mcp.AddTool`: it keeps error
+   results from reaching the client as an empty structured output. Use
+   `tools.AddContentTool` only for tools with no typed output (e.g. `GetMedia`).
+3. A tool that takes a chat ID takes the assembly's `*tgclient.Resolver` and
+   wraps the RPC that uses the peer in `tgclient.WithPeer` (`WithPeers`,
+   `WithPeersFrom` for several or for @usernames mixed with IDs): that is where
+   a stale access hash is dropped from the cache and the call retried.
+4. Return `errResult` only for input validation. Return every other failure as
    the handler's Go error via `failed(op, err)` / `failedHint`: the registration
    helpers classify it (dead session, flood wait, unresolved chat), render the
    text the model sees and log it under the tool's name.
-4. Add the handler to `buildHandlers` in `internal/server/server.go`: `research`
+5. Add the handler to `buildHandlers` in `internal/server/server.go`: `research`
    for read-only tools, `mutating` for anything that changes state. The split
    drives the server variants (see README "Server Variants").
-5. Make the first sentence of `Description` self-contained: the `compact` and
+6. Make the first sentence of `Description` self-contained: the `compact` and
    `research` variants keep only that sentence.
-6. Update the tool list and tool counts in README.md.
+7. Update the tool list and tool counts in README.md.
 
 ## Commands
 
@@ -64,13 +75,20 @@ make fmt               # golangci-lint fmt
   golangci-lint v2.12.2).
 - **Manual `run` can hang silently.** A zero-log hang usually means another
   process holds the same Telegram session — kill strays before blaming the change.
+- **Startup failures don't exit over stdio.** A missing configuration, a refused
+  session or an invalid summarisation setting goes through `startBlocked`
+  (`internal/server/server.go`): over stdio it serves a login-required server
+  whose tool explains the problem; over HTTP or on a TTY it exits with the
+  message. Route a new startup check the same way. Once running, a client whose
+  session Telegram refuses stops itself: over stdio every tool call then says
+  why, over HTTP the pool deletes the session and forces a re-login.
 
 ## Conventions
 
 - British English in code and comments; `.golangci.yml` whitelists the spellings
   for `misspell`.
 - Wrap errors (`wrapcheck`, `errorlint` are enabled).
-- Destructive tools take a `confirm` input and go through `confirmDestructive`
-  (`internal/tools/tools.go`).
+- Destructive tools take a `confirm` input and go through
+  `requireExplicitConfirmation` (`internal/tools/tools.go`).
 - Single-user project: no migrations or backwards-compat shims. Remove old paths,
   aliases and fallbacks together with their replacement.

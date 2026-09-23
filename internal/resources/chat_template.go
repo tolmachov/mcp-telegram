@@ -21,7 +21,7 @@ import (
 var chatInfoTemplate = uritemplate.MustNew("telegram://chats/{chat_id}/info")
 
 // RegisterChatTemplate registers a URI template that exposes any chat as a
-// browsable MCP resource at telegram://chats/{id}/info. Per MCP spec, resource
+// browsable MCP resource at telegram://chats/{chat_id}/info. Per MCP spec, resource
 // templates let one registration serve many URIs — instead of registering one
 // resource per chat, the host can construct any URI matching the template and
 // the server fetches the data on demand.

@@ -24,7 +24,7 @@ func NewGetForumTopicsHandler(provider *messages.Provider) *ForumTopicsGetHandle
 // GetForumTopicsInput is the input for the GetForumTopics tool.
 type GetForumTopicsInput struct {
 	ChatID int64  `json:"chat_id,omitempty" jsonschema:"Required on the first page; omit when passing cursor. The forum supergroup ID whose topics to list"`
-	Query  string `json:"query,omitempty" jsonschema:"Optional case-insensitive filter on topic title. Leave empty to list all topics."`
+	Query  string `json:"query,omitempty" jsonschema:"Optional case-insensitive filter on topic title. Omit to list all topics."`
 	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum number of topics to return (default 100\\, max 100)."`
 	Cursor string `json:"cursor,omitempty" jsonschema:"Opaque pagination cursor. Copy next_cursor from a previous response and omit every other field."`
 }

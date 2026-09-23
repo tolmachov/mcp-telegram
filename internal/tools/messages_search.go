@@ -41,7 +41,7 @@ type SearchMessagesInput struct {
 	FromDate        string `json:"from_date,omitempty" jsonschema:"RFC3339 lower bound (inclusive). Wired to Telegram's native min_date (inclusive)."`
 	ToDate          string `json:"to_date,omitempty" jsonschema:"RFC3339 exclusive upper bound. Wired to Telegram's native max_date (strictly less-than). To include a full day\\, pass midnight of the following day\\, e.g. 2026-04-11T00:00:00Z to include all of 2026-04-10."`
 	FromSenderID    int64  `json:"from_sender_id,omitempty" jsonschema:"Numeric peer ID of a sender to filter by (e.g. from ResolveUsername or GetChatInfo). Only returns messages authored by this user/channel."`
-	MediaType       string `json:"media_type,omitempty" jsonschema:"Optional message-type filter. Leave empty for plain text search."`
+	MediaType       string `json:"media_type,omitempty" jsonschema:"Optional message-type filter. Omit for plain text search."`
 	TopMsgID        string `json:"top_msg_id,omitempty" jsonschema:"Opaque regular-message handle of a forum topic or reply thread root. When set\\, results are restricted to that thread."`
 }
 
