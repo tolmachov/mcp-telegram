@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -446,10 +447,12 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 	return asm, nil
 }
 
-// clientDownMiddleware answers tool calls and resource reads with
-// clientDownText once the assembly's Telegram client has stopped: a call
-// arriving afterwards never reaches Telegram, and a call that failed because
-// the client stopped under it gets the same answer instead of its raw error.
+// clientDownMiddleware tells tool calls and resource reads why the assembly's
+// Telegram client has stopped. A call arriving afterwards never reaches
+// Telegram and is answered with clientDownText alone. A call that ran and
+// failed while the client stopped under it keeps its own outcome — the real
+// cause and any note, such as the partial file a backup saved — with
+// clientDownText appended.
 func (s *Server) clientDownMiddleware(client telegramClient) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
@@ -461,7 +464,7 @@ func (s *Server) clientDownMiddleware(client telegramClient) mcp.Middleware {
 			}
 			res, err := next(ctx, method, req)
 			if down := client.Err(); down != nil && callFailed(res, err) {
-				return clientDownResult(method, s.clientDownText(down))
+				return withClientDown(res, err, s.clientDownText(down))
 			}
 			return res, err
 		}
@@ -485,6 +488,17 @@ func clientDownResult(method, text string) (mcp.Result, error) {
 		return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil
 	}
 	return nil, errors.New(text)
+}
+
+// withClientDown appends text to a failed outcome (see callFailed): to the
+// error of a failed call, or as a further text block of a tool error.
+func withClientDown(res mcp.Result, err error, text string) (mcp.Result, error) {
+	if err != nil {
+		return res, fmt.Errorf("%w %s", err, text)
+	}
+	tr := *res.(*mcp.CallToolResult)
+	tr.Content = append(slices.Clip(tr.Content), &mcp.TextContent{Text: text})
+	return &tr, nil
 }
 
 // clientDownText says why an assembly's Telegram client stopped and what

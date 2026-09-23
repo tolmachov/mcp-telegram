@@ -162,9 +162,9 @@ func TestStdioRefusedSessionEntersLoginRequiredState(t *testing.T) {
 }
 
 // TestClientDownMiddlewareAnswersForAStoppedClient pins both halves of the
-// middleware: a call that fails because the client stopped under it gets the
-// transport's answer instead of its raw error, a call that succeeded anyway
-// keeps its result, and later calls never reach the handler.
+// middleware: a call that fails because the client stopped under it keeps its
+// own outcome with the transport's answer appended, a call that succeeded
+// anyway keeps its result, and later calls never reach the handler.
 func TestClientDownMiddlewareAnswersForAStoppedClient(t *testing.T) {
 	refused := fmt.Errorf("%w: %w", tgclient.ErrSessionUnauthorized, tgerr.New(401, "AUTH_KEY_UNREGISTERED"))
 	for _, transport := range []string{TransportStdio, TransportHTTP} {
@@ -172,14 +172,31 @@ func TestClientDownMiddlewareAnswersForAStoppedClient(t *testing.T) {
 		want := srv.clientDownText(refused)
 		call := &mcp.CallToolRequest{}
 
+		// A backup that stopped part-way reports the file it saved; that
+		// outcome must survive the client going down under it.
+		const backupFailure = "Failed to back up chat 5: fetching batch 2: telegram session is not authorized. The 200 messages fetched before the failure were saved to /tmp/backup.json."
 		tgClient := newFakeClient()
 		failing := srv.clientDownMiddleware(tgClient)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
 			tgClient.stop(refused)
-			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "Failed to get current user: AUTH_KEY_UNREGISTERED"}}}, nil
+			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: backupFailure}}}, nil
 		})
 		res, err := failing(t.Context(), methodCallTool, call)
 		require.NoError(t, err)
-		assert.Equal(t, want, res.(*mcp.CallToolResult).Content[0].(*mcp.TextContent).Text, transport)
+		tr := res.(*mcp.CallToolResult)
+		assert.True(t, tr.IsError)
+		require.Len(t, tr.Content, 2, transport)
+		assert.Equal(t, backupFailure, tr.Content[0].(*mcp.TextContent).Text, "the call's own outcome is kept")
+		assert.Equal(t, want, tr.Content[1].(*mcp.TextContent).Text, transport)
+
+		tgClient = newFakeClient()
+		readErr := errors.New("reading telegram://me: telegram session is not authorized")
+		failingRead := srv.clientDownMiddleware(tgClient)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
+			tgClient.stop(refused)
+			return nil, readErr
+		})
+		_, err = failingRead(t.Context(), methodReadResource, &mcp.ReadResourceRequest{})
+		require.ErrorIs(t, err, readErr, "the read's own error is kept")
+		assert.ErrorContains(t, err, want)
 
 		tgClient = newFakeClient()
 		succeeded := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "done"}}}
@@ -197,7 +214,9 @@ func TestClientDownMiddlewareAnswersForAStoppedClient(t *testing.T) {
 		})
 		res, err = unreachable(t.Context(), methodCallTool, call)
 		require.NoError(t, err)
-		assert.Equal(t, want, res.(*mcp.CallToolResult).Content[0].(*mcp.TextContent).Text, transport)
+		tr = res.(*mcp.CallToolResult)
+		require.Len(t, tr.Content, 1, "a call that never ran has only the client-down answer")
+		assert.Equal(t, want, tr.Content[0].(*mcp.TextContent).Text, transport)
 	}
 }
 
