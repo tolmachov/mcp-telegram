@@ -302,6 +302,27 @@ func TestUserPoolRefusedAtBuildDeletesSessionAnd401s(t *testing.T) {
 	}
 }
 
+// TestUserPoolBoundsTheRefusedSessionDelete pins that deleting a refused
+// session runs under sessionDropTimeout, so a stalled store still lets the
+// request's 401 through, and that a failed delete does not change the answer.
+func TestUserPoolBoundsTheRefusedSessionDelete(t *testing.T) {
+	var bounded bool
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+		return builtAssembly{}, fmt.Errorf("connecting: %w", tgclient.ErrSessionUnauthorized)
+	}, func(ctx context.Context, _ tgid.UserID, _ string) error {
+		deadline, ok := ctx.Deadline()
+		bounded = ok && time.Until(deadline) <= sessionDropTimeout
+		return errors.New("bucket unavailable")
+	}, testWWWAuthenticate, discardLogger())
+
+	if rec := poolRequestSID(t, pool, 7, "dead"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+	if !bounded {
+		t.Error("the delete must run under a deadline no later than sessionDropTimeout")
+	}
+}
+
 func TestUserPoolBuildFailureNotCached(t *testing.T) {
 	var builds atomic.Int64
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {

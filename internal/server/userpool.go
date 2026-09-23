@@ -52,6 +52,9 @@ const (
 	// single janitor timer handles every deadline; entries never create
 	// competing time.AfterFunc callbacks.
 	userPoolEvictGrace = time.Minute
+	// sessionDropTimeout bounds deleting a refused session, which runs on the
+	// request path before its 401 is sent.
+	sessionDropTimeout = 10 * time.Second
 	initializeBurst    = 3
 )
 
@@ -357,10 +360,14 @@ func (p *userPool) runBuild(e *userEntry, user *authsrv.UserIdentity) (retErr er
 // dropRefusedSession deletes a stored session Telegram refused, whether it
 // refused it while a client was starting on it or in reply to a call on a
 // running one, so its refresh grants stop treating the user as logged in.
-// Other sessions of the same account are untouched.
+// Other sessions of the same account are untouched. The delete is bounded by
+// sessionDropTimeout, so a stalled store cannot hold back the 401 the request
+// is waiting to send.
 func (p *userPool) dropRefusedSession(key poolKey, reason error) {
 	p.logger.Warn("telegram refused the stored session; deleting it", "user", key.id, "session", key.sid, "reason", reason)
-	if err := p.dropSession(p.baseCtx, key.id, key.sid); err != nil {
+	ctx, cancel := context.WithTimeout(p.baseCtx, sessionDropTimeout)
+	defer cancel()
+	if err := p.dropSession(ctx, key.id, key.sid); err != nil {
 		p.logger.Error("failed to delete refused session; refresh grants may loop until it is removed", "user", key.id, "session", key.sid, "err", err)
 	}
 }
