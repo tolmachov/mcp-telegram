@@ -11,17 +11,25 @@ import (
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
+	"golang.org/x/sync/singleflight"
 )
 
+// sessionError turns a refusal that ended the client's Run loop — a reply of
+// the home DC — into the ErrSessionUnauthorized verdict, keeping its cause.
 func sessionError(err error) error {
-	if IsSessionUnauthorized(err) && !errors.Is(err, ErrSessionUnauthorized) {
+	if isSessionRefusal(err) && !errors.Is(err, ErrSessionUnauthorized) {
 		return fmt.Errorf("%w: %w", ErrSessionUnauthorized, err)
 	}
 	return err
 }
 
-// startClientTimeout bounds the connect + auth-status readiness handshake.
-const startClientTimeout = 30 * time.Second
+const (
+	// startClientTimeout bounds the connect + auth-status readiness handshake.
+	startClientTimeout = 30 * time.Second
+	// refusalCheckTimeout bounds one home-DC check of a refused call (see
+	// Running.confirmRefusal).
+	refusalCheckTimeout = 20 * time.Second
+)
 
 var (
 	// errClosed is why a client stopped when Close stopped it.
@@ -38,8 +46,14 @@ type Running struct {
 	api  *tg.Client
 	self *tg.User
 
-	cancel context.CancelFunc
-	done   chan struct{}
+	// lifetime ends when the client stops; refusal checks run on it.
+	lifetime context.Context
+	cancel   context.CancelFunc
+	done     chan struct{}
+	logger   *slog.Logger
+	// checks collapses the refusal checks of concurrently refused calls
+	// into one.
+	checks singleflight.Group
 
 	mu sync.Mutex
 	// err is why the client stopped serving; nil while it serves.
@@ -60,11 +74,11 @@ type Running struct {
 // finding out. gotd logs through logger at Warn and above.
 func StartClient(ctx context.Context, cfg *Config, storage session.Storage, logger *slog.Logger, onFloodWait FloodWaitCallback) (*Running, error) {
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	r := &Running{cancel: cancel, done: make(chan struct{})}
+	r := &Running{lifetime: runCtx, cancel: cancel, done: make(chan struct{}), logger: logger}
 	client, run := newClient(cfg, storage, onFloodWait, telegram.Options{
 		Logger:      gotdLogger(logger),
 		OnDead:      r.connDead,
-		Middlewares: []telegram.Middleware{refusalWatch(r.refused)},
+		Middlewares: []telegram.Middleware{refusalWatch(r.confirmRefusal)},
 	})
 	r.api = client.API()
 
@@ -96,9 +110,9 @@ func StartClient(ctx context.Context, cfg *Config, storage session.Storage, logg
 	}()
 
 	// readiness turns the callback's report into StartClient's answer. A
-	// failed report goes through stop, so a refusal already recorded by
+	// failed report goes through stop, so a refusal already confirmed through
 	// refusalWatch — the auth check's own call can be the one Telegram
-	// refused — outranks the error the interrupted check then returns.
+	// refused — outranks the bare verdict the check then reports.
 	readiness := func(err error) (*Running, error) {
 		if err != nil {
 			r.stop(sessionError(err))
@@ -149,10 +163,52 @@ func (r *Running) connDead(err error) {
 	r.connErr = err
 }
 
-// refused stops the client once Telegram has declared its session dead in
-// reply to any call (see refusalWatch).
-func (r *Running) refused(err error) {
-	r.stop(sessionError(err))
+// confirmRefusal decides whether refusal, Telegram's reply to one call, means
+// the session is dead (see refusalWatch). A single reply is not a verdict: a
+// DC other than the home one — where FILE_MIGRATE sends a download — refuses a
+// session whose exported authorisation it never took, while the home DC still
+// accepts it. So the home DC is asked, through next (the invoker below
+// refusalWatch, so the check is not itself watched), who the session belongs
+// to. The check is shared by every call refused while it runs and belongs to
+// none of them: it runs on the client's lifetime bounded by
+// refusalCheckTimeout, and each caller waits on its own ctx.
+//
+// A confirmed refusal stops the client and reaches the caller as
+// ErrSessionUnauthorized wrapping refusal; otherwise the caller gets refusal
+// unchanged and the client keeps serving.
+func (r *Running) confirmRefusal(ctx context.Context, next tg.Invoker, refusal error) error {
+	check := r.checks.DoChan("session", func() (any, error) { return r.checkSession(next, refusal), nil })
+	select {
+	case <-ctx.Done():
+		return refusal
+	case outcome := <-check:
+		if outcome.Val.(bool) {
+			return fmt.Errorf("%w: %w", ErrSessionUnauthorized, refusal)
+		}
+		return refusal
+	}
+}
+
+// checkSession asks the home DC whether it still accepts the session, stops
+// the client when it does not, and reports whether it did.
+func (r *Running) checkSession(next tg.Invoker, refusal error) (dead bool) {
+	ctx, cancel := context.WithTimeout(r.lifetime, refusalCheckTimeout)
+	defer cancel()
+	_, err := tg.NewClient(next).UsersGetUsers(ctx, []tg.InputUserClass{&tg.InputUserSelf{}})
+	switch {
+	case err == nil:
+		r.logger.Warn("Telegram refused a call, but the home DC still accepts the session; keeping the client", "refusal", refusal)
+		return false
+	case isSessionRefusal(err):
+		r.stop(sessionError(err))
+		return true
+	case r.lifetime.Err() != nil:
+		// The client is stopping anyway; there is nothing left to decide.
+		return false
+	default:
+		r.logger.Warn("Telegram refused a call and the home DC could not be asked about the session; keeping the client", "refusal", refusal, "err", err)
+		return false
+	}
 }
 
 // stop records why the client stops serving — the first reason wins — and
@@ -178,8 +234,9 @@ func (r *Running) Self() *tg.User { return r.self }
 func (r *Running) Done() <-chan struct{} { return r.done }
 
 // Err returns nil while the client serves and, from the moment it stops, why:
-// wrapping ErrSessionUnauthorized as soon as Telegram refuses the session in
-// reply to any call, otherwise the error its Run loop ended with.
+// wrapping ErrSessionUnauthorized as soon as the home DC confirms that
+// Telegram refuses the session (see confirmRefusal), otherwise the error its
+// Run loop ended with.
 func (r *Running) Err() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

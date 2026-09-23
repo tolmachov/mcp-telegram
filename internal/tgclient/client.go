@@ -208,17 +208,18 @@ func wrapIf(err error, operation string) error {
 	return fmt.Errorf("%s: %w", operation, err)
 }
 
-// refusalWatch is the one place a client learns that Telegram has declared
-// its session dead: every call's reply passes through it, and a refusal
-// (IsSessionUnauthorized) is reported to onRefused before the call returns
-// it, so the client's owner stops using the session whichever tool, resource
-// or background poller happened to make the call.
-func refusalWatch(onRefused func(error)) telegram.Middleware {
+// refusalWatch is the one place a client learns that Telegram may have
+// declared its session dead: every call's reply passes through it, and a
+// refusal (isSessionRefusal) is handed to confirm together with the invoker
+// below the watch, so the client's owner can check it on the home DC whichever
+// tool, resource or background poller happened to make the call. The call
+// returns what confirm returns.
+func refusalWatch(confirm func(ctx context.Context, next tg.Invoker, refusal error) error) telegram.Middleware {
 	return telegram.MiddlewareFunc(func(next tg.Invoker) telegram.InvokeFunc {
 		return func(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
 			err := next.Invoke(ctx, input, output)
-			if err != nil && IsSessionUnauthorized(err) {
-				onRefused(err)
+			if err != nil && isSessionRefusal(err) {
+				return confirm(ctx, next, err)
 			}
 			return err //nolint:wrapcheck // a middleware passes Telegram's reply through unchanged.
 		}

@@ -145,8 +145,8 @@ func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 				running.Close()
 				return nil
 			})},
-			// Err turns non-nil the moment the client stops serving — at the
-			// first call Telegram answers with a refused session, or when its
+			// Err turns non-nil the moment the client stops serving — when
+			// the home DC confirms Telegram refused the session, or when its
 			// Run loop exits — and says why.
 			Health: running.Err,
 		}, nil

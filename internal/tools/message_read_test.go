@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/gotd/td/bin"
@@ -245,7 +246,8 @@ func TestMarkAsReadDeadSessionStopsBatch(t *testing.T) {
 	script := []telegramfake.InvokeFunc{notUserStep(t, channelID), resolveChannelStep(t, channelID, 1)}
 	script = append(script, basicGroupSteps(t, groupID)...)
 	script = append(script, telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetPeerDialogsRequest, _ *tg.MessagesPeerDialogs) error {
-		return tgerr.New(401, "AUTH_KEY_UNREGISTERED")
+		// The verdict a confirmed refusal reaches the call as.
+		return fmt.Errorf("%w: %w", tgclient.ErrSessionUnauthorized, tgerr.New(401, "AUTH_KEY_UNREGISTERED"))
 	}))
 	inv := telegramfake.New(script...)
 	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv)))

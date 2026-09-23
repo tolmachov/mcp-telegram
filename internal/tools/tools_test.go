@@ -21,6 +21,9 @@ import (
 // its outcome note.
 func TestFailureText(t *testing.T) {
 	flood := &tgerr.Error{Code: 420, Message: "FLOOD_WAIT_265", Type: "FLOOD_WAIT", Argument: 265}
+	// The client hands a call the verdict once the home DC confirms the
+	// refusal (see tgclient.Running.confirmRefusal).
+	dead := fmt.Errorf("%w: %w", tgclient.ErrSessionUnauthorized, tgerr.New(401, "AUTH_KEY_UNREGISTERED"))
 
 	t.Run("a failure without a cause still renders", func(t *testing.T) {
 		assert.Equal(t, "Failed to send message: the server recorded no cause for this failure (server bug).",
@@ -42,9 +45,14 @@ func TestFailureText(t *testing.T) {
 	})
 
 	t.Run("dead session", func(t *testing.T) {
-		txt := failureText("GetMe", failed("get current user", tgerr.New(401, "AUTH_KEY_UNREGISTERED")))
+		txt := failureText("GetMe", failed("get current user", dead))
 		assert.Contains(t, txt, "Failed to get current user: Telegram no longer accepts this account's session")
 		assert.Contains(t, txt, "signs in again")
+	})
+
+	t.Run("an unconfirmed refusal is an ordinary failure", func(t *testing.T) {
+		txt := failureText("GetMedia", failed("download media", tgerr.New(401, "AUTH_KEY_UNREGISTERED")))
+		assert.Equal(t, "Failed to download media: rpc error code 401: AUTH_KEY_UNREGISTERED.", txt)
 	})
 
 	t.Run("unresolved chat gets the peer hint", func(t *testing.T) {
@@ -65,7 +73,7 @@ func TestFailureText(t *testing.T) {
 	t.Run("systemic failures get no hint", func(t *testing.T) {
 		for name, cause := range map[string]error{
 			"flood wait":   flood,
-			"dead session": tgerr.New(401, "AUTH_KEY_UNREGISTERED"),
+			"dead session": dead,
 			"cancellation": &tgclient.PeerError{ID: 42, Err: context.Canceled},
 		} {
 			t.Run(name, func(t *testing.T) {

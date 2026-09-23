@@ -330,14 +330,14 @@ func failureText(tool string, err error) string {
 // systemicText renders err, for which tgclient.IsSystemic holds: a flood wait
 // gets its fixed guidance, a dead session says what happened, and a cancelled
 // or expired call shows the error itself. How to recover a dead session
-// depends on the transport, so the server says that: once Telegram refuses
-// the session the client stops, and the server answers the failed call and
-// every later one with the transport's recovery.
+// depends on the transport, so the server says that: once the home DC
+// confirms Telegram refuses the session the client stops, and the server
+// answers the failed call and every later one with the transport's recovery.
 func systemicText(tool string, err error) string {
 	if flood, ok := floodWaitMessage(tool, err); ok {
 		return flood
 	}
-	if tgclient.IsSessionUnauthorized(err) {
+	if errors.Is(err, tgclient.ErrSessionUnauthorized) {
 		return fmt.Sprintf("Telegram no longer accepts this account's session (%v): it was logged out, revoked or expired, so no Telegram call can succeed until the account signs in again.", err)
 	}
 	return sentence(err)

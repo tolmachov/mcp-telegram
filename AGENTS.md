@@ -80,8 +80,10 @@ make fmt               # golangci-lint fmt
   (`internal/server/server.go`): over stdio it serves a login-required server
   whose tool explains the problem; over HTTP or on a TTY it exits with the
   message. Route a new startup check the same way. Once running, a client whose
-  session Telegram refuses stops itself: over stdio every tool call then says
-  why, over HTTP the pool deletes the session and forces a re-login.
+  session Telegram refuses stops itself once the home DC confirms the refusal
+  (a single reply is no verdict: a secondary DC can refuse a live session):
+  over stdio every tool call then says why, over HTTP the pool deletes the
+  session and forces a re-login.
 
 ## Conventions
 
