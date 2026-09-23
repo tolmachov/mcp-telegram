@@ -21,7 +21,7 @@ func disconnectedTelegramClient() *telegram.Client {
 }
 
 func TestBuildAssemblyForVariantModesWithoutTelegramConnection(t *testing.T) {
-	for _, variant := range []string{"", variantFull, variantCompact, VariantResearch} {
+	for _, variant := range []string{"", variantFull, variantCompact, variantResearch} {
 		t.Run(variant, func(t *testing.T) {
 			srv, err := New(Options{
 				Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
@@ -51,7 +51,7 @@ func TestRunHappyPinnedVariantExitsOnStdinEOF(t *testing.T) {
 	srv, err := New(Options{
 		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
 		Version:   "test",
-		Variant:   VariantResearch,
+		Variant:   variantResearch,
 		Stdin:     strings.NewReader(""),
 		Stdout:    io.Discard,
 		ErrOut:    io.Discard,

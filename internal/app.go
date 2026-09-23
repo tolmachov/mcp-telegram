@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"time"
 
@@ -18,7 +17,6 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
-	"github.com/tolmachov/mcp-telegram/internal/tools"
 )
 
 // Version contains semantic version number of application.
@@ -172,26 +170,6 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 						}
 					}
 					transport := cmd.String(flags.Transport)
-					variant := cmd.String(flags.Variant)
-					allowedPaths := cmd.StringSlice(flags.AllowedPaths)
-					backupEnabled := transport != server.TransportHTTP && variant != server.VariantResearch
-					if !backupEnabled {
-						// HTTP and research never expose BackupMessages, so their startup
-						// must not inspect or create any backup directory either.
-						allowedPaths = nil
-					} else if len(allowedPaths) == 0 {
-						// No flag/env value: fall back to the OS backup directory,
-						// computed here (lazily) rather than at flag construction so
-						// help/version never touch the filesystem. If it can't be
-						// determined, leave the list empty — BackupMessages then
-						// reports "no allowed paths configured" with guidance.
-						if d, err := tools.DefaultBackupDir(); err == nil {
-							allowedPaths = []string{d}
-						} else {
-							slog.Warn("could not determine default backup directory; "+
-								"BackupMessages will require --allowed-paths", "err", err)
-						}
-					}
 					summarizeCfg := summarize.Config{
 						Provider:        summarizeProvider,
 						Model:           cmd.String(flags.SummarizeModel),
@@ -217,12 +195,12 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 						Version:        Version,
 						Auth:           authCfg,
 						SessionStore:   store,
-						AllowedPaths:   allowedPaths,
+						AllowedPaths:   cmd.StringSlice(flags.AllowedPaths),
 						SummarizeCfg:   summarizeCfg,
 						MediaMaxBytes:  cmd.Int(flags.MediaMaxBytes),
 						TGRateLimitRPS: cmd.Int(flags.TGRateLimitRPS),
 						PinnedRefresh:  time.Duration(cmd.Int(flags.PinnedRefreshSecs)) * time.Second,
-						Variant:        variant,
+						Variant:        cmd.String(flags.Variant),
 						Transport:      transport,
 						HTTPAddr:       httpAddr,
 						LogFormat:      cmd.String(flags.LogFormat),

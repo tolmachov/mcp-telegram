@@ -64,7 +64,7 @@ const notLoggedInMessage = "mcp-telegram is not logged in to Telegram — the st
 type Options struct {
 	Config         *tgclient.Config
 	Version        string
-	AllowedPaths   []string
+	AllowedPaths   []string // --allowed-paths; empty → the OS backup directory (see backupAllowedPaths)
 	SummarizeCfg   summarize.Config
 	MediaMaxBytes  int
 	TGRateLimitRPS int
@@ -447,11 +447,32 @@ func (s *Server) buildHandlers(api *tg.Client, peers *tgclient.Resolver, msgProv
 	}
 	full = make([]tools.Handler, 0, len(research)+len(mutating)+1)
 	full = append(full, research...)
-	if s.opts.Transport != TransportHTTP {
-		full = append(full, tools.NewMessageBackupHandler(peers, msgProvider, s.opts.AllowedPaths))
+	// BackupMessages writes to the local filesystem, so it is offered only on
+	// stdio, and not when the research variant is pinned: that variant never
+	// serves the full set, so it must not resolve (and create) the default
+	// backup directory either.
+	if s.opts.Transport != TransportHTTP && s.opts.Variant != variantResearch {
+		full = append(full, tools.NewMessageBackupHandler(peers, msgProvider, s.backupAllowedPaths()))
 	}
 	full = append(full, mutating...)
 	return full, research
+}
+
+// backupAllowedPaths returns --allowed-paths, or the OS backup directory when
+// it is unset. The default is resolved here rather than at flag construction
+// so help/version never touch the environment. If it cannot be determined the
+// list stays empty, and BackupMessages then reports "no allowed paths
+// configured" with guidance.
+func (s *Server) backupAllowedPaths() []string {
+	if len(s.opts.AllowedPaths) > 0 {
+		return s.opts.AllowedPaths
+	}
+	d, err := tools.DefaultBackupDir()
+	if err != nil {
+		s.logger.Warn("could not determine default backup directory; BackupMessages will require --allowed-paths", "err", err)
+		return nil
+	}
+	return []string{d}
 }
 
 // startBlocked reports a condition that leaves the process without Telegram

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"testing"
 
 	"github.com/gotd/td/bin"
@@ -256,7 +257,7 @@ func TestVariantDefsTableInvariants(t *testing.T) {
 	wantMode := map[string]serveMode{
 		variantFull:     modeFull,
 		variantCompact:  modeCompact,
-		VariantResearch: modeResearch,
+		variantResearch: modeResearch,
 	}
 	for _, d := range variantDefs {
 		assert.Equalf(t, wantMode[d.meta.ID], d.mode, "variant %q has unexpected serveMode", d.meta.ID)
@@ -400,7 +401,7 @@ func TestOverrideVariantSelection(t *testing.T) {
 	}{
 		{variantFull, 29, false},
 		{variantCompact, 29, true},
-		{VariantResearch, 15, true},
+		{variantResearch, 15, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.id, func(t *testing.T) {
@@ -498,7 +499,7 @@ func TestVariantsProxyDispatchCompacts(t *testing.T) {
 
 	fullNames := listToolsThroughProxy(t, vs, variantFull)
 	compactNames := listToolsThroughProxy(t, vs, variantCompact)
-	researchNames := listToolsThroughProxy(t, vs, VariantResearch)
+	researchNames := listToolsThroughProxy(t, vs, variantResearch)
 	defaultNames := listToolsThroughProxy(t, vs, "") // no selection → default variant
 
 	assert.Len(t, fullNames, 29, "full via proxy exposes every tool")
@@ -515,4 +516,37 @@ func TestVariantsProxyDispatchCompacts(t *testing.T) {
 	// The default (unselected) variant must be full, untrimmed.
 	assert.Equal(t, fullNames["GetChats"], defaultNames["GetChats"],
 		"default variant must serve full-length descriptions")
+}
+
+// TestBackupMessagesOfferedOnlyOnStdioOutsideResearch pins the one place that
+// decides whether BackupMessages exists and where it may write.
+func TestBackupMessagesOfferedOnlyOnStdioOutsideResearch(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	api := tg.NewClient(noopInvoker{})
+	peers := tgclient.NewResolver(api, 100_000)
+	impl := &mcp.Implementation{Name: "mcp-telegram", Version: "test"}
+
+	cases := []struct {
+		transport, variant string
+		want               bool
+	}{
+		{TransportStdio, "", true},
+		{TransportStdio, variantFull, true},
+		{TransportStdio, variantResearch, false},
+		{TransportHTTP, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.transport+"/"+tc.variant, func(t *testing.T) {
+			s := &Server{logger: testLogger(), opts: Options{Transport: tc.transport, Variant: tc.variant, SummarizeCfg: summarize.Config{BatchTokens: 8000}}}
+			full, _ := s.buildHandlers(api, peers, messages.NewProvider(peers), tgdata.NewChatsCache(nil))
+			_, ok := listToolNames(t, newInner(impl, nil, full, noWire, false, testLogger()))["BackupMessages"]
+			assert.Equal(t, tc.want, ok)
+		})
+	}
+
+	s := &Server{logger: testLogger()}
+	assert.Equal(t, []string{filepath.Join(stateHome, "mcp-telegram", "backups")}, s.backupAllowedPaths())
+	s.opts.AllowedPaths = []string{"/explicit"}
+	assert.Equal(t, []string{"/explicit"}, s.backupAllowedPaths())
 }

@@ -115,7 +115,7 @@ func APIHashFlag() *cli.StringFlag {
 // Value: computing the default backup directory touches the filesystem, which
 // must not happen while merely constructing flags (e.g. for `run --help`). When
 // the flag and its env var are both empty, the run command fills in the default
-// lazily via tools.DefaultBackupDir (see app.go).
+// lazily via tools.DefaultBackupDir (see server.backupAllowedPaths).
 func AllowedPathsFlag() *cli.StringSliceFlag {
 	return &cli.StringSliceFlag{
 		Name:    AllowedPaths,
