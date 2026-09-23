@@ -10,26 +10,37 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
+	"golang.org/x/time/rate"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // Provider fetches messages from Telegram with a unified interface.
 type Provider struct {
-	client *tg.Client
-	peers  *tgclient.Resolver
+	client  *tg.Client
+	peers   *tgclient.Resolver
+	limiter *rate.Limiter
 }
 
-// NewProvider creates a message provider that resolves peers, and paces its
-// requests, through the assembly's shared resolver.
-func NewProvider(peers *tgclient.Resolver) *Provider {
-	return &Provider{client: peers.Client(), peers: peers}
+// NewProvider creates a message provider that resolves peers through the
+// assembly's shared resolver and paces its message requests to rps per second
+// (the default lives on --tg-rate-limit-rps).
+func NewProvider(peers *tgclient.Resolver, rps int) *Provider {
+	return &Provider{client: peers.Client(), peers: peers, limiter: rate.NewLimiter(rate.Limit(rps), 1)}
+}
+
+// wait blocks until the rate limiter admits one Telegram request.
+func (p *Provider) wait(ctx context.Context) error {
+	if err := p.limiter.Wait(ctx); err != nil {
+		return fmt.Errorf("waiting for Telegram rate limit: %w", err)
+	}
+	return nil
 }
 
 // Fetch retrieves messages from a chat with the given options.
 // It handles pagination internally and returns enriched messages with sender names.
 func (p *Provider) Fetch(ctx context.Context, chatID int64, opts FetchOptions) (*FetchResult, error) {
-	result, err := tgclient.WithPeer(ctx, p.peers, chatID, nil, nil, func(peer tgclient.Peer) (*FetchResult, error) {
+	result, err := tgclient.WithPeer(ctx, p.peers, chatID, func(peer tgclient.Peer) (*FetchResult, error) {
 		return p.fetchWithPeer(ctx, peer.Input, opts)
 	})
 	if err != nil {
@@ -80,7 +91,7 @@ func (p *Provider) fetchWithPeer(ctx context.Context, peer tg.InputPeerClass, op
 		historyRequest.MinID = readInboxMaxID
 	}
 
-	if err := p.peers.Wait(ctx); err != nil {
+	if err := p.wait(ctx); err != nil {
 		return nil, err
 	}
 
@@ -171,7 +182,7 @@ func ceilUnix(t time.Time) int64 {
 // newer than a specific ID. When after > 0, the returned slice may be
 // shorter than requested if the anchor is near the end of the chat.
 func (p *Provider) FetchContext(ctx context.Context, chatID int64, anchorID, before, after int) (*FetchResult, error) {
-	result, err := tgclient.WithPeer(ctx, p.peers, chatID, nil, nil, func(peer tgclient.Peer) (*FetchResult, error) {
+	result, err := tgclient.WithPeer(ctx, p.peers, chatID, func(peer tgclient.Peer) (*FetchResult, error) {
 		return p.fetchContextWithPeer(ctx, peer.Input, anchorID, before, after)
 	})
 	if err != nil {
@@ -200,7 +211,7 @@ func (p *Provider) fetchContextWithPeer(ctx context.Context, peer tg.InputPeerCl
 		Limit:     limit,
 	}
 
-	if err := p.peers.Wait(ctx); err != nil {
+	if err := p.wait(ctx); err != nil {
 		return nil, err
 	}
 	history, err := p.client.MessagesGetHistory(ctx, req)
@@ -256,7 +267,7 @@ func (p *Provider) fetchContextWithPeer(ctx context.Context, peer tg.InputPeerCl
 // scheduled messages, so callers can render "no pending" without branching
 // on error vs empty.
 func (p *Provider) FetchScheduled(ctx context.Context, chatID int64) (*FetchResult, error) {
-	result, err := tgclient.WithPeer(ctx, p.peers, chatID, nil, nil, func(peer tgclient.Peer) (*FetchResult, error) {
+	result, err := tgclient.WithPeer(ctx, p.peers, chatID, func(peer tgclient.Peer) (*FetchResult, error) {
 		return p.fetchScheduledWithPeer(ctx, peer.Input)
 	})
 	if err != nil {
@@ -267,7 +278,7 @@ func (p *Provider) FetchScheduled(ctx context.Context, chatID int64) (*FetchResu
 }
 
 func (p *Provider) fetchScheduledWithPeer(ctx context.Context, peer tg.InputPeerClass) (*FetchResult, error) {
-	if err := p.peers.Wait(ctx); err != nil {
+	if err := p.wait(ctx); err != nil {
 		return nil, err
 	}
 	history, err := p.client.MessagesGetScheduledHistory(ctx, &tg.MessagesGetScheduledHistoryRequest{
@@ -289,17 +300,15 @@ func (p *Provider) fetchScheduledWithPeer(ctx context.Context, peer tg.InputPeer
 // automatically. The onBatch callback is called after each batch is fetched
 // (can be nil).
 //
-// Partial-result contract: when the context is cancelled mid-fetch the
-// accumulated messages collected so far are returned alongside a non-nil
-// error equal to ctx.Err() (context.Canceled or context.DeadlineExceeded).
-// Callers that want to persist work on interruption (BackupMessages) can check
-// errors.Is(err, context.Canceled) or errors.Is(err, context.DeadlineExceeded)
-// and still use the partial FetchResult — any other error is a hard failure.
+// Partial-result contract: once pagination has started, any error — a
+// cancelled context, a flood wait, a failed batch — comes back together with
+// the messages collected so far, so callers that persist work
+// (BackupMessages) can keep them. A stale peer is re-resolved and pagination
+// restarted only while nothing has been collected; after that the error is
+// returned with the partial result instead.
 func (p *Provider) FetchAll(ctx context.Context, chatID int64, opts FetchOptions, onBatch BatchCallback) (*FetchResult, error) {
-	// A stale peer is retried only while nothing has been collected: a retry
-	// would restart pagination and discard the partial result.
 	collected := func(r *FetchResult) bool { return len(r.Messages) > 0 }
-	result, err := tgclient.WithPeer(ctx, p.peers, chatID, nil, collected, func(peer tgclient.Peer) (*FetchResult, error) {
+	result, err := tgclient.WithPeerKeepingPartial(ctx, p.peers, chatID, collected, func(peer tgclient.Peer) (*FetchResult, error) {
 		return p.fetchAllWithPeer(ctx, peer.Input, opts, onBatch)
 	})
 	if result != nil {

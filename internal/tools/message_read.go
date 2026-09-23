@@ -188,7 +188,7 @@ func (h *MessageReadHandler) topMessages(ctx context.Context, channelIDs []int64
 	if len(channelIDs) == 0 {
 		return map[int64]int{}, nil
 	}
-	return tgclient.WithPeers(ctx, h.peers, channelIDs, nil, nil, func(peers []tgclient.Peer) (map[int64]int, error) {
+	return tgclient.WithPeers(ctx, h.peers, channelIDs, func(peers []tgclient.Peer) (map[int64]int, error) {
 		dialogPeers := make([]tg.InputDialogPeerClass, len(peers))
 		for i, p := range peers {
 			dialogPeers[i] = &tg.InputDialogPeer{Peer: p.Input}
@@ -222,7 +222,7 @@ func (h *MessageReadHandler) markChatAsRead(ctx context.Context, chatID int64, i
 		}
 		tops = own
 	}
-	_, err := tgclient.WithPeer(ctx, h.peers, chatID, nil, nil, func(p tgclient.Peer) (bool, error) {
+	_, err := tgclient.WithPeer(ctx, h.peers, chatID, func(p tgclient.Peer) (bool, error) {
 		channel, ok := p.Input.(*tg.InputPeerChannel)
 		if !ok {
 			if _, err := h.client.MessagesReadHistory(ctx, &tg.MessagesReadHistoryRequest{Peer: p.Input}); err != nil {

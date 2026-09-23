@@ -168,7 +168,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		if replyToID > 0 {
 			draftReq.ReplyTo = &tg.InputReplyToMessage{ReplyToMsgID: replyToID}
 		}
-		if _, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, nil, nil, func(p tgclient.Peer) (bool, error) {
+		if _, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, func(p tgclient.Peer) (bool, error) {
 			draftReq.Peer = p.Input
 			return h.client.MessagesSaveDraft(ctx, draftReq)
 		}); err != nil {
@@ -194,7 +194,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		sendReq.ScheduleDate = scheduleUnix
 	}
 
-	updates, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, nil, nil, func(p tgclient.Peer) (tg.UpdatesClass, error) {
+	updates, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, func(p tgclient.Peer) (tg.UpdatesClass, error) {
 		sendReq.Peer = p.Input
 		return h.client.MessagesSendMessage(ctx, sendReq)
 	})

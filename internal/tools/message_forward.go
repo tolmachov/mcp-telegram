@@ -76,7 +76,7 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 
 	// A bad chat ID surfaces as a resolve error before the mutation is issued.
 	randomID := cryptoRandInt64()
-	updates, err := tgclient.WithPeers(ctx, h.peers, []int64{in.FromChatID, in.ToChatID}, nil, nil, func(p []tgclient.Peer) (tg.UpdatesClass, error) {
+	updates, err := tgclient.WithPeers(ctx, h.peers, []int64{in.FromChatID, in.ToChatID}, func(p []tgclient.Peer) (tg.UpdatesClass, error) {
 		return h.client.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
 			FromPeer: p[0].Input,
 			ID:       []int{msgID},

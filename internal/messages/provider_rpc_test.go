@@ -54,7 +54,7 @@ func TestFetchRefreshesStalePeerExactlyOnce(t *testing.T) {
 			return nil
 		}),
 	)
-	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv)), 100_000)
 
 	got, err := p.Fetch(t.Context(), channelID, FetchOptions{Limit: 10})
 	require.NoError(t, err)
@@ -86,7 +86,7 @@ func TestFetchAllContinuesServiceOnlyPageAndPreservesPartialResult(t *testing.T)
 				return nil
 			}),
 		)
-		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv)), 100_000)
 		got, err := p.FetchAll(t.Context(), channelID, FetchOptions{Limit: 1}, nil)
 		require.NoError(t, err)
 		require.Len(t, got.Messages, 1)
@@ -106,13 +106,79 @@ func TestFetchAllContinuesServiceOnlyPageAndPreservesPartialResult(t *testing.T)
 				return tgerr.New(500, "INTERNAL")
 			}),
 		)
-		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv)), 100_000)
 		got, err := p.FetchAll(t.Context(), channelID, FetchOptions{Limit: 1}, nil)
 		require.Error(t, err)
 		require.NotNil(t, got)
 		require.Len(t, got.Messages, 1)
 		assert.Equal(t, "kept", got.Messages[0].Text)
 	})
+}
+
+// TestFetchAllStalePeer pins FetchAll's stale-hash contract: with nothing
+// collected yet the peer is re-resolved and pagination restarts; once a batch
+// has been collected the stale error comes back with it instead.
+func TestFetchAllStalePeer(t *testing.T) {
+	const channelID = int64(80)
+	stale := func(hash int64) telegramfake.InvokeFunc {
+		return telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetHistoryRequest, _ *tg.MessagesMessagesBox) error {
+			assert.Equal(t, hash, req.Peer.(*tg.InputPeerChannel).AccessHash)
+			return tgerr.New(400, "CHANNEL_INVALID")
+		})
+	}
+	page := func(hash int64, id int) telegramfake.InvokeFunc {
+		return telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
+			assert.Equal(t, hash, req.Peer.(*tg.InputPeerChannel).AccessHash)
+			out.Messages = &tg.MessagesMessagesSlice{Count: 2, Messages: []tg.MessageClass{&tg.Message{ID: id, Date: id, Message: "m"}}}
+			return nil
+		})
+	}
+
+	t.Run("nothing collected re-resolves and succeeds", func(t *testing.T) {
+		inv := telegramfake.New(
+			notUserStep(t, channelID),
+			resolveMessageChannelStep(t, channelID, 100),
+			stale(100),
+			notUserStep(t, channelID),
+			resolveMessageChannelStep(t, channelID, 200),
+			page(200, 9),
+			telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
+				out.Messages = &tg.MessagesMessagesSlice{Count: 1}
+				return nil
+			}),
+		)
+		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv)), 100_000)
+		got, err := p.FetchAll(t.Context(), channelID, FetchOptions{Limit: 1}, nil)
+		require.NoError(t, err)
+		require.Len(t, got.Messages, 1)
+		assert.Equal(t, 9, got.Messages[0].ID)
+		assert.Zero(t, inv.Remaining())
+	})
+
+	t.Run("partial result is returned, not retried", func(t *testing.T) {
+		inv := telegramfake.New(
+			notUserStep(t, channelID),
+			resolveMessageChannelStep(t, channelID, 100),
+			page(100, 9),
+			stale(100),
+		)
+		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv)), 100_000)
+		got, err := p.FetchAll(t.Context(), channelID, FetchOptions{Limit: 1}, nil)
+		require.Error(t, err)
+		assert.True(t, tgclient.ShouldRefreshPeer(err))
+		require.NotNil(t, got)
+		require.Len(t, got.Messages, 1, "the collected batch must survive the stale error")
+		assert.Equal(t, channelID, got.ChatID)
+		assert.Zero(t, inv.Remaining(), "no re-resolve or restart once messages are collected")
+	})
+}
+
+func TestProviderWaitHonoursContext(t *testing.T) {
+	p := NewProvider(tgclient.NewResolver(nil), 1)
+	require.NoError(t, p.wait(t.Context()))
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.Error(t, p.wait(ctx))
 }
 
 func TestFetchContextIncludesAnchorWhenAfterZero(t *testing.T) {
@@ -130,7 +196,7 @@ func TestFetchContextIncludesAnchorWhenAfterZero(t *testing.T) {
 			return nil
 		}),
 	)
-	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv)), 100_000)
 	got, err := p.FetchContext(t.Context(), channelID, 20, 1, 0)
 	require.NoError(t, err)
 	require.Len(t, got.Messages, 2)
@@ -148,7 +214,7 @@ func TestFetchScheduledIsUnpaginated(t *testing.T) {
 			return nil
 		}),
 	)
-	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv)), 100_000)
 	got, err := p.FetchScheduled(t.Context(), channelID)
 	require.NoError(t, err)
 	require.Len(t, got.Messages, 1)
@@ -174,7 +240,7 @@ func TestSearchAndRepliesBuildTelegramRequests(t *testing.T) {
 				return nil
 			}),
 		)
-		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv)), 100_000)
 		got, err := p.Search(t.Context(), channelID, SearchOptions{Query: "needle", MinDate: from, MaxDate: to})
 		require.NoError(t, err)
 		require.Len(t, got.Messages, 1)
@@ -193,7 +259,7 @@ func TestSearchAndRepliesBuildTelegramRequests(t *testing.T) {
 				return nil
 			}),
 		)
-		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv)), 100_000)
 		got, err := p.FetchReplies(t.Context(), channelID, 55, FetchOptions{Limit: 20})
 		require.NoError(t, err)
 		require.Len(t, got.Messages, 1)
@@ -213,7 +279,7 @@ func TestSearchGlobalAndForumTopicsBuildTelegramRequests(t *testing.T) {
 				return nil
 			}),
 		)
-		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv)), 100_000)
 		got, err := p.SearchGlobal(t.Context(), GlobalSearchOptions{Query: "needle", Limit: 10})
 		require.NoError(t, err)
 		require.Len(t, got.Messages, 1)
@@ -236,7 +302,7 @@ func TestSearchGlobalAndForumTopicsBuildTelegramRequests(t *testing.T) {
 				return nil
 			}),
 		)
-		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+		p := NewProvider(tgclient.NewResolver(tg.NewClient(inv)), 100_000)
 		got, err := p.FetchForumTopics(t.Context(), channelID, "release", 25, 0, 0, 0, 0)
 		require.NoError(t, err)
 		require.Len(t, got.Topics, 1)
@@ -246,7 +312,7 @@ func TestSearchGlobalAndForumTopicsBuildTelegramRequests(t *testing.T) {
 }
 
 func TestProviderPublicValidation(t *testing.T) {
-	p := NewProvider(tgclient.NewResolver(nil, 1))
+	p := NewProvider(tgclient.NewResolver(nil), 1)
 	_, err := p.Search(t.Context(), 1, SearchOptions{})
 	assert.ErrorContains(t, err, "search query is required")
 	_, err = p.Search(t.Context(), 1, SearchOptions{
@@ -279,7 +345,7 @@ func TestFetchUnreadUsesDialogReadBoundary(t *testing.T) {
 			return nil
 		}),
 	)
-	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv)), 100_000)
 	got, err := p.Fetch(t.Context(), channelID, FetchOptions{UnreadOnly: true})
 	require.NoError(t, err)
 	require.Len(t, got.Messages, 1)
@@ -318,7 +384,7 @@ func TestForumPaginationCountsOnlyThroughLiveAnchor(t *testing.T) {
 			return nil
 		}),
 	)
-	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv)), 100_000)
 	offset := ForumTopicsOffset{}
 	var ids []int
 	for range 3 {
@@ -346,7 +412,7 @@ func TestForumPaginationRejectsRepeatedAnchorEvenAtReportedEnd(t *testing.T) {
 			return nil
 		}),
 	)
-	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv)), 100_000)
 	got, err := p.FetchForumTopics(t.Context(), 85, "", 2, 7, 70, 100, 1)
 	require.ErrorContains(t, err, "did not advance")
 	assert.Nil(t, got)
@@ -384,7 +450,7 @@ func TestFetchPreservesMediaAndMetadataForBackup(t *testing.T) {
 			return nil
 		}),
 	)
-	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+	p := NewProvider(tgclient.NewResolver(tg.NewClient(inv)), 100_000)
 	got, err := p.Fetch(t.Context(), 86, DefaultFetchOptions())
 	require.NoError(t, err)
 	require.Len(t, got.Messages, 3)

@@ -55,8 +55,8 @@ func probePeer(ctx context.Context, client *tg.Client, dialogID int64) (Peer, er
 	// Probe each candidate type in order. A match returns immediately; a
 	// genuine error aborts the sweep immediately (so a flood-wait or auth
 	// failure surfaces as itself, unmisattributed, and we don't fire further
-	// live calls into a rate-limit window); only a (nil, nil) "not this type"
-	// result falls through to the next probe.
+	// live calls into a rate-limit window); only a "not this type" result
+	// (ok false, nil error) falls through to the next probe.
 	for _, probe := range []peerProbe{resolveUser, resolveChannel, resolveBasicChat} {
 		peer, ok, err := probe(ctx, client, dialogID)
 		if err != nil {

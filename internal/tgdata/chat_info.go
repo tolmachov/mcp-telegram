@@ -12,7 +12,7 @@ import (
 
 // GetChatInfo retrieves detailed information about a specific chat.
 func GetChatInfo(ctx context.Context, peers *tgclient.Resolver, chatID int64) (*ChatFullInfo, error) {
-	return tgclient.WithPeer(ctx, peers, chatID, nil, nil, func(p tgclient.Peer) (*ChatFullInfo, error) {
+	return tgclient.WithPeer(ctx, peers, chatID, func(p tgclient.Peer) (*ChatFullInfo, error) {
 		return chatInfo(ctx, peers.Client(), chatID, p.Input)
 	})
 }

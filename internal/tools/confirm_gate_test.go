@@ -133,14 +133,14 @@ func TestConfirmGatedToolsFailClosed(t *testing.T) {
 		{
 			name: "DeleteMessages",
 			register: func(s *mcp.Server, c *tg.Client) {
-				NewMessageDeleteHandler(tgclient.NewResolver(c, 100_000)).Register(s)
+				NewMessageDeleteHandler(tgclient.NewResolver(c)).Register(s)
 			},
 			args: map[string]any{"chat_id": testBasicChatID, "message_ids": []string{"559966"}},
 		},
 		{
 			name: "ForwardMessage",
 			register: func(s *mcp.Server, c *tg.Client) {
-				NewMessageForwardHandler(tgclient.NewResolver(c, 100_000)).Register(s)
+				NewMessageForwardHandler(tgclient.NewResolver(c)).Register(s)
 			},
 			args: map[string]any{"from_chat_id": -11, "message_id": "5", "to_chat_id": -12},
 		},
@@ -151,7 +151,7 @@ func TestConfirmGatedToolsFailClosed(t *testing.T) {
 		},
 		{
 			name:     "LeaveChat",
-			register: func(s *mcp.Server, c *tg.Client) { NewLeaveChatHandler(tgclient.NewResolver(c, 100_000)).Register(s) },
+			register: func(s *mcp.Server, c *tg.Client) { NewLeaveChatHandler(tgclient.NewResolver(c)).Register(s) },
 			args:     map[string]any{"chat": "@channel"},
 		},
 	}

@@ -2,14 +2,12 @@ package tgclient
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/gotd/td/tg"
 	"golang.org/x/sync/singleflight"
-	"golang.org/x/time/rate"
 )
 
 const (
@@ -29,11 +27,10 @@ type peerCacheEntry struct {
 // Resolver is the one peer resolver of an assembly: every tool and data path
 // that turns a chat ID into a peer goes through it. It caches resolved peers
 // in a bounded, expiring map, collapses concurrent cold resolves of the same
-// ID into one Telegram probe, and owns both the stale-access-hash retry
-// (WithPeer, WithPeers) and the rate limiter that paces message fetching.
+// ID into one Telegram probe, and owns the stale-access-hash retry (WithPeer
+// and its variants).
 type Resolver struct {
-	client  *tg.Client
-	limiter *rate.Limiter
+	client *tg.Client
 
 	mu   sync.RWMutex
 	byID map[int64]peerCacheEntry
@@ -41,27 +38,17 @@ type Resolver struct {
 	now  func() time.Time
 }
 
-// NewResolver creates a resolver over client whose limiter admits rps
-// requests per second (the default lives on --tg-rate-limit-rps).
-func NewResolver(client *tg.Client, rps int) *Resolver {
+// NewResolver creates a resolver over client.
+func NewResolver(client *tg.Client) *Resolver {
 	return &Resolver{
-		client:  client,
-		limiter: rate.NewLimiter(rate.Limit(rps), 1),
-		byID:    make(map[int64]peerCacheEntry),
-		now:     time.Now,
+		client: client,
+		byID:   make(map[int64]peerCacheEntry),
+		now:    time.Now,
 	}
 }
 
 // Client returns the Telegram client the resolver resolves through.
 func (r *Resolver) Client() *tg.Client { return r.client }
-
-// Wait blocks until the rate limiter admits one Telegram request.
-func (r *Resolver) Wait(ctx context.Context) error {
-	if err := r.limiter.Wait(ctx); err != nil {
-		return fmt.Errorf("waiting for Telegram rate limit: %w", err)
-	}
-	return nil
-}
 
 // Resolve returns the peer for id, from the cache when it holds a live entry.
 // Failures are never cached, so a transient error (e.g. a flood wait) is
@@ -140,35 +127,44 @@ func (r *Resolver) Invalidate(ids ...int64) {
 	r.mu.Unlock()
 }
 
-// WithPeers resolves ids and runs op with their peers, in the same order. When
-// op fails with a stale access hash (ShouldRefreshPeer) it invalidates ids and
-// related — peers op used without resolving them here — and runs op exactly
-// once more with freshly resolved peers. keep, when non-nil, reports whether a
-// failed attempt's result holds progress a retry would throw away; such a
-// result is returned with its error instead of being retried.
-func WithPeers[T any](ctx context.Context, r *Resolver, ids, related []int64, keep func(T) bool, op func([]Peer) (T, error)) (T, error) {
+// WithPeer resolves id and runs op with its peer. When op fails with a stale
+// access hash (ShouldRefreshPeer) it drops the cached peer and runs op exactly
+// once more with a freshly resolved one.
+func WithPeer[T any](ctx context.Context, r *Resolver, id int64, op func(Peer) (T, error)) (T, error) {
+	return withPeers(ctx, r, []int64{id}, nil, func(peers []Peer) (T, error) { return op(peers[0]) })
+}
+
+// WithPeers is WithPeer for several chat IDs: op gets their peers in the same
+// order, and a stale access hash re-resolves all of them.
+func WithPeers[T any](ctx context.Context, r *Resolver, ids []int64, op func([]Peer) (T, error)) (T, error) {
+	return withPeers(ctx, r, ids, nil, op)
+}
+
+// WithPeerKeepingPartial is WithPeer for an op that can fail after making
+// progress: when partial reports that a failed attempt's result holds work a
+// retry would throw away, that result is returned with its error instead of
+// being retried.
+func WithPeerKeepingPartial[T any](ctx context.Context, r *Resolver, id int64, partial func(T) bool, op func(Peer) (T, error)) (T, error) {
+	return withPeers(ctx, r, []int64{id}, partial, func(peers []Peer) (T, error) { return op(peers[0]) })
+}
+
+// withPeers is the one stale-hash retry behind WithPeer and its variants;
+// partial may be nil.
+func withPeers[T any](ctx context.Context, r *Resolver, ids []int64, partial func(T) bool, op func([]Peer) (T, error)) (T, error) {
 	var zero T
 	peers, err := r.resolveAll(ctx, ids)
 	if err != nil {
 		return zero, err
 	}
 	result, err := op(peers)
-	if err == nil || !ShouldRefreshPeer(err) || (keep != nil && keep(result)) {
+	if err == nil || !ShouldRefreshPeer(err) || (partial != nil && partial(result)) {
 		return result, err
 	}
 	r.Invalidate(ids...)
-	r.Invalidate(related...)
 	if peers, err = r.resolveAll(ctx, ids); err != nil {
 		return zero, err
 	}
 	return op(peers)
-}
-
-// WithPeer is WithPeers for a single chat ID.
-func WithPeer[T any](ctx context.Context, r *Resolver, id int64, related []int64, keep func(T) bool, op func(Peer) (T, error)) (T, error) {
-	return WithPeers(ctx, r, []int64{id}, related, keep, func(peers []Peer) (T, error) {
-		return op(peers[0])
-	})
 }
 
 func (r *Resolver) resolveAll(ctx context.Context, ids []int64) ([]Peer, error) {

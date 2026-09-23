@@ -54,7 +54,7 @@ func TestResolverCachesSuccess(t *testing.T) {
 		entered: make(chan struct{}, 16),
 		gate:    make(chan struct{}),
 	}
-	r := NewResolver(tg.NewClient(inv), 1000)
+	r := NewResolver(tg.NewClient(inv))
 	want := &tg.InputPeerChannel{ChannelID: 1555091578, AccessHash: 999}
 
 	var wg sync.WaitGroup
@@ -85,7 +85,7 @@ func TestResolverSharedProbeOutlivesCaller(t *testing.T) {
 		entered: make(chan struct{}, 16),
 		gate:    make(chan struct{}),
 	}
-	r := NewResolver(tg.NewClient(inv), 1000)
+	r := NewResolver(tg.NewClient(inv))
 
 	firstCtx, cancelFirst := context.WithCancel(t.Context())
 	firstErr := make(chan error, 1)
@@ -131,7 +131,7 @@ func TestResolverDoesNotCacheErrors(t *testing.T) {
 			}}, nil
 		},
 	})
-	r := NewResolver(client, 1000)
+	r := NewResolver(client)
 
 	_, err := r.Resolve(t.Context(), 1555091578)
 	var pe *PeerError
@@ -147,7 +147,7 @@ func TestResolverDoesNotCacheErrors(t *testing.T) {
 // TestResolverExpiresAndEvicts covers the TTL and the bound on the cache.
 func TestResolverExpiresAndEvicts(t *testing.T) {
 	var calls atomic.Int32
-	r := NewResolver(channelClient(&calls, func() int64 { return 1 }), 1000)
+	r := NewResolver(channelClient(&calls, func() int64 { return 1 }))
 	now := time.Unix(0, 0)
 	r.now = func() time.Time { return now }
 
@@ -167,7 +167,7 @@ func TestResolverExpiresAndEvicts(t *testing.T) {
 // TestResolverEvictionPrefersExpired verifies a full cache makes room by
 // dropping expired entries, keeping every live one.
 func TestResolverEvictionPrefersExpired(t *testing.T) {
-	r := NewResolver(nil, 1000)
+	r := NewResolver(nil)
 	now := time.Unix(0, 0)
 	r.now = func() time.Time { return now }
 
@@ -189,16 +189,14 @@ func TestResolverEvictionPrefersExpired(t *testing.T) {
 }
 
 // TestWithPeerRetriesStaleHashOnce verifies a stale access hash invalidates
-// the cached peer (and the related ones) and retries exactly once with a
-// fresh resolve.
+// the cached peer and retries exactly once with a fresh resolve.
 func TestWithPeerRetriesStaleHashOnce(t *testing.T) {
 	var calls atomic.Int32
 	hash := int64(1)
-	r := NewResolver(channelClient(&calls, func() int64 { return hash }), 1000)
-	r.store(7, Peer{Input: &tg.InputPeerChat{ChatID: 7}})
+	r := NewResolver(channelClient(&calls, func() int64 { return hash }))
 
 	var seen []int64
-	got, err := WithPeer(t.Context(), r, 5, []int64{7}, nil, func(p Peer) (int64, error) {
+	got, err := WithPeer(t.Context(), r, 5, func(p Peer) (int64, error) {
 		h := p.Input.(*tg.InputPeerChannel).AccessHash
 		seen = append(seen, h)
 		if h == 1 {
@@ -210,34 +208,59 @@ func TestWithPeerRetriesStaleHashOnce(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), got)
 	assert.Equal(t, []int64{1, 2}, seen)
-	_, cached := r.cached(7)
-	assert.False(t, cached, "related peers are invalidated too")
 
-	_, err = WithPeer(t.Context(), r, 5, nil, nil, func(Peer) (int, error) {
+	_, err = WithPeer(t.Context(), r, 5, func(Peer) (int, error) {
 		return 0, tgerr.New(400, "CHANNEL_INVALID")
 	})
 	require.Error(t, err, "the second stale answer is returned, not retried again")
 }
 
-// TestWithPeerKeepsProgress verifies a failed attempt whose result holds
-// progress is returned instead of retried.
-func TestWithPeerKeepsProgress(t *testing.T) {
+// TestWithPeerKeepingPartial verifies a failed attempt whose result holds
+// progress is returned instead of retried, and one without progress is
+// retried.
+func TestWithPeerKeepingPartial(t *testing.T) {
 	var calls atomic.Int32
-	r := NewResolver(channelClient(&calls, func() int64 { return 1 }), 1000)
+	r := NewResolver(channelClient(&calls, func() int64 { return 1 }))
 	attempts := 0
-	got, err := WithPeer(t.Context(), r, 5, nil, func(n int) bool { return n > 0 }, func(Peer) (int, error) {
+	progressed := func(n int) bool { return n > 0 }
+	got, err := WithPeerKeepingPartial(t.Context(), r, 5, progressed, func(Peer) (int, error) {
 		attempts++
 		return 3, tgerr.New(400, "PEER_ID_INVALID")
 	})
 	require.Error(t, err)
 	assert.Equal(t, 3, got)
 	assert.Equal(t, 1, attempts)
+
+	attempts = 0
+	got, err = WithPeerKeepingPartial(t.Context(), r, 5, progressed, func(Peer) (int, error) {
+		attempts++
+		if attempts == 1 {
+			return 0, tgerr.New(400, "PEER_ID_INVALID")
+		}
+		return 4, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 4, got)
+	assert.Equal(t, 2, attempts)
 }
 
-func TestResolverWaitHonoursContext(t *testing.T) {
-	r := NewResolver(nil, 1)
-	require.NoError(t, r.Wait(t.Context()))
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	require.Error(t, r.Wait(ctx))
+// TestWithPeersRefreshesEveryPeer verifies a stale answer re-resolves all the
+// peers op was given.
+func TestWithPeersRefreshesEveryPeer(t *testing.T) {
+	var calls atomic.Int32
+	hash := int64(1)
+	r := NewResolver(channelClient(&calls, func() int64 { return hash }))
+
+	var seen [][2]int64
+	_, err := WithPeers(t.Context(), r, []int64{5, 6}, func(p []Peer) (bool, error) {
+		pair := [2]int64{p[0].Input.(*tg.InputPeerChannel).AccessHash, p[1].Input.(*tg.InputPeerChannel).AccessHash}
+		seen = append(seen, pair)
+		if pair[0] == 1 {
+			hash = 2
+			return false, tgerr.New(400, "CHANNEL_INVALID")
+		}
+		return true, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, [][2]int64{{1, 1}, {2, 2}}, seen)
 }

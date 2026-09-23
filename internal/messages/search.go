@@ -26,12 +26,18 @@ func (p *Provider) Search(ctx context.Context, chatID int64, opts SearchOptions)
 		return nil, err
 	}
 
-	var related []int64
+	// The sender filter is a peer too, so it is resolved (and refreshed on a
+	// stale hash) together with the chat.
+	ids := []int64{chatID}
 	if opts.FromSenderID != 0 {
-		related = append(related, opts.FromSenderID)
+		ids = append(ids, opts.FromSenderID)
 	}
-	return tgclient.WithPeer(ctx, p.peers, chatID, related, nil, func(peer tgclient.Peer) (*FetchResult, error) {
-		return p.searchWithPeer(ctx, chatID, peer.Input, opts)
+	return tgclient.WithPeers(ctx, p.peers, ids, func(peers []tgclient.Peer) (*FetchResult, error) {
+		var sender *tgclient.Peer
+		if len(peers) > 1 {
+			sender = &peers[1]
+		}
+		return p.searchWithPeer(ctx, chatID, peers[0].Input, sender, opts)
 	})
 }
 
@@ -45,7 +51,9 @@ func checkDateWindow(minDate, maxDate time.Time) error {
 	return nil
 }
 
-func (p *Provider) searchWithPeer(ctx context.Context, chatID int64, peer tg.InputPeerClass, opts SearchOptions) (*FetchResult, error) {
+// searchWithPeer runs the search in peer; sender, when non-nil, is the
+// resolved opts.FromSenderID.
+func (p *Provider) searchWithPeer(ctx context.Context, chatID int64, peer tg.InputPeerClass, sender *tgclient.Peer, opts SearchOptions) (*FetchResult, error) {
 	filter := opts.Filter
 	if filter == nil {
 		filter = &tg.InputMessagesFilterEmpty{}
@@ -67,22 +75,18 @@ func (p *Provider) searchWithPeer(ctx context.Context, chatID int64, peer tg.Inp
 	if opts.TopMsgID > 0 {
 		req.SetTopMsgID(opts.TopMsgID)
 	}
-	if opts.FromSenderID != 0 {
-		fromPeer, err := p.peers.Resolve(ctx, opts.FromSenderID)
-		if err != nil {
-			return nil, fmt.Errorf("resolving from_sender %d: %w", opts.FromSenderID, err)
-		}
+	if sender != nil {
 		// messages.search from_id only accepts user or channel peers.
 		// Basic-chat peers (legacy InputPeerChat) are silently dropped by
 		// Telegram, turning what the caller framed as a sender filter into
 		// an un-filtered search. Reject loudly instead.
-		if _, isBasicChat := fromPeer.Input.(*tg.InputPeerChat); isBasicChat {
+		if _, isBasicChat := sender.Input.(*tg.InputPeerChat); isBasicChat {
 			return nil, fmt.Errorf("from_sender_id %d resolves to a legacy basic chat, which cannot be used as a message sender; pass a user ID or a channel/supergroup ID", opts.FromSenderID)
 		}
-		req.SetFromID(fromPeer.Input)
+		req.SetFromID(sender.Input)
 	}
 
-	if err := p.peers.Wait(ctx); err != nil {
+	if err := p.wait(ctx); err != nil {
 		return nil, err
 	}
 
@@ -132,7 +136,7 @@ func (p *Provider) SearchGlobal(ctx context.Context, opts GlobalSearchOptions) (
 		req.MaxDate = telegramBefore(opts.MaxDate)
 	}
 
-	if err := p.peers.Wait(ctx); err != nil {
+	if err := p.wait(ctx); err != nil {
 		return nil, err
 	}
 

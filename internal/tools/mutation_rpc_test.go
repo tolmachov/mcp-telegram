@@ -8,6 +8,7 @@ import (
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -58,7 +59,7 @@ func TestEditMessageIDRangeThroughMCP(t *testing.T) {
 		}),
 	)
 	cs := connectToolClient(t, func(s *mcp.Server) {
-		NewMessageEditHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000)).Register(s)
+		NewMessageEditHandler(tgclient.NewResolver(tg.NewClient(inv))).Register(s)
 	})
 	for _, id := range []string{"2147483648", "4294967338", "s:2147483648", "s:4294967338"} {
 		res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "EditMessage", Arguments: map[string]any{
@@ -88,7 +89,7 @@ func TestDestructiveHandlersFailClosedBeforeTelegramRPC(t *testing.T) {
 		{
 			name: "delete messages",
 			call: func(client *tg.Client) *mcp.CallToolResult {
-				got, _, err := NewMessageDeleteHandler(tgclient.NewResolver(client, 100_000)).handle(ctx, req, DeleteMessagesInput{ChatID: 1, MessageIDs: []string{"42"}})
+				got, _, err := NewMessageDeleteHandler(tgclient.NewResolver(client)).handle(ctx, req, DeleteMessagesInput{ChatID: 1, MessageIDs: []string{"42"}})
 				require.NoError(t, err)
 				return got
 			},
@@ -96,7 +97,7 @@ func TestDestructiveHandlersFailClosedBeforeTelegramRPC(t *testing.T) {
 		{
 			name: "forward message",
 			call: func(client *tg.Client) *mcp.CallToolResult {
-				got, _, err := NewMessageForwardHandler(tgclient.NewResolver(client, 100_000)).handle(ctx, req, ForwardMessageInput{FromChatID: 1, ToChatID: 2, MessageID: "42"})
+				got, _, err := NewMessageForwardHandler(tgclient.NewResolver(client)).handle(ctx, req, ForwardMessageInput{FromChatID: 1, ToChatID: 2, MessageID: "42"})
 				require.NoError(t, err)
 				return got
 			},
@@ -112,7 +113,7 @@ func TestDestructiveHandlersFailClosedBeforeTelegramRPC(t *testing.T) {
 		{
 			name: "leave chat",
 			call: func(client *tg.Client) *mcp.CallToolResult {
-				got, _, err := NewLeaveChatHandler(tgclient.NewResolver(client, 100_000)).handle(ctx, req, LeaveChatInput{Chat: "@channel"})
+				got, _, err := NewLeaveChatHandler(tgclient.NewResolver(client)).handle(ctx, req, LeaveChatInput{Chat: "@channel"})
 				require.NoError(t, err)
 				return got
 			},
@@ -147,7 +148,7 @@ func TestMessageMutationHandlersUseExpectedRPCs(t *testing.T) {
 				return nil
 			}),
 		)
-		errRes, out, err := NewMessageSendHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000)).handle(t.Context(), req, SendMessageInput{ChatID: chatID, Message: "hello"})
+		errRes, out, err := NewMessageSendHandler(tgclient.NewResolver(tg.NewClient(inv))).handle(t.Context(), req, SendMessageInput{ChatID: chatID, Message: "hello"})
 		require.NoError(t, err)
 		require.Nil(t, errRes)
 		require.NotNil(t, out)
@@ -166,7 +167,7 @@ func TestMessageMutationHandlersUseExpectedRPCs(t *testing.T) {
 				return nil
 			}),
 		)
-		errRes, out, err := NewMessageEditHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000)).handle(t.Context(), req, EditMessageInput{ChatID: chatID, MessageID: "7", NewText: "updated"})
+		errRes, out, err := NewMessageEditHandler(tgclient.NewResolver(tg.NewClient(inv))).handle(t.Context(), req, EditMessageInput{ChatID: chatID, MessageID: "7", NewText: "updated"})
 		require.NoError(t, err)
 		require.Nil(t, errRes)
 		require.NotNil(t, out)
@@ -187,7 +188,7 @@ func TestMessageMutationHandlersUseExpectedRPCs(t *testing.T) {
 				return nil
 			}),
 		)
-		errRes, out, err := NewSetReactionHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000)).handle(t.Context(), req, SetReactionInput{ChatID: chatID, MessageID: "7", Emojis: []string{"👍"}})
+		errRes, out, err := NewSetReactionHandler(tgclient.NewResolver(tg.NewClient(inv))).handle(t.Context(), req, SetReactionInput{ChatID: chatID, MessageID: "7", Emojis: []string{"👍"}})
 		require.NoError(t, err)
 		require.Nil(t, errRes)
 		require.NotNil(t, out)
@@ -217,7 +218,7 @@ func TestMessageMutationHandlersUseExpectedRPCs(t *testing.T) {
 				return nil
 			}),
 		)
-		errRes, out, err := NewMessageDeleteHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000)).handle(t.Context(), req, DeleteMessagesInput{ChatID: chatID, MessageIDs: []string{"7"}, Confirm: true})
+		errRes, out, err := NewMessageDeleteHandler(tgclient.NewResolver(tg.NewClient(inv))).handle(t.Context(), req, DeleteMessagesInput{ChatID: chatID, MessageIDs: []string{"7"}, Confirm: true})
 		require.NoError(t, err)
 		require.Nil(t, errRes)
 		require.NotNil(t, out)
@@ -246,7 +247,7 @@ func TestMessageMutationHandlersUseExpectedRPCs(t *testing.T) {
 				return nil
 			}),
 		)
-		errRes, out, err := NewMessageDeleteHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000)).handle(t.Context(), req, DeleteMessagesInput{ChatID: chatID, MessageIDs: []string{"s:7"}, Confirm: true})
+		errRes, out, err := NewMessageDeleteHandler(tgclient.NewResolver(tg.NewClient(inv))).handle(t.Context(), req, DeleteMessagesInput{ChatID: chatID, MessageIDs: []string{"s:7"}, Confirm: true})
 		require.NoError(t, err)
 		require.Nil(t, errRes)
 		require.NotNil(t, out)
@@ -272,7 +273,7 @@ func TestForwardAndMembershipMutationsUseExpectedRPCs(t *testing.T) {
 				return nil
 			}),
 		)
-		errRes, out, err := NewMessageForwardHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000)).handle(t.Context(), &mcp.CallToolRequest{}, ForwardMessageInput{
+		errRes, out, err := NewMessageForwardHandler(tgclient.NewResolver(tg.NewClient(inv))).handle(t.Context(), &mcp.CallToolRequest{}, ForwardMessageInput{
 			FromChatID: sourceID, MessageID: "7", ToChatID: targetID, Confirm: true,
 		})
 		require.NoError(t, err)
@@ -280,6 +281,41 @@ func TestForwardAndMembershipMutationsUseExpectedRPCs(t *testing.T) {
 		require.NotNil(t, out)
 		assert.Equal(t, "8", out.NewMessageID)
 		assert.Zero(t, inv.Remaining())
+	})
+
+	t.Run("forward re-resolves both peers once on a stale hash", func(t *testing.T) {
+		var randomIDs []int64
+		inv := telegramfake.New(
+			notUserStep(t, sourceID),
+			resolveChannelStep(t, sourceID, 91),
+			notUserStep(t, targetID),
+			resolveChannelStep(t, targetID, 92),
+			telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesForwardMessagesRequest, _ *tg.UpdatesBox) error {
+				randomIDs = append(randomIDs, rpc.RandomID...)
+				return tgerr.New(400, "CHANNEL_INVALID")
+			}),
+			notUserStep(t, sourceID),
+			resolveChannelStep(t, sourceID, 191),
+			notUserStep(t, targetID),
+			resolveChannelStep(t, targetID, 192),
+			telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesForwardMessagesRequest, out *tg.UpdatesBox) error {
+				assert.Equal(t, int64(191), rpc.FromPeer.(*tg.InputPeerChannel).AccessHash)
+				assert.Equal(t, int64(192), rpc.ToPeer.(*tg.InputPeerChannel).AccessHash)
+				randomIDs = append(randomIDs, rpc.RandomID...)
+				out.Updates = &tg.Updates{Updates: []tg.UpdateClass{&tg.UpdateNewChannelMessage{Message: &tg.Message{ID: 8, Date: 12}}}}
+				return nil
+			}),
+		)
+		errRes, out, err := NewMessageForwardHandler(tgclient.NewResolver(tg.NewClient(inv))).handle(t.Context(), &mcp.CallToolRequest{}, ForwardMessageInput{
+			FromChatID: sourceID, MessageID: "7", ToChatID: targetID, Confirm: true,
+		})
+		require.NoError(t, err)
+		require.Nil(t, errRes)
+		require.NotNil(t, out)
+		assert.Equal(t, "8", out.NewMessageID)
+		require.Len(t, randomIDs, 2)
+		assert.Equal(t, randomIDs[0], randomIDs[1], "the retry reuses the random id so Telegram deduplicates it")
+		assert.Zero(t, inv.Remaining(), "exactly one retry")
 	})
 
 	t.Run("leave", func(t *testing.T) {
@@ -294,7 +330,7 @@ func TestForwardAndMembershipMutationsUseExpectedRPCs(t *testing.T) {
 				return nil
 			}),
 		)
-		errRes, out, err := NewLeaveChatHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000)).handle(t.Context(), &mcp.CallToolRequest{}, LeaveChatInput{
+		errRes, out, err := NewLeaveChatHandler(tgclient.NewResolver(tg.NewClient(inv))).handle(t.Context(), &mcp.CallToolRequest{}, LeaveChatInput{
 			Chat: strconv.FormatInt(sourceID, 10), Confirm: true,
 		})
 		require.NoError(t, err)
@@ -312,7 +348,7 @@ func TestForwardAndMembershipMutationsUseExpectedRPCs(t *testing.T) {
 				return nil
 			}),
 		)
-		errRes, out, err := NewJoinChatHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000)).handle(t.Context(), &mcp.CallToolRequest{}, JoinChatInput{Chat: "+invite"})
+		errRes, out, err := NewJoinChatHandler(tgclient.NewResolver(tg.NewClient(inv))).handle(t.Context(), &mcp.CallToolRequest{}, JoinChatInput{Chat: "+invite"})
 		require.NoError(t, err)
 		require.Nil(t, errRes)
 		require.NotNil(t, out)
@@ -348,7 +384,7 @@ func TestFolderMutationHandlersUseExpectedRPCs(t *testing.T) {
 			dialogFiltersStep(t, &tg.DialogFilter{ID: 2, Title: tg.TextWithEntities{Text: "Old"}}),
 			updateDialogFilterStep(t, 3, true),
 		)
-		errRes, out, err := NewCreateFolderHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000)).handle(t.Context(), req, CreateFolderInput{Title: "Work", IncludeGroups: true})
+		errRes, out, err := NewCreateFolderHandler(tgclient.NewResolver(tg.NewClient(inv))).handle(t.Context(), req, CreateFolderInput{Title: "Work", IncludeGroups: true})
 		require.NoError(t, err)
 		require.Nil(t, errRes)
 		require.NotNil(t, out)
@@ -385,7 +421,7 @@ func TestFolderMutationHandlersUseExpectedRPCs(t *testing.T) {
 				return nil
 			}),
 		)
-		errRes, out, err := NewAddChatsToFolderHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000)).handle(t.Context(), req, AddChatsToFolderInput{
+		errRes, out, err := NewAddChatsToFolderHandler(tgclient.NewResolver(tg.NewClient(inv))).handle(t.Context(), req, AddChatsToFolderInput{
 			FolderID: 3, Chats: []string{strconv.FormatInt(channelID, 10)},
 		})
 		require.NoError(t, err)
@@ -412,7 +448,7 @@ func TestFolderMutationHandlersUseExpectedRPCs(t *testing.T) {
 				return nil
 			}),
 		)
-		errRes, out, err := NewRemoveChatsFromFolderHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000)).handle(t.Context(), req, RemoveChatsFromFolderInput{
+		errRes, out, err := NewRemoveChatsFromFolderHandler(tgclient.NewResolver(tg.NewClient(inv))).handle(t.Context(), req, RemoveChatsFromFolderInput{
 			FolderID: 3, Chats: []string{strconv.FormatInt(channelID, 10)},
 		})
 		require.NoError(t, err)
@@ -439,7 +475,7 @@ func TestSetChatMuteUsesExpectedRPC(t *testing.T) {
 			return nil
 		}),
 	)
-	errRes, out, err := NewChatMuteHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000)).handle(t.Context(), &mcp.CallToolRequest{}, SetChatMuteInput{
+	errRes, out, err := NewChatMuteHandler(tgclient.NewResolver(tg.NewClient(inv))).handle(t.Context(), &mcp.CallToolRequest{}, SetChatMuteInput{
 		ChatID: channelID, Muted: true,
 	})
 	require.NoError(t, err)

@@ -78,9 +78,9 @@ func buildTestHandlers(t *testing.T) (full, research []tools.Handler) {
 	t.Helper()
 	api := tg.NewClient(noopInvoker{})
 	s := &Server{opts: Options{MediaMaxBytes: 1024}}
-	peers := tgclient.NewResolver(api, 100_000)
+	peers := tgclient.NewResolver(api)
 	chatsCache := tgdata.NewChatsCache(nil)
-	return s.buildHandlers(api, peers, messages.NewProvider(peers), chatsCache)
+	return s.buildHandlers(api, peers, messages.NewProvider(peers, 100_000), chatsCache)
 }
 
 func TestVariantHandlerSplit(t *testing.T) {
@@ -523,7 +523,7 @@ func TestBackupMessagesOfferedOnlyOnStdioOutsideResearch(t *testing.T) {
 	stateHome := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateHome)
 	api := tg.NewClient(noopInvoker{})
-	peers := tgclient.NewResolver(api, 100_000)
+	peers := tgclient.NewResolver(api)
 	impl := &mcp.Implementation{Name: "mcp-telegram", Version: "test"}
 
 	cases := []struct {
@@ -538,7 +538,7 @@ func TestBackupMessagesOfferedOnlyOnStdioOutsideResearch(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.transport+"/"+tc.variant, func(t *testing.T) {
 			s := &Server{logger: testLogger(), opts: Options{Transport: tc.transport, Variant: tc.variant}}
-			full, _ := s.buildHandlers(api, peers, messages.NewProvider(peers), tgdata.NewChatsCache(nil))
+			full, _ := s.buildHandlers(api, peers, messages.NewProvider(peers, 100_000), tgdata.NewChatsCache(nil))
 			_, ok := listToolNames(t, newInner(impl, nil, full, noWire, false, testLogger()))["BackupMessages"]
 			assert.Equal(t, tc.want, ok)
 		})

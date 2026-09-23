@@ -29,7 +29,7 @@ func (p *Provider) FetchReplies(ctx context.Context, chatID int64, rootMsgID int
 		opts.Limit = 50
 	}
 
-	result, err := tgclient.WithPeer(ctx, p.peers, chatID, nil, nil, func(peer tgclient.Peer) (*FetchResult, error) {
+	result, err := tgclient.WithPeer(ctx, p.peers, chatID, func(peer tgclient.Peer) (*FetchResult, error) {
 		return p.fetchRepliesWithPeer(ctx, peer.Input, rootMsgID, opts)
 	})
 	if err != nil {
@@ -51,7 +51,7 @@ func (p *Provider) fetchRepliesWithPeer(ctx context.Context, peer tg.InputPeerCl
 		req.OffsetDate = telegramBefore(offsetDate)
 	}
 
-	if err := p.peers.Wait(ctx); err != nil {
+	if err := p.wait(ctx); err != nil {
 		return nil, err
 	}
 

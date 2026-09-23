@@ -224,7 +224,7 @@ func TestSummarizeCountsCompletedBatches(t *testing.T) {
 				return strings.TrimSpace(summary), nil
 			})
 			s := fixedSummarizer(llm, max(tc.batchTokens, 1))
-			got, err := s.Summarize(t.Context(), nil, messages.NewProvider(tgclient.NewResolver(tg.NewClient(inv), 100_000)), 77, "summarize", time.Time{}, 100, nil)
+			got, err := s.Summarize(t.Context(), nil, messages.NewProvider(tgclient.NewResolver(tg.NewClient(inv)), 100_000), 77, "summarize", time.Time{}, 100, nil)
 			if tc.failBatch > 0 {
 				require.ErrorIs(t, err, assert.AnError)
 			} else {

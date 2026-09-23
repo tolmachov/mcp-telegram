@@ -170,7 +170,7 @@ func (h *JoinChatHandler) joinByID(ctx context.Context, chat, value string) (*mc
 	known := &JoinChatResult{Status: statusAlreadyMember, Chat: chat}
 	fillJoinResultFromChannel(known, channel)
 
-	res, err := tgclient.WithPeer(ctx, h.peers, id, nil, nil, func(p tgclient.Peer) (tg.MessagesChatInviteJoinResultClass, error) {
+	res, err := tgclient.WithPeer(ctx, h.peers, id, func(p tgclient.Peer) (tg.MessagesChatInviteJoinResultClass, error) {
 		ch, ok := p.Input.(*tg.InputPeerChannel)
 		if !ok {
 			return nil, fmt.Errorf("chat %d no longer resolves to a channel", id)
@@ -306,10 +306,10 @@ var errInviteChatRef = errors.New("invite links name no chat until joined")
 // or a numeric chat ID — to the InputPeer of whatever it names: a user, basic
 // group or channel. Invite links are rejected with errInviteChatRef.
 //
-// A numeric ID yields the resolver's cached peer without the stale-hash retry
-// of tgclient.WithPeer: callers (LeaveChat, the folder tools) mix it with
-// username resolutions, and the non-min access hashes the resolver hands out
-// only go stale when the chat itself is gone, where a retry fails the same way.
+// A numeric ID goes through the resolver but without the stale-hash retry of
+// tgclient.WithPeer, which has to wrap the RPC that uses the peer: these
+// callers (LeaveChat, the folder tools) issue theirs later, over peers mixed
+// with username resolutions, so a stale cached hash fails that call.
 func resolveChatRef(ctx context.Context, peers *tgclient.Resolver, ref string) (tg.InputPeerClass, error) {
 	kind, value := classifyChatRef(ref)
 	switch kind {

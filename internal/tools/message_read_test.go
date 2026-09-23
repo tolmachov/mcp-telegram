@@ -32,7 +32,7 @@ func (f *staticErrInvoker) Invoke(_ context.Context, _ bin.Encoder, _ bin.Decode
 func TestMarkAsReadFloodWaitStopsBatch(t *testing.T) {
 	flood := &tgerr.Error{Code: 420, Message: "FLOOD_WAIT_30", Type: "FLOOD_WAIT", Argument: 30}
 	inv := &staticErrInvoker{err: flood}
-	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv)))
 
 	errRes, out, err := h.handle(context.Background(), &mcp.CallToolRequest{}, MarkAsReadInput{
 		ChatIDs: []int64{100, 200, 300},
@@ -52,7 +52,7 @@ func TestMarkAsReadFloodWaitStopsBatch(t *testing.T) {
 
 func TestMarkAsReadNonFloodErrorContinuesBatch(t *testing.T) {
 	inv := &staticErrInvoker{err: errors.New("boom")}
-	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv)))
 
 	errRes, out, err := h.handle(context.Background(), &mcp.CallToolRequest{}, MarkAsReadInput{
 		ChatIDs: []int64{100, 200, 300},
@@ -84,7 +84,7 @@ func TestMarkAsReadChannelUsesCurrentTopMessage(t *testing.T) {
 			return nil
 		}),
 	)
-	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv)))
 
 	errRes, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, MarkAsReadInput{
 		ChatIDs: []int64{channelID},
@@ -131,7 +131,7 @@ func TestMarkAsReadLooksUpChannelTopsInOneCall(t *testing.T) {
 			return nil
 		}),
 	)
-	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv)))
 
 	errRes, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, MarkAsReadInput{
 		ChatIDs: []int64{firstID, secondID, groupID},
@@ -188,7 +188,7 @@ func TestMarkAsReadIsolatesBadChannel(t *testing.T) {
 			return tgerr.New(400, "CHANNEL_PRIVATE")
 		}),
 	)
-	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv)))
 
 	errRes, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, MarkAsReadInput{ChatIDs: []int64{goodID, badID}})
 	require.NoError(t, err)
@@ -223,7 +223,7 @@ func TestMarkAsReadFloodWaitMidReadSkipsRest(t *testing.T) {
 		}),
 	)
 	inv := telegramfake.New(script...)
-	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv)))
 
 	errRes, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, MarkAsReadInput{ChatIDs: []int64{1, 2, 3}})
 	require.NoError(t, err)
@@ -248,7 +248,7 @@ func TestMarkAsReadDeadSessionStopsBatch(t *testing.T) {
 		return tgerr.New(401, "AUTH_KEY_UNREGISTERED")
 	}))
 	inv := telegramfake.New(script...)
-	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000))
+	h := NewMessageReadHandler(tgclient.NewResolver(tg.NewClient(inv)))
 
 	errRes, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, MarkAsReadInput{ChatIDs: []int64{channelID, groupID}})
 	require.NoError(t, err)

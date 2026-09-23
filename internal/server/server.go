@@ -364,8 +364,8 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 	// bottleneck on the shared limiter. Raising it too high will trip
 	// Telegram's FLOOD_WAIT which the tgclient waiter wrapper reports via
 	// onFloodWait.
-	peers := tgclient.NewResolver(api, s.opts.TGRateLimitRPS)
-	msgProvider := messages.NewProvider(peers)
+	peers := tgclient.NewResolver(api)
+	msgProvider := messages.NewProvider(peers, s.opts.TGRateLimitRPS)
 
 	fullHandlers, researchHandlers := s.buildHandlers(api, peers, msgProvider, chatsCache)
 

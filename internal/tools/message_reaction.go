@@ -92,7 +92,7 @@ func (h *MessageReactionHandler) handle(ctx context.Context, _ *mcp.CallToolRequ
 	// When no reactions are set the Reaction flag stays clear, which tells
 	// Telegram to remove all of the current user's reactions from the message.
 
-	if _, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, nil, nil, func(p tgclient.Peer) (tg.UpdatesClass, error) {
+	if _, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, func(p tgclient.Peer) (tg.UpdatesClass, error) {
 		sendReq.Peer = p.Input
 		return h.client.MessagesSendReaction(ctx, sendReq)
 	}); err != nil {

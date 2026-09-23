@@ -143,7 +143,7 @@ func TestReadOnlyHandlersUseExpectedRPCs(t *testing.T) {
 				return nil
 			}),
 		)
-		errRes, out, err := NewChatInfoGetHandler(tgclient.NewResolver(tg.NewClient(inv), 100_000)).handle(t.Context(), &mcp.CallToolRequest{}, GetChatInfoInput{ChatID: channelID})
+		errRes, out, err := NewChatInfoGetHandler(tgclient.NewResolver(tg.NewClient(inv))).handle(t.Context(), &mcp.CallToolRequest{}, GetChatInfoInput{ChatID: channelID})
 		require.NoError(t, err)
 		require.Nil(t, errRes)
 		require.NotNil(t, out)
@@ -204,8 +204,8 @@ func TestBackupMessagesWritesAtomicallyInsideConfiguredPath(t *testing.T) {
 		}),
 	)
 	client := tg.NewClient(inv)
-	provider := messages.NewProvider(tgclient.NewResolver(client, 100_000))
-	handler := NewMessageBackupHandler(tgclient.NewResolver(client, 100_000), provider, []string{dir})
+	provider := messages.NewProvider(tgclient.NewResolver(client), 100_000)
+	handler := NewMessageBackupHandler(tgclient.NewResolver(client), provider, []string{dir})
 
 	errRes, out, err := handler.handle(t.Context(), &mcp.CallToolRequest{}, BackupMessagesInput{
 		ChatID: channelID, Filepath: target, Limit: 1,

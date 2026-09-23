@@ -100,7 +100,7 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		return errResult("schedule_at is only valid when editing a scheduled message (\"s:...\"). To reschedule a pending delivery, pass the scheduled handle instead."), nil, nil
 	}
 
-	updates, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, nil, nil, func(p tgclient.Peer) (tg.UpdatesClass, error) {
+	updates, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, func(p tgclient.Peer) (tg.UpdatesClass, error) {
 		editReq.Peer = p.Input
 		return h.client.MessagesEditMessage(ctx, editReq)
 	})

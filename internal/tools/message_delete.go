@@ -110,7 +110,7 @@ func (h *MessageDeleteHandler) handle(ctx context.Context, _ *mcp.CallToolReques
 		return errRes, nil, nil
 	}
 
-	statuses, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, nil, nil, func(p tgclient.Peer) (map[int]string, error) {
+	statuses, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, func(p tgclient.Peer) (map[int]string, error) {
 		if scheduled {
 			return h.deleteScheduled(ctx, p.Input, ids)
 		}

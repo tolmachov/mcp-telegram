@@ -79,7 +79,7 @@ func (h *ChatMuteHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in
 	default:
 		muteUntil = int(time.Now().Unix()) + in.DurationSeconds
 	}
-	if _, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, nil, nil, func(p tgclient.Peer) (bool, error) {
+	if _, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, func(p tgclient.Peer) (bool, error) {
 		return h.client.AccountUpdateNotifySettings(ctx, &tg.AccountUpdateNotifySettingsRequest{
 			Peer:     &tg.InputNotifyPeer{Peer: p.Input},
 			Settings: tg.InputPeerNotifySettings{MuteUntil: muteUntil},
