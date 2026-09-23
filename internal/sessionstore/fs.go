@@ -136,10 +136,8 @@ func (f *FS) Exists(_ context.Context, userID tgid.UserID, sid string) (bool, er
 }
 
 func (f *FS) Delete(_ context.Context, userID tgid.UserID, sid string) error {
-	p := f.path(userID, sid)
-	err := os.Remove(p)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("sessionstore: removing %s: %w", p, err)
+	if err := (xdg.FileSession{Path: f.path(userID, sid)}).DeleteSession(); err != nil {
+		return fmt.Errorf("sessionstore: %w", err)
 	}
 	return nil
 }

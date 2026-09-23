@@ -54,3 +54,12 @@ func TestStateDirTightensExistingPermissions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm())
 }
+
+func TestFileSessionDeleteSession(t *testing.T) {
+	s := FileSession{Path: filepath.Join(t.TempDir(), "session.bin")}
+	require.NoError(t, s.StoreSession(t.Context(), []byte("session")))
+	require.NoError(t, s.DeleteSession())
+	_, err := os.Stat(s.Path)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	require.NoError(t, s.DeleteSession(), "deleting a missing session is a no-op")
+}

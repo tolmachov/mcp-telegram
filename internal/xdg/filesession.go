@@ -41,3 +41,13 @@ func (s FileSession) StoreSession(_ context.Context, data []byte) error {
 	}
 	return nil
 }
+
+// DeleteSession removes the session file. It is idempotent: a missing file is
+// success, since a logout or an operator's delete must succeed even when the
+// session was never written.
+func (s FileSession) DeleteSession() error {
+	if err := os.Remove(s.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("deleting session file %s: %w", s.Path, err)
+	}
+	return nil
+}
