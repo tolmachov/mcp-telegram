@@ -129,6 +129,7 @@ func TestReadOnlyHandlersUseExpectedRPCs(t *testing.T) {
 	t.Run("chat info", func(t *testing.T) {
 		const channelID = int64(60)
 		inv := telegramfake.New(
+			notUserStep(t, channelID),
 			resolveChannelStep(t, channelID, 160),
 			telegramfake.Typed(func(_ context.Context, req *tg.ChannelsGetFullChannelRequest, out *tg.MessagesChatFull) error {
 				channel := req.Channel.(*tg.InputChannel)
@@ -142,7 +143,7 @@ func TestReadOnlyHandlersUseExpectedRPCs(t *testing.T) {
 				return nil
 			}),
 		)
-		errRes, out, err := NewChatInfoGetHandler(tg.NewClient(inv)).handle(t.Context(), &mcp.CallToolRequest{}, GetChatInfoInput{ChatID: botAPIChannelID(channelID)})
+		errRes, out, err := NewChatInfoGetHandler(tg.NewClient(inv)).handle(t.Context(), &mcp.CallToolRequest{}, GetChatInfoInput{ChatID: channelID})
 		require.NoError(t, err)
 		require.Nil(t, errRes)
 		require.NotNil(t, out)
@@ -201,7 +202,9 @@ func TestBackupMessagesWritesAtomicallyInsideConfiguredPath(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "backup.txt")
 	inv := telegramfake.New(
+		notUserStep(t, channelID),
 		resolveChannelStep(t, channelID, 161),
+		notUserStep(t, channelID),
 		resolveChannelStep(t, channelID, 161),
 		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
 			out.Messages = &tg.MessagesMessages{Messages: []tg.MessageClass{&tg.Message{ID: 1, Date: 100, Message: "backed up"}}}
@@ -213,7 +216,7 @@ func TestBackupMessagesWritesAtomicallyInsideConfiguredPath(t *testing.T) {
 	handler := NewMessageBackupHandler(client, provider, []string{dir})
 
 	errRes, out, err := handler.handle(t.Context(), &mcp.CallToolRequest{}, BackupMessagesInput{
-		ChatID: botAPIChannelID(channelID), Filepath: target, Limit: 1,
+		ChatID: channelID, Filepath: target, Limit: 1,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, errRes)

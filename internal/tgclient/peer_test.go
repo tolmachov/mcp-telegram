@@ -85,48 +85,18 @@ func TestResolvePeer(t *testing.T) {
 		assert.Equal(t, int64(1555091578), gotChannelID, "bare id must reach channels.getChannels unchanged")
 	})
 
-	t.Run("legacy -100 marked id strips prefix and resolves as channel", func(t *testing.T) {
-		var gotChannelID int64
+	t.Run("non-positive id is rejected without probing", func(t *testing.T) {
 		client := tg.NewClient(fakeInvoker{
 			users: func([]tg.InputUserClass) ([]tg.UserClass, error) {
-				t.Fatal("marked id must not probe users.getUsers")
+				t.Fatal("a non-positive id must not reach Telegram")
 				return nil, nil
-			},
-			channels: func(ids []tg.InputChannelClass) (tg.MessagesChatsClass, error) {
-				gotChannelID = ids[0].(*tg.InputChannel).ChannelID
-				return &tg.MessagesChats{Chats: []tg.ChatClass{
-					&tg.Channel{ID: 1555091578, AccessHash: 999},
-				}}, nil
 			},
 		})
-
-		peer, err := ResolvePeer(ctx, client, -1001555091578)
-		require.NoError(t, err)
-		assert.Equal(t, &tg.InputPeerChannel{ChannelID: 1555091578, AccessHash: 999}, peer)
-		assert.Equal(t, int64(1555091578), gotChannelID, "-100 prefix must be stripped")
-	})
-
-	t.Run("legacy small-negative id resolves as basic chat", func(t *testing.T) {
-		var gotChatID int64
-		client := tg.NewClient(fakeInvoker{
-			users: func([]tg.InputUserClass) ([]tg.UserClass, error) {
-				t.Fatal("basic-chat hint must not probe users.getUsers")
-				return nil, nil
-			},
-			channels: func([]tg.InputChannelClass) (tg.MessagesChatsClass, error) {
-				t.Fatal("basic-chat hint must not probe channels.getChannels")
-				return nil, nil
-			},
-			chats: func(ids []int64) (tg.MessagesChatsClass, error) {
-				gotChatID = ids[0]
-				return &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Chat{ID: 500}}}, nil
-			},
-		})
-
-		peer, err := ResolvePeer(ctx, client, -500)
-		require.NoError(t, err)
-		assert.Equal(t, &tg.InputPeerChat{ChatID: 500}, peer)
-		assert.Equal(t, int64(500), gotChatID, "-500 must normalise to bare 500")
+		for _, id := range []int64{-1001555091578, -500, 0} {
+			_, err := ResolvePeer(ctx, client, id)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "positive ID", "id %d", id)
+		}
 	})
 
 	t.Run("user id resolves as user", func(t *testing.T) {
@@ -237,22 +207,4 @@ func TestResolvePeer(t *testing.T) {
 		assert.Contains(t, err.Error(), "ResolveUsername")
 		assert.NotContains(t, err.Error(), "CHANNEL_PRIVATE", "raw MTProto code must not leak")
 	})
-}
-
-func TestNormalizeDialogID(t *testing.T) {
-	tests := []struct {
-		in       int64
-		wantID   int64
-		wantHint peerHint
-	}{
-		{1555091578, 1555091578, hintNone},
-		{42, 42, hintNone},
-		{-1001555091578, 1555091578, hintChannel},
-		{-123456789, 123456789, hintBasicChat},
-	}
-	for _, tt := range tests {
-		id, hint := normalizeDialogID(tt.in)
-		assert.Equal(t, tt.wantID, id, "id for %d", tt.in)
-		assert.Equal(t, tt.wantHint, hint, "hint for %d", tt.in)
-	}
 }

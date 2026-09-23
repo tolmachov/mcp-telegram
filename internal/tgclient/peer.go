@@ -8,23 +8,6 @@ import (
 	"github.com/gotd/td/tgerr"
 )
 
-// ChannelIDPrefix is the offset the Telegram Bot API adds to channel IDs (the
-// "-100" prefix). This server speaks MTProto and uses bare positive IDs — the
-// same numbers the official Telegram clients show — everywhere. The constant is
-// kept only to parse legacy Bot-API "-100…" values still accepted on input.
-const ChannelIDPrefix = 1_000_000_000_000
-
-// peerHint pins which peer type to resolve. A bare positive ID carries no hint
-// and is probed user → channel → chat; a legacy negative (Bot-API-marked) ID
-// normalises to a bare ID plus a hint that limits the probe to a single type.
-type peerHint int
-
-const (
-	hintNone peerHint = iota
-	hintBasicChat
-	hintChannel
-)
-
 // peerProbe attempts to resolve a bare MTProto ID as one specific peer type.
 // It returns (peer, nil) on a match, (nil, nil) when the ID is definitively not
 // that type (the caller falls through to the next probe), or (nil, err) for a
@@ -43,20 +26,10 @@ type peerProbe func(ctx context.Context, client *tg.Client, id int64) (tg.InputP
 // messages.getChats path entirely. Users take priority on the astronomically
 // unlikely numeric collision.
 //
-// Legacy Bot-API "marked" IDs are still accepted: a negative ID is normalised to
-// its bare form and pins the probe to a single type (magnitude > 10¹² → channel,
-// otherwise basic chat).
+// Non-positive IDs, including Bot-API "-100…" marked IDs, are rejected.
 func ResolvePeer(ctx context.Context, client *tg.Client, dialogID int64) (tg.InputPeerClass, error) {
-	bareID, hint := normalizeDialogID(dialogID)
-
-	var probes []peerProbe
-	switch hint {
-	case hintChannel:
-		probes = []peerProbe{resolveChannel}
-	case hintBasicChat:
-		probes = []peerProbe{resolveBasicChat}
-	default:
-		probes = []peerProbe{resolveUser, resolveChannel, resolveBasicChat}
+	if dialogID <= 0 {
+		return nil, fmt.Errorf("chat id %d is invalid: pass the positive ID Telegram clients show (Bot-API \"-100…\" IDs are not accepted)", dialogID)
 	}
 
 	// Probe each candidate type in order. A match returns immediately; a
@@ -64,8 +37,8 @@ func ResolvePeer(ctx context.Context, client *tg.Client, dialogID int64) (tg.Inp
 	// failure surfaces as itself, unmisattributed, and we don't fire further
 	// live calls into a rate-limit window); only a (nil, nil) "not this type"
 	// result falls through to the next probe.
-	for _, probe := range probes {
-		peer, err := probe(ctx, client, bareID)
+	for _, probe := range []peerProbe{resolveUser, resolveChannel, resolveBasicChat} {
+		peer, err := probe(ctx, client, dialogID)
 		if err != nil {
 			return nil, err
 		}
@@ -74,21 +47,6 @@ func ResolvePeer(ctx context.Context, client *tg.Client, dialogID int64) (tg.Inp
 		}
 	}
 	return nil, fmt.Errorf("id %d is not a reachable user, chat, or channel; verify it with ResolveUsername (by @handle) or SearchChats (by title)", dialogID)
-}
-
-// normalizeDialogID converts a caller-supplied chat ID into a bare MTProto ID
-// plus a type hint. Positive IDs pass through untouched with no hint. Negative
-// IDs are treated as legacy Bot-API-marked values: magnitudes above the channel
-// prefix are channels/supergroups, smaller ones are basic groups.
-func normalizeDialogID(dialogID int64) (int64, peerHint) {
-	if dialogID >= 0 {
-		return dialogID, hintNone
-	}
-	magnitude := -dialogID
-	if magnitude > ChannelIDPrefix {
-		return magnitude - ChannelIDPrefix, hintChannel
-	}
-	return magnitude, hintBasicChat
 }
 
 // resolveUser probes users.getUsers. It returns (nil, nil) when the ID is not a

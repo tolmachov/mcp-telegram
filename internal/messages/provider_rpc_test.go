@@ -13,10 +13,6 @@ import (
 	telegramfake "github.com/tolmachov/mcp-telegram/internal/testutil/telegram"
 )
 
-func messageChannelID(id int64) int64 {
-	return -1_000_000_000_000 - id
-}
-
 func resolveMessageChannelStep(t *testing.T, id, hash int64) telegramfake.InvokeFunc {
 	t.Helper()
 	return telegramfake.Typed(func(_ context.Context, req *tg.ChannelsGetChannelsRequest, out *tg.MessagesChatsBox) error {
@@ -27,14 +23,28 @@ func resolveMessageChannelStep(t *testing.T, id, hash int64) telegramfake.Invoke
 	})
 }
 
+// notUserStep answers the resolver's users.getUsers probe with "not a user",
+// so resolution falls through to the channel probe.
+func notUserStep(t *testing.T, id int64) telegramfake.InvokeFunc {
+	t.Helper()
+	return telegramfake.Typed(func(_ context.Context, req *tg.UsersGetUsersRequest, out *tg.UserClassVector) error {
+		require.Len(t, req.ID, 1)
+		assert.Equal(t, id, req.ID[0].(*tg.InputUser).UserID)
+		out.Elems = nil
+		return nil
+	})
+}
+
 func TestFetchRefreshesStalePeerExactlyOnce(t *testing.T) {
 	const channelID = int64(77)
 	inv := telegramfake.New(
+		notUserStep(t, channelID),
 		resolveMessageChannelStep(t, channelID, 100),
 		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetHistoryRequest, _ *tg.MessagesMessagesBox) error {
 			assert.Equal(t, int64(100), req.Peer.(*tg.InputPeerChannel).AccessHash)
 			return tgerr.New(400, "CHANNEL_INVALID")
 		}),
+		notUserStep(t, channelID),
 		resolveMessageChannelStep(t, channelID, 200),
 		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
 			assert.Equal(t, int64(200), req.Peer.(*tg.InputPeerChannel).AccessHash)
@@ -44,7 +54,7 @@ func TestFetchRefreshesStalePeerExactlyOnce(t *testing.T) {
 	)
 	p := NewProviderWithRate(tg.NewClient(inv), 100_000)
 
-	got, err := p.Fetch(t.Context(), messageChannelID(channelID), FetchOptions{Limit: 10})
+	got, err := p.Fetch(t.Context(), channelID, FetchOptions{Limit: 10})
 	require.NoError(t, err)
 	require.Len(t, got.Messages, 1)
 	assert.Equal(t, "fresh", got.Messages[0].Text)
@@ -56,6 +66,7 @@ func TestFetchAllContinuesServiceOnlyPageAndPreservesPartialResult(t *testing.T)
 
 	t.Run("service-only page advances", func(t *testing.T) {
 		inv := telegramfake.New(
+			notUserStep(t, channelID),
 			resolveMessageChannelStep(t, channelID, 101),
 			telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
 				assert.Zero(t, req.OffsetID)
@@ -74,7 +85,7 @@ func TestFetchAllContinuesServiceOnlyPageAndPreservesPartialResult(t *testing.T)
 			}),
 		)
 		p := NewProviderWithRate(tg.NewClient(inv), 100_000)
-		got, err := p.FetchAll(t.Context(), messageChannelID(channelID), FetchOptions{Limit: 1}, nil)
+		got, err := p.FetchAll(t.Context(), channelID, FetchOptions{Limit: 1}, nil)
 		require.NoError(t, err)
 		require.Len(t, got.Messages, 1)
 		assert.Equal(t, 9, got.Messages[0].ID)
@@ -83,6 +94,7 @@ func TestFetchAllContinuesServiceOnlyPageAndPreservesPartialResult(t *testing.T)
 
 	t.Run("late error returns accumulated messages", func(t *testing.T) {
 		inv := telegramfake.New(
+			notUserStep(t, channelID),
 			resolveMessageChannelStep(t, channelID, 101),
 			telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
 				out.Messages = &tg.MessagesMessagesSlice{Count: 2, Messages: []tg.MessageClass{&tg.Message{ID: 9, Date: 90, Message: "kept"}}}
@@ -93,7 +105,7 @@ func TestFetchAllContinuesServiceOnlyPageAndPreservesPartialResult(t *testing.T)
 			}),
 		)
 		p := NewProviderWithRate(tg.NewClient(inv), 100_000)
-		got, err := p.FetchAll(t.Context(), messageChannelID(channelID), FetchOptions{Limit: 1}, nil)
+		got, err := p.FetchAll(t.Context(), channelID, FetchOptions{Limit: 1}, nil)
 		require.Error(t, err)
 		require.NotNil(t, got)
 		require.Len(t, got.Messages, 1)
@@ -104,6 +116,7 @@ func TestFetchAllContinuesServiceOnlyPageAndPreservesPartialResult(t *testing.T)
 func TestFetchContextIncludesAnchorWhenAfterZero(t *testing.T) {
 	const channelID = int64(79)
 	inv := telegramfake.New(
+		notUserStep(t, channelID),
 		resolveMessageChannelStep(t, channelID, 102),
 		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
 			assert.Equal(t, 20, req.OffsetID)
@@ -116,7 +129,7 @@ func TestFetchContextIncludesAnchorWhenAfterZero(t *testing.T) {
 		}),
 	)
 	p := NewProviderWithRate(tg.NewClient(inv), 100_000)
-	got, err := p.FetchContext(t.Context(), messageChannelID(channelID), 20, 1, 0)
+	got, err := p.FetchContext(t.Context(), channelID, 20, 1, 0)
 	require.NoError(t, err)
 	require.Len(t, got.Messages, 2)
 	assert.Equal(t, []int{19, 20}, []int{got.Messages[0].ID, got.Messages[1].ID})
@@ -126,6 +139,7 @@ func TestFetchContextIncludesAnchorWhenAfterZero(t *testing.T) {
 func TestFetchScheduledIsUnpaginated(t *testing.T) {
 	const channelID = int64(80)
 	inv := telegramfake.New(
+		notUserStep(t, channelID),
 		resolveMessageChannelStep(t, channelID, 103),
 		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetScheduledHistoryRequest, out *tg.MessagesMessagesBox) error {
 			out.Messages = &tg.MessagesMessages{Messages: []tg.MessageClass{&tg.Message{ID: 3, Date: 30, Message: "scheduled"}}}
@@ -133,7 +147,7 @@ func TestFetchScheduledIsUnpaginated(t *testing.T) {
 		}),
 	)
 	p := NewProviderWithRate(tg.NewClient(inv), 100_000)
-	got, err := p.FetchScheduled(t.Context(), messageChannelID(channelID))
+	got, err := p.FetchScheduled(t.Context(), channelID)
 	require.NoError(t, err)
 	require.Len(t, got.Messages, 1)
 	assert.False(t, got.HasMore)
@@ -148,6 +162,7 @@ func TestSearchAndRepliesBuildTelegramRequests(t *testing.T) {
 
 	t.Run("search uses inclusive lower and exclusive upper bound", func(t *testing.T) {
 		inv := telegramfake.New(
+			notUserStep(t, channelID),
 			resolveMessageChannelStep(t, channelID, 104),
 			telegramfake.Typed(func(_ context.Context, req *tg.MessagesSearchRequest, out *tg.MessagesMessagesBox) error {
 				assert.Equal(t, "needle", req.Q)
@@ -158,15 +173,16 @@ func TestSearchAndRepliesBuildTelegramRequests(t *testing.T) {
 			}),
 		)
 		p := NewProviderWithRate(tg.NewClient(inv), 100_000)
-		got, err := p.Search(t.Context(), messageChannelID(channelID), SearchOptions{Query: "needle", MinDate: from, MaxDate: to})
+		got, err := p.Search(t.Context(), channelID, SearchOptions{Query: "needle", MinDate: from, MaxDate: to})
 		require.NoError(t, err)
 		require.Len(t, got.Messages, 1)
-		assert.Equal(t, messageChannelID(channelID), got.ChatID)
+		assert.Equal(t, channelID, got.ChatID)
 		assert.Zero(t, inv.Remaining())
 	})
 
 	t.Run("replies", func(t *testing.T) {
 		inv := telegramfake.New(
+			notUserStep(t, channelID),
 			resolveMessageChannelStep(t, channelID, 104),
 			telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetRepliesRequest, out *tg.MessagesMessagesBox) error {
 				assert.Equal(t, 55, req.MsgID)
@@ -176,7 +192,7 @@ func TestSearchAndRepliesBuildTelegramRequests(t *testing.T) {
 			}),
 		)
 		p := NewProviderWithRate(tg.NewClient(inv), 100_000)
-		got, err := p.FetchReplies(t.Context(), messageChannelID(channelID), 55, FetchOptions{Limit: 20})
+		got, err := p.FetchReplies(t.Context(), channelID, 55, FetchOptions{Limit: 20})
 		require.NoError(t, err)
 		require.Len(t, got.Messages, 1)
 		assert.Zero(t, inv.Remaining())
@@ -206,6 +222,7 @@ func TestSearchGlobalAndForumTopicsBuildTelegramRequests(t *testing.T) {
 	t.Run("forum topics", func(t *testing.T) {
 		const channelID = int64(83)
 		inv := telegramfake.New(
+			notUserStep(t, channelID),
 			resolveMessageChannelStep(t, channelID, 106),
 			telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetForumTopicsRequest, out *tg.MessagesForumTopics) error {
 				query, ok := req.GetQ()
@@ -218,7 +235,7 @@ func TestSearchGlobalAndForumTopicsBuildTelegramRequests(t *testing.T) {
 			}),
 		)
 		p := NewProviderWithRate(tg.NewClient(inv), 100_000)
-		got, err := p.FetchForumTopics(t.Context(), messageChannelID(channelID), "release", 25, 0, 0, 0, 0)
+		got, err := p.FetchForumTopics(t.Context(), channelID, "release", 25, 0, 0, 0, 0)
 		require.NoError(t, err)
 		require.Len(t, got.Topics, 1)
 		assert.Equal(t, "Release", got.Topics[0].Title)
@@ -251,6 +268,7 @@ func TestProviderPublicValidation(t *testing.T) {
 func TestFetchUnreadUsesDialogReadBoundary(t *testing.T) {
 	const channelID = int64(84)
 	inv := telegramfake.New(
+		notUserStep(t, channelID),
 		resolveMessageChannelStep(t, channelID, 107),
 		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetPeerDialogsRequest, out *tg.MessagesPeerDialogs) error {
 			require.Len(t, req.Peers, 1)
@@ -264,7 +282,7 @@ func TestFetchUnreadUsesDialogReadBoundary(t *testing.T) {
 		}),
 	)
 	p := NewProviderWithRate(tg.NewClient(inv), 100_000)
-	got, err := p.Fetch(t.Context(), messageChannelID(channelID), FetchOptions{UnreadOnly: true})
+	got, err := p.Fetch(t.Context(), channelID, FetchOptions{UnreadOnly: true})
 	require.NoError(t, err)
 	require.Len(t, got.Messages, 1)
 	assert.Equal(t, 41, got.Messages[0].ID)
@@ -274,6 +292,7 @@ func TestFetchUnreadUsesDialogReadBoundary(t *testing.T) {
 func TestForumPaginationCountsOnlyThroughLiveAnchor(t *testing.T) {
 	const channelID = int64(85)
 	inv := telegramfake.New(
+		notUserStep(t, channelID),
 		resolveMessageChannelStep(t, channelID, 108),
 		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetForumTopicsRequest, out *tg.MessagesForumTopics) error {
 			assert.Zero(t, req.OffsetTopic)
@@ -305,7 +324,7 @@ func TestForumPaginationCountsOnlyThroughLiveAnchor(t *testing.T) {
 	offset := ForumTopicsOffset{}
 	var ids []int
 	for range 3 {
-		got, err := p.FetchForumTopics(t.Context(), messageChannelID(channelID), "", 0, offset.Topic, offset.ID, offset.Date, offset.Seen)
+		got, err := p.FetchForumTopics(t.Context(), channelID, "", 0, offset.Topic, offset.ID, offset.Date, offset.Seen)
 		require.NoError(t, err)
 		for _, topic := range got.Topics {
 			ids = append(ids, topic.ID)
@@ -321,6 +340,7 @@ func TestForumPaginationCountsOnlyThroughLiveAnchor(t *testing.T) {
 
 func TestForumPaginationRejectsRepeatedAnchorEvenAtReportedEnd(t *testing.T) {
 	inv := telegramfake.New(
+		notUserStep(t, 85),
 		resolveMessageChannelStep(t, 85, 108),
 		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetForumTopicsRequest, out *tg.MessagesForumTopics) error {
 			out.Count = 2
@@ -329,7 +349,7 @@ func TestForumPaginationRejectsRepeatedAnchorEvenAtReportedEnd(t *testing.T) {
 		}),
 	)
 	p := NewProviderWithRate(tg.NewClient(inv), 100_000)
-	got, err := p.FetchForumTopics(t.Context(), messageChannelID(85), "", 2, 7, 70, 100, 1)
+	got, err := p.FetchForumTopics(t.Context(), 85, "", 2, 7, 70, 100, 1)
 	require.ErrorContains(t, err, "did not advance")
 	assert.Nil(t, got)
 	assert.Zero(t, inv.Remaining())
@@ -352,6 +372,7 @@ func TestFetchPreservesMediaAndMetadataForBackup(t *testing.T) {
 		{Reaction: &tg.ReactionPaid{}, Count: 3},
 	}})
 	inv := telegramfake.New(
+		notUserStep(t, 86),
 		resolveMessageChannelStep(t, 86, 109),
 		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
 			out.Messages = &tg.MessagesMessages{Messages: []tg.MessageClass{
@@ -366,7 +387,7 @@ func TestFetchPreservesMediaAndMetadataForBackup(t *testing.T) {
 		}),
 	)
 	p := NewProviderWithRate(tg.NewClient(inv), 100_000)
-	got, err := p.Fetch(t.Context(), messageChannelID(86), DefaultFetchOptions())
+	got, err := p.Fetch(t.Context(), 86, DefaultFetchOptions())
 	require.NoError(t, err)
 	require.Len(t, got.Messages, 3)
 	assert.Equal(t, &MediaInfo{Type: "photo", Width: 1280, Height: 960, ResourceURI: "telegram://media/101/202/2/x?ref=cmVm"}, got.Messages[0].Media)

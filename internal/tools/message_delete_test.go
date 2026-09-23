@@ -101,9 +101,15 @@ func inputIDs(in []tg.InputMessageClass) []int {
 
 func (f *deleteInvoker) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
 	switch req := input.(type) {
+	case *tg.UsersGetUsersRequest:
+		// Not a user: the resolver falls through to the chat probes.
+		output.(*tg.UserClassVector).Elems = nil
 	case *tg.MessagesGetChatsRequest:
 		output.(*tg.MessagesChatsBox).Chats = &tg.MessagesChats{Chats: []tg.ChatClass{f.chat()}}
 	case *tg.ChannelsGetChannelsRequest:
+		if !f.channel {
+			return tgerr.New(400, "CHANNEL_INVALID")
+		}
 		output.(*tg.MessagesChatsBox).Chats = &tg.MessagesChats{Chats: []tg.ChatClass{f.chat()}}
 	case *tg.MessagesGetMessagesRequest:
 		output.(*tg.MessagesMessagesBox).Messages = &tg.MessagesMessages{
@@ -170,7 +176,7 @@ func statusesOf(out *DeleteMessagesResult) map[string]string {
 }
 
 func TestDeleteMessagesBasicGroup(t *testing.T) {
-	const chatID = -testBasicChatID
+	const chatID = testBasicChatID
 
 	t.Run("admin deletes a bot message", func(t *testing.T) {
 		inv := newBasicGroupInvoker()
@@ -263,7 +269,7 @@ func TestDeleteMessagesChannelError(t *testing.T) {
 	inv.admin = true
 	inv.deleteErr = tgerr.New(403, "MESSAGE_DELETE_FORBIDDEN")
 	inv.add(42, false)
-	errRes, out := runDelete(t, inv, -1000000000000-testChannelID, "42")
+	errRes, out := runDelete(t, inv, testChannelID, "42")
 	require.Nil(t, out)
 	require.NotNil(t, errRes)
 	assert.True(t, errRes.IsError)
@@ -275,7 +281,7 @@ func TestDeleteMessagesChannelError(t *testing.T) {
 func TestDeleteMessagesScheduled(t *testing.T) {
 	inv := newBasicGroupInvoker()
 	inv.scheduled = map[int]bool{7: true}
-	errRes, out := runDelete(t, inv, -testBasicChatID, "s:7", "s:8")
+	errRes, out := runDelete(t, inv, testBasicChatID, "s:7", "s:8")
 	require.Nil(t, errRes)
 	assert.Equal(t, map[string]string{"s:7": statusDeleted, "s:8": statusNotFound}, statusesOf(out))
 	assert.Equal(t, [][]int{{7}}, inv.deleted)
@@ -287,7 +293,7 @@ func TestDeleteMessagesConfirmGate(t *testing.T) {
 		inv.add(42, true)
 		h := NewMessageDeleteHandler(tg.NewClient(inv))
 		errRes, out, err := h.handle(context.Background(), &mcp.CallToolRequest{}, DeleteMessagesInput{
-			ChatID:     -testBasicChatID,
+			ChatID:     testBasicChatID,
 			MessageIDs: []string{"42"},
 		})
 		require.NoError(t, err)

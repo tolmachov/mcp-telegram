@@ -121,7 +121,7 @@ func TestConfirmGatedToolsFailClosed(t *testing.T) {
 		{
 			name:     "DeleteMessages",
 			register: func(s *mcp.Server, c *tg.Client) { NewMessageDeleteHandler(c).Register(s) },
-			args:     map[string]any{"chat_id": -testBasicChatID, "message_ids": []string{"559966"}},
+			args:     map[string]any{"chat_id": testBasicChatID, "message_ids": []string{"559966"}},
 		},
 		{
 			name:     "ForwardMessage",

@@ -969,8 +969,8 @@ func TestResolveMessageLinkPrivate(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(structuredOrText(result), &parsed), "failed to parse ResolveMessageLink result")
 
-	const wantChatID = int64(-1001234567890)
-	assert.Equal(t, wantChatID, parsed.ChatID, "chat_id should be the -100 prefix form of the URL's c/<id>")
+	const wantChatID = int64(1234567890)
+	assert.Equal(t, wantChatID, parsed.ChatID, "chat_id should be the bare channel ID from the URL's c/<id>")
 	assert.Equal(t, "42", parsed.MessageID)
 	assert.NotEmpty(t, parsed.Hint, "expected next_step_hint for private-channel links")
 }

@@ -117,6 +117,10 @@ func TestSummarizeDetailedCountsCompletedBatches(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := telegramfake.New(
+				telegramfake.Typed(func(_ context.Context, _ *tg.UsersGetUsersRequest, out *tg.UserClassVector) error {
+					out.Elems = nil // not a user: fall through to the channel probe
+					return nil
+				}),
 				telegramfake.Typed(func(_ context.Context, _ *tg.ChannelsGetChannelsRequest, out *tg.MessagesChatsBox) error {
 					out.Chats = &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Channel{ID: 77, AccessHash: 100}}}
 					return nil
@@ -151,7 +155,7 @@ func TestSummarizeDetailedCountsCompletedBatches(t *testing.T) {
 				return strings.TrimSpace(summary), nil
 			})
 			s := NewSummarizer(llm, messages.NewProviderWithRate(tg.NewClient(inv), 100_000), max(tc.batchTokens, 1))
-			got, err := s.SummarizeDetailed(t.Context(), -1_000_000_000_077, "summarize", time.Time{}, 100, nil)
+			got, err := s.SummarizeDetailed(t.Context(), 77, "summarize", time.Time{}, 100, nil)
 			if tc.failBatch > 0 {
 				require.ErrorIs(t, err, assert.AnError)
 			} else {

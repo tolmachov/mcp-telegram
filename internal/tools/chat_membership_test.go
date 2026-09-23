@@ -26,7 +26,7 @@ func TestClassifyChatRef(t *testing.T) {
 		{"username bare", "durov", chatRefUsername, "durov"},
 		{"username with surrounding space", "  @durov  ", chatRefUsername, "durov"},
 		{"numeric id", "123456", chatRefID, "123456"},
-		{"negative bot-api id", "-1001234567890", chatRefID, "-1001234567890"},
+		{"negative id stays numeric", "-1001234567890", chatRefID, "-1001234567890"},
 		{"https invite plus", "https://t.me/+AbCdEf", chatRefInvite, "AbCdEf"},
 		{"bare host invite plus", "t.me/+AbCdEf", chatRefInvite, "AbCdEf"},
 		{"joinchat with scheme", "https://t.me/joinchat/AbCdEf", chatRefInvite, "AbCdEf"},

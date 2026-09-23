@@ -66,6 +66,7 @@ func TestMarkAsReadNonFloodErrorContinuesBatch(t *testing.T) {
 func TestMarkAsReadChannelUsesCurrentTopMessage(t *testing.T) {
 	const channelID = int64(99)
 	inv := telegramfake.New(
+		notUserStep(t, channelID),
 		telegramfake.Typed(func(_ context.Context, req *tg.ChannelsGetChannelsRequest, out *tg.MessagesChatsBox) error {
 			assert.Equal(t, channelID, req.ID[0].(*tg.InputChannel).ChannelID)
 			out.Chats = &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Channel{ID: channelID, AccessHash: 123}}}
@@ -85,7 +86,7 @@ func TestMarkAsReadChannelUsesCurrentTopMessage(t *testing.T) {
 	h := NewMessageReadHandler(tg.NewClient(inv))
 
 	errRes, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, MarkAsReadInput{
-		ChatIDs: []int64{-1_000_000_000_000 - channelID},
+		ChatIDs: []int64{channelID},
 	})
 	require.NoError(t, err)
 	require.Nil(t, errRes)

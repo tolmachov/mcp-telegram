@@ -16,7 +16,7 @@ import (
 )
 
 func TestPaginationThroughMCP(t *testing.T) {
-	const chatID = int64(-1_000_000_000_077)
+	const chatID = int64(77)
 	for _, name := range []string{"GetMessages", "SearchMessages", "GetReplies", "GetForumTopics"} {
 		t.Run(name, func(t *testing.T) {
 			firstArgs := map[string]any{"chat_id": chatID, "limit": 2}
@@ -104,6 +104,7 @@ func TestPaginationThroughMCP(t *testing.T) {
 				}
 			}
 			inv := telegramfake.New(
+				notUserStep(t, chatID),
 				telegramfake.Typed(func(_ context.Context, _ *tg.ChannelsGetChannelsRequest, out *tg.MessagesChatsBox) error {
 					out.Chats = &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Channel{ID: 77, AccessHash: 100}}}
 					return nil

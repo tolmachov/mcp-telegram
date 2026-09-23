@@ -2,8 +2,8 @@ package tools
 
 import (
 	"context"
-	"fmt"
 	"math"
+	"strconv"
 	"testing"
 
 	"github.com/gotd/td/bin"
@@ -27,12 +27,21 @@ func resolveChannelStep(t *testing.T, id, accessHash int64) telegramfake.InvokeF
 	})
 }
 
-func botAPIChannelID(id int64) int64 {
-	return -1_000_000_000_000 - id
+// notUserStep answers the resolver's users.getUsers probe with "not a user",
+// so resolution falls through to the channel probe.
+func notUserStep(t *testing.T, id int64) telegramfake.InvokeFunc {
+	t.Helper()
+	return telegramfake.Typed(func(_ context.Context, req *tg.UsersGetUsersRequest, out *tg.UserClassVector) error {
+		require.Len(t, req.ID, 1)
+		assert.Equal(t, id, req.ID[0].(*tg.InputUser).UserID)
+		out.Elems = nil
+		return nil
+	})
 }
 
 func TestEditMessageIDRangeThroughMCP(t *testing.T) {
 	inv := telegramfake.New(
+		notUserStep(t, 41),
 		resolveChannelStep(t, 41, 91),
 		telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesEditMessageRequest, out *tg.UpdatesBox) error {
 			// Check the target after TL serialization, where a Go int could
@@ -49,7 +58,7 @@ func TestEditMessageIDRangeThroughMCP(t *testing.T) {
 	cs := connectToolClient(t, func(s *mcp.Server) { NewMessageEditHandler(tg.NewClient(inv)).Register(s) })
 	for _, id := range []string{"2147483648", "4294967338", "s:2147483648", "s:4294967338"} {
 		res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "EditMessage", Arguments: map[string]any{
-			"chat_id": botAPIChannelID(41), "message_id": id, "new_text": "updated",
+			"chat_id": 41, "message_id": id, "new_text": "updated",
 		}})
 		require.NoError(t, err)
 		require.True(t, res.IsError)
@@ -57,7 +66,7 @@ func TestEditMessageIDRangeThroughMCP(t *testing.T) {
 		require.Empty(t, inv.RequestTypes(), "invalid target reached Telegram")
 	}
 	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "EditMessage", Arguments: map[string]any{
-		"chat_id": botAPIChannelID(41), "message_id": "2147483647", "new_text": "updated",
+		"chat_id": 41, "message_id": "2147483647", "new_text": "updated",
 	}})
 	require.NoError(t, err)
 	require.False(t, res.IsError, "%+v", res.Content)
@@ -121,11 +130,12 @@ func TestDestructiveHandlersFailClosedBeforeTelegramRPC(t *testing.T) {
 func TestMessageMutationHandlersUseExpectedRPCs(t *testing.T) {
 	const channelID = int64(41)
 	const accessHash = int64(91)
-	chatID := botAPIChannelID(channelID)
+	chatID := channelID
 	req := &mcp.CallToolRequest{}
 
 	t.Run("send", func(t *testing.T) {
 		inv := telegramfake.New(
+			notUserStep(t, channelID),
 			resolveChannelStep(t, channelID, accessHash),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesSendMessageRequest, out *tg.UpdatesBox) error {
 				assert.Equal(t, "hello", rpc.Message)
@@ -143,6 +153,7 @@ func TestMessageMutationHandlersUseExpectedRPCs(t *testing.T) {
 
 	t.Run("edit", func(t *testing.T) {
 		inv := telegramfake.New(
+			notUserStep(t, channelID),
 			resolveChannelStep(t, channelID, accessHash),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesEditMessageRequest, out *tg.UpdatesBox) error {
 				assert.Equal(t, 7, rpc.ID)
@@ -161,6 +172,7 @@ func TestMessageMutationHandlersUseExpectedRPCs(t *testing.T) {
 
 	t.Run("reaction", func(t *testing.T) {
 		inv := telegramfake.New(
+			notUserStep(t, channelID),
 			resolveChannelStep(t, channelID, accessHash),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesSendReactionRequest, out *tg.UpdatesBox) error {
 				assert.Equal(t, 7, rpc.MsgID)
@@ -181,6 +193,7 @@ func TestMessageMutationHandlersUseExpectedRPCs(t *testing.T) {
 
 	t.Run("delete", func(t *testing.T) {
 		inv := telegramfake.New(
+			notUserStep(t, channelID),
 			resolveChannelStep(t, channelID, accessHash),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.ChannelsGetMessagesRequest, out *tg.MessagesMessagesBox) error {
 				assert.Len(t, rpc.ID, 1)
@@ -211,6 +224,7 @@ func TestMessageMutationHandlersUseExpectedRPCs(t *testing.T) {
 
 	t.Run("delete scheduled", func(t *testing.T) {
 		inv := telegramfake.New(
+			notUserStep(t, channelID),
 			resolveChannelStep(t, channelID, accessHash),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesGetScheduledMessagesRequest, out *tg.MessagesMessagesBox) error {
 				assert.Equal(t, []int{7}, rpc.ID)
@@ -244,7 +258,9 @@ func TestForwardAndMembershipMutationsUseExpectedRPCs(t *testing.T) {
 
 	t.Run("forward", func(t *testing.T) {
 		inv := telegramfake.New(
+			notUserStep(t, sourceID),
 			resolveChannelStep(t, sourceID, 91),
+			notUserStep(t, targetID),
 			resolveChannelStep(t, targetID, 92),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesForwardMessagesRequest, out *tg.UpdatesBox) error {
 				assert.Equal(t, []int{7}, rpc.ID)
@@ -253,7 +269,7 @@ func TestForwardAndMembershipMutationsUseExpectedRPCs(t *testing.T) {
 			}),
 		)
 		errRes, out, err := NewMessageForwardHandler(tg.NewClient(inv)).handle(t.Context(), &mcp.CallToolRequest{}, ForwardMessageInput{
-			FromChatID: botAPIChannelID(sourceID), MessageID: "7", ToChatID: botAPIChannelID(targetID), Confirm: true,
+			FromChatID: sourceID, MessageID: "7", ToChatID: targetID, Confirm: true,
 		})
 		require.NoError(t, err)
 		require.Nil(t, errRes)
@@ -264,6 +280,7 @@ func TestForwardAndMembershipMutationsUseExpectedRPCs(t *testing.T) {
 
 	t.Run("leave", func(t *testing.T) {
 		inv := telegramfake.New(
+			notUserStep(t, sourceID),
 			resolveChannelStep(t, sourceID, 91),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.ChannelsLeaveChannelRequest, out *tg.UpdatesBox) error {
 				input, ok := rpc.Channel.(*tg.InputChannel)
@@ -274,7 +291,7 @@ func TestForwardAndMembershipMutationsUseExpectedRPCs(t *testing.T) {
 			}),
 		)
 		errRes, out, err := NewLeaveChatHandler(tg.NewClient(inv)).handle(t.Context(), &mcp.CallToolRequest{}, LeaveChatInput{
-			Chat: botAPIChannelIDString(sourceID), Confirm: true,
+			Chat: strconv.FormatInt(sourceID, 10), Confirm: true,
 		})
 		require.NoError(t, err)
 		require.Nil(t, errRes)
@@ -298,10 +315,6 @@ func TestForwardAndMembershipMutationsUseExpectedRPCs(t *testing.T) {
 		assert.Equal(t, statusJoined, out.Status)
 		assert.Zero(t, inv.Remaining())
 	})
-}
-
-func botAPIChannelIDString(id int64) string {
-	return fmt.Sprintf("%d", botAPIChannelID(id))
 }
 
 func dialogFiltersStep(t *testing.T, filters ...tg.DialogFilterClass) telegramfake.InvokeFunc {
@@ -356,6 +369,7 @@ func TestFolderMutationHandlersUseExpectedRPCs(t *testing.T) {
 		const channelID = int64(51)
 		inv := telegramfake.New(
 			dialogFiltersStep(t, &tg.DialogFilter{ID: 3, Title: tg.TextWithEntities{Text: "Work"}, Groups: true}),
+			notUserStep(t, channelID),
 			resolveChannelStep(t, channelID, 151),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesUpdateDialogFilterRequest, out *tg.BoolBox) error {
 				filter, ok := rpc.GetFilter()
@@ -368,7 +382,7 @@ func TestFolderMutationHandlersUseExpectedRPCs(t *testing.T) {
 			}),
 		)
 		errRes, out, err := NewAddChatsToFolderHandler(tg.NewClient(inv)).handle(t.Context(), req, AddChatsToFolderInput{
-			FolderID: 3, Chats: []string{botAPIChannelIDString(channelID)},
+			FolderID: 3, Chats: []string{strconv.FormatInt(channelID, 10)},
 		})
 		require.NoError(t, err)
 		require.Nil(t, errRes)
@@ -384,6 +398,7 @@ func TestFolderMutationHandlersUseExpectedRPCs(t *testing.T) {
 				ID: 3, Title: tg.TextWithEntities{Text: "Work"},
 				IncludePeers: []tg.InputPeerClass{&tg.InputPeerChannel{ChannelID: channelID, AccessHash: 152}, &tg.InputPeerUser{UserID: 8}},
 			}),
+			notUserStep(t, channelID),
 			resolveChannelStep(t, channelID, 152),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesUpdateDialogFilterRequest, out *tg.BoolBox) error {
 				filter, ok := rpc.GetFilter()
@@ -394,7 +409,7 @@ func TestFolderMutationHandlersUseExpectedRPCs(t *testing.T) {
 			}),
 		)
 		errRes, out, err := NewRemoveChatsFromFolderHandler(tg.NewClient(inv)).handle(t.Context(), req, RemoveChatsFromFolderInput{
-			FolderID: 3, Chats: []string{botAPIChannelIDString(channelID)},
+			FolderID: 3, Chats: []string{strconv.FormatInt(channelID, 10)},
 		})
 		require.NoError(t, err)
 		require.Nil(t, errRes)
@@ -407,6 +422,7 @@ func TestFolderMutationHandlersUseExpectedRPCs(t *testing.T) {
 func TestSetChatMuteUsesExpectedRPC(t *testing.T) {
 	const channelID = int64(44)
 	inv := telegramfake.New(
+		notUserStep(t, channelID),
 		resolveChannelStep(t, channelID, 94),
 		telegramfake.Typed(func(_ context.Context, rpc *tg.AccountUpdateNotifySettingsRequest, out *tg.BoolBox) error {
 			peer, ok := rpc.Peer.(*tg.InputNotifyPeer)
@@ -420,7 +436,7 @@ func TestSetChatMuteUsesExpectedRPC(t *testing.T) {
 		}),
 	)
 	errRes, out, err := NewChatMuteHandler(tg.NewClient(inv)).handle(t.Context(), &mcp.CallToolRequest{}, SetChatMuteInput{
-		ChatID: botAPIChannelID(channelID), Muted: true,
+		ChatID: channelID, Muted: true,
 	})
 	require.NoError(t, err)
 	require.Nil(t, errRes)

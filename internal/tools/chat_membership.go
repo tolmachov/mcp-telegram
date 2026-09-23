@@ -317,7 +317,8 @@ func classifyChatRef(s string) (kind, value string) {
 	if username, ok := strings.CutPrefix(s, "@"); ok {
 		return chatRefUsername, username
 	}
-	// Numeric ID (a leading - is accepted for legacy Bot-API-marked IDs).
+	// Numeric ID. A negative one stays numeric so ResolvePeer rejects it with
+	// a clear error instead of it being looked up as a username.
 	if _, err := strconv.ParseInt(s, 10, 64); err == nil {
 		return chatRefID, s
 	}
