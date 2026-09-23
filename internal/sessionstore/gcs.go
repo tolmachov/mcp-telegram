@@ -240,31 +240,42 @@ func (g *GCS) StoreGrant(ctx context.Context, family string, grant GrantRecord, 
 	return nil
 }
 
+// SweepAuthState deletes the expired grant records. A record it cannot read
+// or delete is skipped, so one bad object cannot stall the sweep of every
+// other; the failures are joined into the returned error.
 func (g *GCS) SweepAuthState(ctx context.Context, now time.Time) error {
+	var errs []error
 	it := g.bucket.Objects(ctx, &storage.Query{Prefix: grantPrefix})
 	for {
 		attrs, err := it.Next()
 		if errors.Is(err, iterator.Done) {
-			return nil
+			return errors.Join(errs...)
 		}
 		if err != nil {
-			return fmt.Errorf("sessionstore: listing grants: %w", err)
+			return errors.Join(append(errs, fmt.Errorf("sessionstore: listing grants: %w", err))...)
 		}
 		family := strings.TrimSuffix(strings.TrimPrefix(attrs.Name, grantPrefix), ".json")
 		if !ValidSID(family) {
 			continue
 		}
-		grant, generation, err := g.LoadGrant(ctx, family)
-		if err != nil {
-			return err
-		}
-		if generation != 0 && grant.Expired(now) {
-			err = g.bucket.Object(attrs.Name).If(storage.Conditions{GenerationMatch: generation}).Delete(ctx)
-			if err != nil && !isPreconditionFailed(err) && !errors.Is(err, storage.ErrObjectNotExist) {
-				return fmt.Errorf("sessionstore: deleting expired grant: %w", err)
-			}
+		if err := g.sweepGrant(ctx, family, now); err != nil {
+			errs = append(errs, fmt.Errorf("sessionstore: sweeping grant %s: %w", family, err))
 		}
 	}
+}
+
+// sweepGrant deletes family's grant record if it is expired at now, unless it
+// changed after it was read.
+func (g *GCS) sweepGrant(ctx context.Context, family string, now time.Time) error {
+	grant, generation, err := g.LoadGrant(ctx, family)
+	if err != nil || generation == 0 || !grant.Expired(now) {
+		return err
+	}
+	err = g.bucket.Object(grantObjectName(family)).If(storage.Conditions{GenerationMatch: generation}).Delete(ctx)
+	if err != nil && !isPreconditionFailed(err) && !errors.Is(err, storage.ErrObjectNotExist) {
+		return fmt.Errorf("deleting expired grant: %w", err)
+	}
+	return nil
 }
 
 type gcsSession struct {

@@ -215,11 +215,15 @@ func (f *FS) DeleteRevoked(_ context.Context, userID tgid.UserID, sid string) er
 	return nil
 }
 
+// SweepAuthState deletes the expired grant records. A record it cannot read
+// or delete is skipped, so one bad file cannot stall the sweep of every other;
+// the failures are joined into the returned error.
 func (f *FS) SweepAuthState(ctx context.Context, now time.Time) error {
 	entries, err := os.ReadDir(f.grantsDir())
 	if err != nil {
 		return fmt.Errorf("sessionstore: listing grants: %w", err)
 	}
+	var errs []error
 	for _, entry := range entries {
 		family, ok := strings.CutSuffix(entry.Name(), ".json")
 		if entry.IsDir() || !ok || !ValidSID(family) {
@@ -233,8 +237,8 @@ func (f *FS) SweepAuthState(ctx context.Context, now time.Time) error {
 		}
 		lock.Unlock()
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("sessionstore: sweeping grant %s: %w", family, err)
+			errs = append(errs, fmt.Errorf("sessionstore: sweeping grant %s: %w", family, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }

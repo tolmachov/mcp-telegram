@@ -112,6 +112,39 @@ func TestGrantWritesStampRecord(t *testing.T) {
 	}
 }
 
+// TestGrantSweepSkipsBadRecord pins that one unreadable grant record does not
+// stall the sweep: the expired records after it are still deleted, and the
+// sweep reports the bad one.
+func TestGrantSweepSkipsBadRecord(t *testing.T) {
+	const badFamily = "00000000000000000000000000000000" // lists first
+	for name, b := range backends(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			now := time.Now()
+			switch b := b.(type) {
+			case *FS:
+				require.NoError(t, os.WriteFile(b.grantPath(badFamily), []byte("not-json"), 0o600))
+			case *GCS:
+				w := b.bucket.Object(grantObjectName(badFamily)).NewWriter(ctx)
+				_, err := io.WriteString(w, "not-json")
+				require.NoError(t, err)
+				require.NoError(t, w.Close())
+			}
+			store := Encrypted(b, newCipher(t, testIssuer, newKey(t)))
+			created, err := store.RedeemCode(ctx, testGrantFamily, now.Add(-time.Minute))
+			require.NoError(t, err)
+			require.True(t, created)
+
+			err = store.SweepAuthState(ctx, now)
+			require.ErrorContains(t, err, badFamily)
+			require.ErrorContains(t, err, "parsing grant")
+			_, version, err := b.LoadGrant(ctx, testGrantFamily)
+			require.NoError(t, err)
+			assert.Zero(t, version, "the expired grant after the bad one must still be swept")
+		})
+	}
+}
+
 // TestGrantRotationZeroIsRefusal pins that an outcome nobody set cannot pass
 // the token endpoint's success check.
 func TestGrantRotationZeroIsRefusal(t *testing.T) {
