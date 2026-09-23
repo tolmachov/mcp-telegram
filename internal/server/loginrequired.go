@@ -240,8 +240,8 @@ func accountSuffix(account string) string {
 // Two live clients on one key is the AUTH_KEY_DUPLICATED hazard the user pool
 // goes to some length to avoid (see userPoolEvictGrace), and this tool
 // actively invites a concurrent `mcp-telegram login` in another terminal — so
-// at least keep our own probes from stacking. The 20s ceiling on each one
-// bounds how long a caller can queue behind another.
+// at least keep our own probes from stacking. The authProbeTimeout ceiling on
+// each one bounds how long a caller can queue behind another.
 func (s *Server) authProbe(ctx context.Context) (account string, authorized bool, err error) {
 	s.probeMu.Lock()
 	defer s.probeMu.Unlock()
@@ -258,7 +258,6 @@ func probeVerdict(running *tgclient.Running, err error) (account string, authori
 		return "", false, err
 	}
 	account = tgclient.UserName(running.Self())
-	// The verdict is in; an error out of the teardown cannot change it.
-	_ = running.Close()
+	running.Close()
 	return account, true, nil
 }

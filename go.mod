@@ -7,6 +7,7 @@ require (
 	github.com/fsouza/fake-gcs-server v1.56.1
 	github.com/google/jsonschema-go v0.4.3
 	github.com/gotd/contrib v0.25.0
+	github.com/gotd/log v0.1.0
 	github.com/gotd/td v0.161.0
 	github.com/keybase/go-keychain v0.0.1
 	github.com/lithammer/fuzzysearch v1.1.8
@@ -64,7 +65,6 @@ require (
 	github.com/googleapis/enterprise-certificate-proxy v0.3.20 // indirect
 	github.com/googleapis/gax-go/v2 v2.23.0 // indirect
 	github.com/gotd/ige v0.3.0 // indirect
-	github.com/gotd/log v0.1.0 // indirect
 	github.com/gotd/neo v0.1.5 // indirect
 	github.com/klauspost/compress v1.19.2 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect

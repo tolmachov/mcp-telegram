@@ -62,13 +62,15 @@ func TestAssemblyStartupPreservesUnavailableSessions(t *testing.T) {
 			s := testServer(t)
 			s.opts.Config = &tgclient.Config{APIID: 1, APIHash: "test"}
 			s.opts.SessionStore = store
-			got, err := s.userAssemblyBuilder()(t.Context(), &authsrv.UserIdentity{ID: 42, SessionID: "target"})
-			require.ErrorIs(t, err, tc.loadErr)
-			assert.Nil(t, got.Handler)
-			assert.Nil(t, got.Closer)
+			pool := newUserPool(t.Context(), s.userAssemblyBuilder(), store.Delete, "Bearer", s.logger)
+			t.Cleanup(func() { _ = pool.Close() })
+			rec := httptest.NewRecorder()
+			pool.serveUser(rec, httptest.NewRequest(http.MethodPost, "/mcp", nil), &authsrv.UserIdentity{ID: 42, SessionID: "target"})
 			if tc.wantDelete {
+				assert.Equal(t, http.StatusUnauthorized, rec.Code, "a failed delete must not hide the refusal")
 				assert.Equal(t, []string{"target"}, store.deleted)
 			} else {
+				assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 				assert.Empty(t, store.deleted)
 			}
 		})
@@ -98,7 +100,7 @@ func TestAssemblyStartupClassifiesTelegramErrors(t *testing.T) {
 			s := testServer(t)
 			s.opts.Config = &tgclient.Config{APIID: 1, APIHash: "test"}
 			s.opts.SessionStore = store
-			pool := newUserPool(t.Context(), s.userAssemblyBuilder(), "Bearer", s.logger)
+			pool := newUserPool(t.Context(), s.userAssemblyBuilder(), store.Delete, "Bearer", s.logger)
 			t.Cleanup(func() { _ = pool.Close() })
 			rec := httptest.NewRecorder()
 			pool.serveUser(rec, httptest.NewRequest(http.MethodPost, "/mcp", nil), &authsrv.UserIdentity{ID: 42, SessionID: "target"})

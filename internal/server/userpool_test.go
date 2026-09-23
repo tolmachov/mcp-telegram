@@ -3,13 +3,17 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gotd/td/tgerr"
 
 	"github.com/tolmachov/mcp-telegram/internal/authsrv"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
@@ -61,7 +65,7 @@ func TestUserPoolServeHTTPRejectsMissingIdentity(t *testing.T) {
 	pool := newUserPool(t.Context(), func(context.Context, *authsrv.UserIdentity) (builtAssembly, error) {
 		t.Fatal("builder must not run for an unauthenticated request")
 		return builtAssembly{}, nil
-	}, testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 	recorder := httptest.NewRecorder()
 	pool.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/", nil))
 	if recorder.Code != http.StatusUnauthorized {
@@ -72,7 +76,7 @@ func TestUserPoolServeHTTPRejectsMissingIdentity(t *testing.T) {
 func TestUserPoolLimitsSessionlessInitializePerUser(t *testing.T) {
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
 		return okAssembly(), nil
-	}, testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 	for i := range initializeBurst + 1 {
 		req := httptest.NewRequest(http.MethodPost, "/", nil)
 		rec := httptest.NewRecorder()
@@ -88,17 +92,47 @@ func TestUserPoolLimitsSessionlessInitializePerUser(t *testing.T) {
 
 // okAssembly is a healthy build with a no-op closer.
 func okAssembly() builtAssembly {
-	return builtAssembly{Handler: okHandler(), Closer: closerFunc(func() error { return nil })}
+	return builtAssembly{Handler: okHandler(), Closer: closerFunc(func() error { return nil }), Health: healthy}
 }
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// healthy is the probe of an assembly whose client never stops.
+func healthy() error { return nil }
+
+// unexpectedDrop fails the test if the pool deletes a stored session.
+func unexpectedDrop(t *testing.T) sessionDropper {
+	return func(_ context.Context, id tgid.UserID, sid string) error {
+		t.Errorf("pool deleted session (%d, %q); no session was refused", id, sid)
+		return nil
+	}
+}
+
+// dropRecorder records the stored sessions the pool deletes.
+type dropRecorder struct {
+	mu      sync.Mutex
+	dropped []poolKey
+}
+
+func (d *dropRecorder) drop(_ context.Context, id tgid.UserID, sid string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.dropped = append(d.dropped, poolKey{id: id, sid: sid})
+	return nil
+}
+
+func (d *dropRecorder) keys() []poolKey {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]poolKey(nil), d.dropped...)
+}
 
 func TestUserPoolBuildsOncePerUser(t *testing.T) {
 	var builds atomic.Int64
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
 		builds.Add(1)
 		return okAssembly(), nil
-	}, testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 
 	for range 3 {
 		if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
@@ -123,7 +157,7 @@ func TestUserPoolIndependentSessionsPerUser(t *testing.T) {
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
 		builds.Add(1)
 		return okAssembly(), nil
-	}, testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 
 	if rec := poolRequestSID(t, pool, 1, "aaaa"); rec.Code != http.StatusOK {
 		t.Fatalf("session A status = %d, want 200", rec.Code)
@@ -153,8 +187,9 @@ func TestUserPoolEvictSession(t *testing.T) {
 		return builtAssembly{
 			Handler: okHandler(),
 			Closer:  closerFunc(func() error { closes.Add(1); return nil }),
+			Health:  healthy,
 		}, nil
-	}, testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 
 	if rec := poolRequestSID(t, pool, 1, "aaaa"); rec.Code != http.StatusOK {
 		t.Fatalf("build status = %d, want 200", rec.Code)
@@ -184,8 +219,9 @@ func TestUserPoolEvictSessionDefersBusyClose(t *testing.T) {
 		return builtAssembly{
 			Handler: okHandler(),
 			Closer:  closerFunc(func() error { closes.Add(1); return nil }),
+			Health:  healthy,
 		}, nil
-	}, testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 
 	if rec := poolRequestSID(t, pool, 1, "aaaa"); rec.Code != http.StatusOK {
 		t.Fatalf("build status = %d, want 200", rec.Code)
@@ -216,7 +252,7 @@ func TestUserPoolEvictSessionDefersBusyClose(t *testing.T) {
 func TestUserPoolPerUserCap(t *testing.T) {
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
 		return okAssembly(), nil
-	}, testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 
 	// Another user's assembly must survive the churn below.
 	if rec := poolRequestSID(t, pool, 2, "bbbb"); rec.Code != http.StatusOK {
@@ -245,17 +281,24 @@ func TestUserPoolPerUserCap(t *testing.T) {
 	}
 }
 
-func TestUserPoolUnauthorizedSessionMapsTo401(t *testing.T) {
+// TestUserPoolRefusedAtBuildDeletesSessionAnd401s pins the startup half of a
+// refused session: the stored session is deleted and the request answered
+// 401 with the OAuth metadata, so the client signs in again.
+func TestUserPoolRefusedAtBuildDeletesSessionAnd401s(t *testing.T) {
+	drops := &dropRecorder{}
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
-		return builtAssembly{}, tgclient.ErrSessionUnauthorized
-	}, testWWWAuthenticate, discardLogger())
+		return builtAssembly{}, fmt.Errorf("connecting: %w", tgclient.ErrSessionUnauthorized)
+	}, drops.drop, testWWWAuthenticate, discardLogger())
 
-	rec := poolRequest(t, pool, 7)
+	rec := poolRequestSID(t, pool, 7, "dead")
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", rec.Code)
 	}
 	if got := rec.Header().Get("WWW-Authenticate"); got != testWWWAuthenticate {
 		t.Errorf("WWW-Authenticate = %q, want %q", got, testWWWAuthenticate)
+	}
+	if got := drops.keys(); len(got) != 1 || got[0] != (poolKey{id: 7, sid: "dead"}) {
+		t.Errorf("dropped sessions = %v, want exactly (7, dead)", got)
 	}
 }
 
@@ -266,7 +309,7 @@ func TestUserPoolBuildFailureNotCached(t *testing.T) {
 			return builtAssembly{}, errors.New("transient failure")
 		}
 		return okAssembly(), nil
-	}, testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 
 	if rec := poolRequest(t, pool, 5); rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("first request status = %d, want 503", rec.Code)
@@ -279,7 +322,7 @@ func TestUserPoolBuildFailureNotCached(t *testing.T) {
 func TestUserPoolFullRejectsWith503(t *testing.T) {
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
 		return okAssembly(), nil
-	}, testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 
 	for id := tgid.UserID(1); id <= userPoolMaxUsers; id++ {
 		if rec := poolRequest(t, pool, id); rec.Code != http.StatusOK {
@@ -313,7 +356,7 @@ func TestUserPoolRebuildsDeadAssembly(t *testing.T) {
 				return nil
 			},
 		}, nil
-	}, testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 
 	if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
 		t.Fatalf("first request status = %d, want 200", rec.Code)
@@ -332,86 +375,146 @@ func TestUserPoolRebuildsDeadAssembly(t *testing.T) {
 	}
 }
 
-func TestUserPoolDeadBusyAssemblyMapsTo401(t *testing.T) {
-	dead := &atomic.Bool{}
-	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
-		return builtAssembly{
-			Handler: okHandler(),
-			Closer:  closerFunc(func() error { return nil }),
-			Health: func() error {
-				if dead.Load() {
-					return errors.New("client run loop exited")
-				}
-				return nil
-			},
-		}, nil
-	}, testWWWAuthenticate, discardLogger())
+// stoppable is an assembly probe whose client can be stopped with a reason.
+type stoppable struct {
+	mu     sync.Mutex
+	reason error
+}
 
-	if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
-		t.Fatalf("first request status = %d, want 200", rec.Code)
-	}
-	// Simulate a hung stream holding the entry while the client dies: the
-	// pool cannot tear it down, so new requests get the re-auth 401.
-	pool.mu.Lock()
-	pool.entries[poolKey{id: 1}].inflight++
-	pool.mu.Unlock()
-	dead.Store(true)
+func (c *stoppable) stop(reason error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reason = reason
+}
 
-	rec := poolRequest(t, pool, 1)
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401 for a dead-but-busy assembly", rec.Code)
-	}
-	if got := rec.Header().Get("WWW-Authenticate"); got != testWWWAuthenticate {
-		t.Errorf("WWW-Authenticate = %q, want %q", got, testWWWAuthenticate)
+func (c *stoppable) health() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reason
+}
+
+// TestUserPoolRefusedMidRunDeletesSessionAnd401s pins the running half of a
+// refused session: once Telegram refuses the session in reply to a call, the
+// client's health says so and the next request evicts the assembly, deletes
+// the stored session and answers 401 — without building a client on the dead
+// session again — whether or not an older request still holds the assembly.
+func TestUserPoolRefusedMidRunDeletesSessionAnd401s(t *testing.T) {
+	for _, busy := range []bool{false, true} {
+		var builds, closes atomic.Int64
+		client := &stoppable{}
+		drops := &dropRecorder{}
+		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+			builds.Add(1)
+			return builtAssembly{
+				Handler: okHandler(),
+				Closer:  closerFunc(func() error { closes.Add(1); return nil }),
+				Health:  client.health,
+			}, nil
+		}, drops.drop, testWWWAuthenticate, discardLogger())
+
+		if rec := poolRequestSID(t, pool, 1, "s"); rec.Code != http.StatusOK {
+			t.Fatalf("first request status = %d, want 200", rec.Code)
+		}
+		key := poolKey{id: 1, sid: "s"}
+		pool.mu.Lock()
+		e := pool.entries[key]
+		if busy {
+			e.inflight++
+		}
+		pool.mu.Unlock()
+		client.stop(fmt.Errorf("%w: %w", tgclient.ErrSessionUnauthorized, tgerr.New(401, "SESSION_REVOKED")))
+
+		rec := poolRequestSID(t, pool, 1, "s")
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("busy=%v: status = %d, want 401", busy, rec.Code)
+		}
+		if got := rec.Header().Get("WWW-Authenticate"); got != testWWWAuthenticate {
+			t.Errorf("busy=%v: WWW-Authenticate = %q, want %q", busy, got, testWWWAuthenticate)
+		}
+		if got := drops.keys(); len(got) != 1 || got[0] != key {
+			t.Errorf("busy=%v: dropped sessions = %v, want exactly %v", busy, got, key)
+		}
+		if got := builds.Load(); got != 1 {
+			t.Errorf("busy=%v: builder ran %d times, want 1 (no client on a refused session)", busy, got)
+		}
+		if pool.size() != 0 {
+			t.Errorf("busy=%v: pool size = %d, want 0", busy, pool.size())
+		}
+		if busy {
+			if got := closes.Load(); got != 0 {
+				t.Errorf("assembly closed %d times while still held; want 0 (deferred to release)", got)
+			}
+			pool.release(e)
+		}
+		if got := closes.Load(); got != 1 {
+			t.Errorf("busy=%v: assembly closed %d times, want 1", busy, got)
+		}
 	}
 }
 
-// TestUserPoolDeadBusyClosedOnRelease pins the fix for the dead-but-busy leak:
-// when a dead client still has an in-flight holder, a new request removes the
-// entry from the map and flags it, so the last release() tears it down promptly
-// instead of leaving it to the 15-minute idle janitor.
-func TestUserPoolDeadBusyClosedOnRelease(t *testing.T) {
+// TestUserPoolStoppedClientIsRebuiltNotReauthenticated pins the pool's
+// classification by cause: a client that stopped for any reason other than a
+// refused session — a dropped connection, a transport failure — is evicted
+// and rebuilt on the same session, never answered 401, and its session is
+// kept, whether or not an older request still holds the assembly.
+func TestUserPoolStoppedClientIsRebuiltNotReauthenticated(t *testing.T) {
+	for _, busy := range []bool{false, true} {
+		var builds, closes atomic.Int64
+		var clients []*stoppable
+		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
+			builds.Add(1)
+			client := &stoppable{}
+			clients = append(clients, client)
+			return builtAssembly{
+				Handler: okHandler(),
+				Closer:  closerFunc(func() error { closes.Add(1); return nil }),
+				Health:  client.health,
+			}, nil
+		}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
+
+		if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
+			t.Fatalf("first request status = %d, want 200", rec.Code)
+		}
+		pool.mu.Lock()
+		e := pool.entries[poolKey{id: 1}]
+		if busy {
+			e.inflight++
+		}
+		pool.mu.Unlock()
+		clients[0].stop(errors.New("read tcp: connection reset by peer"))
+
+		if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
+			t.Errorf("busy=%v: status = %d, want 200 (rebuilt)", busy, rec.Code)
+		}
+		if got := builds.Load(); got != 2 {
+			t.Errorf("busy=%v: builder ran %d times, want 2", busy, got)
+		}
+		if busy {
+			if got := closes.Load(); got != 0 {
+				t.Errorf("stopped assembly closed %d times while still held; want 0 (deferred to release)", got)
+			}
+			pool.release(e)
+		}
+		if got := closes.Load(); got != 1 {
+			t.Errorf("busy=%v: stopped assembly closed %d times, want 1", busy, got)
+		}
+	}
+}
+
+// TestUserPoolRejectsAssemblyWithoutHealthProbe pins that a build missing its
+// liveness probe fails instead of being served as "always healthy", and that
+// what it did build is closed.
+func TestUserPoolRejectsAssemblyWithoutHealthProbe(t *testing.T) {
 	var closes atomic.Int64
-	dead := &atomic.Bool{}
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
-		return builtAssembly{
-			Handler: okHandler(),
-			Closer:  closerFunc(func() error { closes.Add(1); return nil }),
-			Health: func() error {
-				if dead.Load() {
-					return errors.New("client run loop exited")
-				}
-				return nil
-			},
-		}, nil
-	}, testWWWAuthenticate, discardLogger())
+		return builtAssembly{Handler: okHandler(), Closer: closerFunc(func() error { closes.Add(1); return nil })}, nil
+	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 
-	if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
-		t.Fatalf("first request status = %d, want 200", rec.Code)
+	if rec := poolRequest(t, pool, 1); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rec.Code)
 	}
-	// A hung request holds the entry; capture its ref before the client dies.
-	pool.mu.Lock()
-	e := pool.entries[poolKey{id: 1}]
-	e.inflight++
-	pool.mu.Unlock()
-	dead.Store(true)
-
-	// A new request sees the dead-but-busy entry: 401, and it removes the entry
-	// from the map and flags it for teardown.
-	if rec := poolRequest(t, pool, 1); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 for a dead-but-busy assembly", rec.Code)
-	}
-	if pool.size() != 0 {
-		t.Errorf("dead-but-busy entry must be removed from the map; size = %d, want 0", pool.size())
-	}
-	if got := closes.Load(); got != 0 {
-		t.Errorf("entry closed %d times while still held; want 0 (deferred to release)", got)
-	}
-	// The hung request finally releases → the dead assembly is torn down now,
-	// not deferred to idle-evict.
-	pool.release(e)
 	if got := closes.Load(); got != 1 {
-		t.Errorf("dead-but-busy entry closed %d times after release; want 1", got)
+		t.Errorf("incomplete assembly closed %d times, want 1", got)
 	}
 }
 
@@ -424,7 +527,7 @@ func TestUserPoolEvictReleaseTransitionIsAtomic(t *testing.T) {
 		var closes atomic.Int64
 		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
 			return builtAssembly{}, errors.New("unused")
-		}, testWWWAuthenticate, discardLogger())
+		}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 		key := poolKey{id: 1}
 		e := &userEntry{
 			key: key, ready: make(chan struct{}), state: entryActive,
@@ -464,7 +567,7 @@ func TestUserPoolBuilderPanic(t *testing.T) {
 			panic("simulated builder panic")
 		}
 		return okAssembly(), nil
-	}, testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 
 	codes := make(chan int, 2)
 	go func() { codes <- poolRequest(t, pool, 1).Code }()
@@ -516,8 +619,9 @@ func TestUserPoolCloseDuringBuild(t *testing.T) {
 		return builtAssembly{
 			Handler: okHandler(),
 			Closer:  closerFunc(func() error { closes.Add(1); return nil }),
+			Health:  healthy,
 		}, nil
-	}, testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 
 	done := make(chan int, 1)
 	go func() { done <- poolRequest(t, pool, 1).Code }()
@@ -550,8 +654,9 @@ func TestUserPoolEvictSessionGraceForceClose(t *testing.T) {
 			return builtAssembly{
 				Handler: okHandler(),
 				Closer:  closerFunc(func() error { closes.Add(1); return nil }),
+				Health:  healthy,
 			}, nil
-		}, testWWWAuthenticate, discardLogger())
+		}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 		var skew atomic.Int64
 		pool.now = func() time.Time { return time.Now().Add(time.Duration(skew.Load())) }
 		janitorCtx, cancelJanitor := context.WithCancel(t.Context())
@@ -596,8 +701,9 @@ func TestUserPoolEvictSessionGraceForceClose(t *testing.T) {
 			return builtAssembly{
 				Handler: okHandler(),
 				Closer:  closerFunc(func() error { closes.Add(1); return nil }),
+				Health:  healthy,
 			}, nil
-		}, testWWWAuthenticate, discardLogger())
+		}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 		var skew atomic.Int64
 		pool.now = func() time.Time { return time.Now().Add(time.Duration(skew.Load())) }
 
@@ -621,8 +727,8 @@ func TestUserPoolEvictIdleClosesAssembly(t *testing.T) {
 	var closed atomic.Bool
 	now := time.Now()
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (builtAssembly, error) {
-		return builtAssembly{Handler: okHandler(), Closer: closerFunc(func() error { closed.Store(true); return nil })}, nil
-	}, testWWWAuthenticate, discardLogger())
+		return builtAssembly{Handler: okHandler(), Closer: closerFunc(func() error { closed.Store(true); return nil }), Health: healthy}, nil
+	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
 	pool.now = func() time.Time { return now }
 
 	if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {

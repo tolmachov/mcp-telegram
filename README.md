@@ -502,7 +502,9 @@ This is deliberate. A stdio server that refuses its MCP connection is rendered b
 
 Note the boundary is the TTY, not "a human started it": with stdin piped or redirected from a file, `mcp-telegram run` serves login-required mode and exits **0** on EOF. Scripted health checks should call `mcp-telegram login`/`config list`, or assert on the tool list, rather than on `run`'s exit status.
 
-In **remote (HTTP) mode** none of this applies: a dead per-user session is answered with `401` plus a `WWW-Authenticate` challenge, which sends the MCP client back through OAuth and its QR login to mint a fresh session — no restart, no CLI.
+If Telegram revokes the session while the server is running, the first call it refuses stops the client, and from then on every tool call answers with the same login-required reason and fix instead of reaching Telegram; the host stays connected, and after `mcp-telegram login` a reconnect loads the tools again.
+
+In **remote (HTTP) mode** none of this applies: a dead per-user session — whether Telegram refuses it at connect time or in reply to any call — is deleted and the next request is answered with `401` plus a `WWW-Authenticate` challenge, which sends the MCP client back through OAuth and its QR login to mint a fresh session — no restart, no CLI. A client that stops for any other reason, such as a dropped connection, is reconnected on the same session at the next request.
 
 ## Session, Config, and Backup Storage
 

@@ -84,28 +84,20 @@ func (s *Server) startLogin(ctx context.Context) (authsrv.LoginFlow, error) {
 
 // userAssemblyBuilder returns the pool's builder: for each authenticated
 // user it connects a Telegram client on their stored session and constructs
-// a fresh MCP assembly on top of it.
+// a fresh MCP assembly on top of it. A session Telegram refuses comes back as
+// ErrSessionUnauthorized, which the pool acts on (see userPool.dropSession).
 func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 	return func(ctx context.Context, user *authsrv.UserIdentity) (builtAssembly, error) {
-		running, err := tgclient.StartClient(ctx, s.opts.Config, s.opts.SessionStore.Session(user.ID, user.SessionID, user.SessionKey), s.floodWaitLogger())
+		logger := s.logger.With("user", user.ID)
+		running, err := tgclient.StartClient(ctx, s.opts.Config, s.opts.SessionStore.Session(user.ID, user.SessionID, user.SessionKey), logger, s.floodWaitLogger())
 		if err != nil {
-			switch {
-			case errors.Is(err, sessionstore.ErrCorruptSession):
+			if errors.Is(err, sessionstore.ErrCorruptSession) {
 				// A stored blob we cannot decrypt with this token's own session
 				// key — a key/issuer misconfiguration or a tampered blob, not a
 				// dead session (a token always carries its own object's key).
-				// Surface it loudly and preserve the blob: deleting it would make
-				// a recoverable operator mistake permanent.
+				// Surface it loudly; the pool preserves the blob, since deleting
+				// it would make a recoverable operator mistake permanent.
 				s.logger.Error("stored session could not be decrypted; check MCP_AUTH_TOKEN_KEYS / MCP_AUTH_ISSUER_URL", "user", user.ID, "session", user.SessionID, "err", err)
-			case errors.Is(err, tgclient.ErrSessionUnauthorized):
-				// The stored session is dead — Telegram refused a session we
-				// decrypted successfully. Drop just this session so its refresh
-				// grants stop treating the user as logged in; the 401 this maps
-				// to sends that client back through the QR login. Other sessions
-				// of the same account are untouched.
-				if delErr := s.opts.SessionStore.Delete(ctx, user.ID, user.SessionID); delErr != nil {
-					s.logger.Error("failed to delete dead session; refresh grants may loop until it is removed", "user", user.ID, "session", user.SessionID, "err", delErr)
-				}
 			}
 			return builtAssembly{}, fmt.Errorf("connecting Telegram client for user %s: %w", user.ID, err)
 		}
@@ -119,11 +111,11 @@ func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 		committed := false
 		defer func() {
 			if !committed {
-				_ = running.Close()
+				running.Close()
 			}
 		}()
 
-		asm, err := s.buildAssembly(ctx, running.API(), s.logger.With("user", user.ID))
+		asm, err := s.buildAssembly(ctx, running, logger)
 		if err != nil {
 			return builtAssembly{}, err
 		}
@@ -146,10 +138,14 @@ func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 			Handler: handler,
 			// The assembly (watcher, variants proxy) goes first, while the
 			// client it runs on is still connected.
-			Closer: multiCloser{asm, closerFunc(running.Close)},
-			// RunErr turns non-nil as soon as the client's Run loop exits —
-			// the signal (and reason) that this assembly must stop serving.
-			Health: running.RunErr,
+			Closer: multiCloser{asm, closerFunc(func() error {
+				running.Close()
+				return nil
+			})},
+			// Err turns non-nil the moment the client stops serving — at the
+			// first call Telegram answers with a refused session, or when its
+			// Run loop exits — and says why.
+			Health: running.Err,
 		}, nil
 	}
 }
@@ -169,7 +165,7 @@ func (s *Server) runHTTPWithAuth(ctx context.Context) (retErr error) {
 	}()
 
 	wwwAuthenticate := fmt.Sprintf("Bearer resource_metadata=%q", s.opts.Auth.IssuerURL+authsrv.ProtectedResourceMetadataPath)
-	pool := newUserPool(ctx, s.userAssemblyBuilder(), wwwAuthenticate, s.logger)
+	pool := newUserPool(ctx, s.userAssemblyBuilder(), s.opts.SessionStore.Delete, wwwAuthenticate, s.logger)
 	defer func() {
 		if closeErr := pool.Close(); closeErr != nil {
 			s.logger.Warn("failed to close user pool", "err", closeErr)

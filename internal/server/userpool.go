@@ -62,12 +62,11 @@ var errPoolFull = errors.New("user pool is full")
 
 // builtAssembly is the result of one per-authorization build. Handler serves MCP;
 // Closer tears the assembly down on eviction (disconnecting the client);
-// Health is a liveness probe returning nil while the assembly can serve and
-// the fatal error once its Telegram client's Run loop has exited (session
-// revoked remotely, transport death). Health is an explicit field rather than
-// an optional interface on Handler so that forgetting the probe is a visible
-// compile-site omission, not a silent "always healthy" downgrade. A nil
-// Health means "always healthy".
+// Health is a liveness probe returning nil while the assembly can serve and,
+// once its Telegram client has stopped, why — wrapping
+// tgclient.ErrSessionUnauthorized when Telegram refused the session. All three
+// are required: runBuild rejects an assembly without them, so a forgotten
+// probe fails the build instead of passing for "always healthy".
 type builtAssembly struct {
 	Handler http.Handler
 	Closer  io.Closer
@@ -77,6 +76,9 @@ type builtAssembly struct {
 // userHandlerBuilder builds the complete per-authorization HTTP assembly: MCP
 // server(s) whose tools run on the user's own Telegram session.
 type userHandlerBuilder func(ctx context.Context, user *authsrv.UserIdentity) (builtAssembly, error)
+
+// sessionDropper deletes one stored session (sessionstore.Store.Delete).
+type sessionDropper func(ctx context.Context, userID tgid.UserID, sid string) error
 
 type userEntryState uint8
 
@@ -136,6 +138,8 @@ type userPool struct {
 	retired           map[*userEntry]struct{}
 	initializeLimiter *keyedlimit.Limiter[tgid.UserID]
 	build             userHandlerBuilder
+	// dropSession deletes a stored session Telegram has refused.
+	dropSession sessionDropper
 	// baseCtx is the server-lifetime context builds run on, so canceling one
 	// request cannot poison a build other requests will share.
 	baseCtx context.Context
@@ -148,12 +152,13 @@ type userPool struct {
 	wake            chan struct{}
 }
 
-func newUserPool(baseCtx context.Context, build userHandlerBuilder, wwwAuthenticate string, logger *slog.Logger) *userPool {
+func newUserPool(baseCtx context.Context, build userHandlerBuilder, dropSession sessionDropper, wwwAuthenticate string, logger *slog.Logger) *userPool {
 	return &userPool{
 		entries:           map[poolKey]*userEntry{},
 		retired:           map[*userEntry]struct{}{},
 		initializeLimiter: keyedlimit.New[tgid.UserID](initializeRate, initializeBurst),
 		build:             build,
+		dropSession:       dropSession,
 		baseCtx:           baseCtx,
 		now:               time.Now,
 		logger:            logger,
@@ -197,9 +202,10 @@ func (p *userPool) serveUser(w http.ResponseWriter, r *http.Request, user *auths
 		http.Error(w, "server is at capacity, retry later", http.StatusServiceUnavailable)
 		return
 	case errors.Is(err, tgclient.ErrSessionUnauthorized):
-		// The stored session is dead (revoked from Telegram's Devices menu,
-		// or never completed). A 401 with resource metadata sends the MCP
-		// client back through OAuth, whose QR login mints a fresh session.
+		// Telegram refused the stored session (revoked from its Devices
+		// menu, logged out, expired), and the pool has deleted it. A 401 with
+		// resource metadata sends the MCP client back through OAuth, whose QR
+		// login mints a fresh session.
 		p.logger.Warn("telegram session unauthorized, forcing re-login", "user", user.ID)
 		if p.wwwAuthenticate != "" {
 			w.Header().Set("WWW-Authenticate", p.wwwAuthenticate)
@@ -238,17 +244,22 @@ func (p *userPool) entryFor(ctx context.Context, user *authsrv.UserIdentity) (*u
 
 		p.mu.Lock()
 		if e := p.entries[key]; e != nil {
-			if e.state == entryActive && e.health != nil {
+			if e.state == entryActive {
 				if dead := e.health(); dead != nil {
-					busy := e.inflight > 0
+					// The client has stopped, so nothing is left connected on
+					// the session: evict (a busy entry drains until its last
+					// holder leaves) and act on why it stopped. Only a session
+					// Telegram refused forces a re-login; anything else — a
+					// dropped connection, a transport failure — is rebuilt on
+					// the same session.
 					closer := p.evictLocked(e, false)
 					p.mu.Unlock()
 					p.closeAssembly(key, closer)
-					if busy {
-						p.logger.Warn("pooled Telegram client is down but still in use; forcing re-login", "user", key.id, "session", key.sid, "reason", dead)
-						return nil, fmt.Errorf("pooled Telegram client is down: %w", tgclient.ErrSessionUnauthorized)
+					if errors.Is(dead, tgclient.ErrSessionUnauthorized) {
+						p.dropRefusedSession(key, dead)
+						return nil, fmt.Errorf("pooled Telegram client stopped: %w", dead)
 					}
-					p.logger.Warn("evicting dead user assembly, rebuilding", "user", key.id, "session", key.sid, "reason", dead)
+					p.logger.Warn("evicting stopped user assembly, rebuilding", "user", key.id, "session", key.sid, "reason", dead)
 					continue
 				}
 			}
@@ -328,10 +339,30 @@ func (p *userPool) runBuild(e *userEntry, user *authsrv.UserIdentity) (retErr er
 
 	asm, err := p.build(p.baseCtx, user)
 	if err != nil {
+		if errors.Is(err, tgclient.ErrSessionUnauthorized) {
+			p.dropRefusedSession(e.key, err)
+		}
 		return err
+	}
+	if asm.Handler == nil || asm.Closer == nil || asm.Health == nil {
+		if asm.Closer != nil {
+			p.closeAssembly(e.key, asm.Closer)
+		}
+		return errors.New("user assembly build returned no handler, closer or health probe (server bug)")
 	}
 	p.completeBuild(e, asm, nil)
 	return nil
+}
+
+// dropRefusedSession deletes a stored session Telegram refused, whether it
+// refused it while a client was starting on it or in reply to a call on a
+// running one, so its refresh grants stop treating the user as logged in.
+// Other sessions of the same account are untouched.
+func (p *userPool) dropRefusedSession(key poolKey, reason error) {
+	p.logger.Warn("telegram refused the stored session; deleting it", "user", key.id, "session", key.sid, "reason", reason)
+	if err := p.dropSession(p.baseCtx, key.id, key.sid); err != nil {
+		p.logger.Error("failed to delete refused session; refresh grants may loop until it is removed", "user", key.id, "session", key.sid, "err", err)
+	}
 }
 
 func (p *userPool) completeBuild(e *userEntry, asm builtAssembly, buildErr error) {

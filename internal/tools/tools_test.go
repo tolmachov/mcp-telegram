@@ -37,7 +37,7 @@ func TestFailureText(t *testing.T) {
 	t.Run("dead session", func(t *testing.T) {
 		txt := failureText("GetMe", failed("get current user", tgerr.New(401, "AUTH_KEY_UNREGISTERED")))
 		assert.Contains(t, txt, "Failed to get current user: Telegram no longer accepts this account's session")
-		assert.Contains(t, txt, "mcp-telegram login")
+		assert.Contains(t, txt, "signs in again")
 	})
 
 	t.Run("unresolved chat gets the peer hint", func(t *testing.T) {

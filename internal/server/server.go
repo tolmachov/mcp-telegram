@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gotd/td/session"
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/experimental-ext-variants/go/sdk/variants"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -98,6 +99,12 @@ type Server struct {
 	summarizer   *summarize.Summarizer
 	summarizeErr error
 
+	// openLocalSession opens the stored session of the single local account
+	// (the Keychain on darwin, the state-directory file elsewhere). New points
+	// it at tgclient.NewSessionStorage; only tests replace it, to start a
+	// client without touching the real session.
+	openLocalSession func() (session.Storage, error)
+
 	// authProbeFn is the live authorization re-check the login-required tool
 	// performs, injectable so the tool's states can be exercised without a
 	// Telegram connection (and, on darwin, without a Keychain prompt). New
@@ -154,6 +161,7 @@ func New(opts Options) (*Server, error) {
 		With("component", "mcp-telegram")
 
 	srv := &Server{logger: logger, opts: opts}
+	srv.openLocalSession = func() (session.Storage, error) { return tgclient.NewSessionStorage() }
 	srv.summarizer, srv.summarizeErr = summarize.New(opts.Summarize)
 	srv.authProbeFn = srv.authProbe
 	return srv, nil
@@ -170,7 +178,7 @@ func New(opts Options) (*Server, error) {
 //
 // Over HTTP only the configuration conditions can arise, because the per-user
 // clients are connected lazily by the pool; with no MCP peer to tell, they
-// fail the process.
+// fail the process. A host that cancels ctx during startup gets a quiet nil.
 func (s *Server) Run(ctx context.Context) error {
 	if s.opts.Config.APIID == 0 || s.opts.Config.APIHash == "" {
 		s.logger.Warn("no Telegram access", "reason", "missing Telegram API credentials")
@@ -189,6 +197,12 @@ func (s *Server) Run(ctx context.Context) error {
 
 	running, err := s.startLocalClient(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			// The host shut down while the client was still starting:
+			// nothing failed, and nobody is left to read a login-required
+			// answer.
+			return nil
+		}
 		if errors.Is(err, tgclient.ErrSessionUnauthorized) {
 			s.logger.Warn("no Telegram access", "reason", "not authorized; login required", "err", err)
 		} else {
@@ -200,16 +214,15 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 // startLocalClient connects the single local account on its stored session
-// (the Keychain on darwin, the state-directory file elsewhere) through the
-// same StartClient the HTTP pool uses per user, so stdio startup and the
-// login-required re-check share one "authorized / unauthorized / failed"
-// answer.
+// through the same StartClient the HTTP pool uses per user, so stdio startup
+// and the login-required re-check share one "authorized / unauthorized /
+// failed" answer.
 func (s *Server) startLocalClient(ctx context.Context) (*tgclient.Running, error) {
-	storage, err := tgclient.NewSessionStorage()
+	storage, err := s.openLocalSession()
 	if err != nil {
 		return nil, fmt.Errorf("opening session storage: %w", err)
 	}
-	running, err := tgclient.StartClient(ctx, s.opts.Config, storage, s.floodWaitLogger())
+	running, err := tgclient.StartClient(ctx, s.opts.Config, storage, s.logger, s.floodWaitLogger())
 	if err != nil {
 		return nil, fmt.Errorf("starting Telegram client: %w", err)
 	}
@@ -228,34 +241,25 @@ func blockedReason(err error) string {
 }
 
 // serveStdio serves the Telegram tools over stdio on a connected client and
-// disconnects it afterwards. A client that stops on its own (a session revoked
-// mid-run, a permanent transport failure) is fatal: once serving has begun
-// there is nothing left for login-required mode to add.
+// disconnects it afterwards.
+//
+// A client that stops on its own — Telegram refusing the session mid-run, or
+// a permanent transport failure — does not end the session: the host stays
+// connected and every tool call answers with why and how to recover
+// (clientDownMiddleware), which is the login-required state reached
+// mid-session. Swapping in the login-required server itself is not possible:
+// it would hand the host's stdin from one MCP session to the next, and the
+// SDK's stdio connection keeps reading ahead into a buffer it drops on close,
+// losing whatever the host sent in between.
 func (s *Server) serveStdio(ctx context.Context, running *tgclient.Running) error {
-	serveErr := s.serveAssembly(ctx, running.API(), running.Done())
-	// Close reports only a failure of the client's own; the teardown it
-	// starts here is not one.
-	if clientErr := running.Close(); clientErr != nil {
-		return fmt.Errorf("telegram client stopped: %w", clientErr)
-	}
-	return serveErr
+	defer running.Close()
+	return s.serveAssembly(ctx, running)
 }
 
 // serveAssembly serves one assembly over stdio until the host disconnects
-// (closes stdin), ctx is cancelled, or clientDone closes because the client
-// it runs on has stopped.
-func (s *Server) serveAssembly(ctx context.Context, api *tg.Client, clientDone <-chan struct{}) error {
-	serveCtx, stop := context.WithCancel(ctx)
-	defer stop()
-	go func() {
-		select {
-		case <-clientDone:
-			stop()
-		case <-serveCtx.Done():
-		}
-	}()
-
-	asm, err := s.buildAssembly(serveCtx, api, s.logger)
+// (closes stdin) or ctx is cancelled.
+func (s *Server) serveAssembly(ctx context.Context, client telegramClient) error {
+	asm, err := s.buildAssembly(ctx, client, s.logger)
 	if err != nil {
 		return err
 	}
@@ -269,9 +273,9 @@ func (s *Server) serveAssembly(ctx context.Context, api *tg.Client, clientDone <
 		// resources/list; only proactive change-notifications are unavailable.
 		// Pin a single --variant to restore live notifications.
 		s.logger.Info("multi-variant mode: pinned-chat resources are exposed on every variant and refreshed by one poller, but live resources/list_changed notifications are not delivered through the variants proxy; pin a single --variant for live updates")
-		serveErr = asm.variants.Run(serveCtx, s.stdioTransport())
+		serveErr = asm.variants.Run(ctx, s.stdioTransport())
 	} else {
-		serveErr = asm.single.Run(serveCtx, s.stdioTransport())
+		serveErr = asm.single.Run(ctx, s.stdioTransport())
 	}
 	if ctx.Err() != nil {
 		// The host cancelled ctx: shutdown, not a failure.
@@ -323,10 +327,21 @@ type assembly struct {
 	logger    *slog.Logger
 }
 
+// telegramClient is the running Telegram client an assembly serves on;
+// *tgclient.Running is the production one.
+type telegramClient interface {
+	API() *tg.Client
+	// Err is nil while the client serves and why it stopped once it has.
+	Err() error
+	// Done is closed once the client has stopped.
+	Done() <-chan struct{}
+}
+
 // buildAssembly constructs handlers, resources, prompts, and the MCP
 // server(s) for one Telegram client, and starts the pinned-chat watcher on a
 // child of ctx. The caller must Close the assembly.
-func (s *Server) buildAssembly(ctx context.Context, api *tg.Client, logger *slog.Logger) (*assembly, error) {
+func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logger *slog.Logger) (*assembly, error) {
+	api := client.API()
 	// One chat-list cache shared by GetChats, SearchChats, the chats
 	// resource and completion, so none of them re-paginates every dialog on
 	// its own.
@@ -363,6 +378,7 @@ func (s *Server) buildAssembly(ctx context.Context, api *tg.Client, logger *slog
 		})
 		resources.RegisterChatTemplate(srv, peers)
 		prompts.Register(srv)
+		srv.AddReceivingMiddleware(s.clientDownMiddleware(client))
 	}
 
 	asm := &assembly{logger: logger}
@@ -394,7 +410,79 @@ func (s *Server) buildAssembly(ctx context.Context, api *tg.Client, logger *slog
 	pinnedProvider := resources.NewPinnedChatsProvider(api, msgProvider, logger, pinnedServers...)
 	asm.stopWatch = stopWatch
 	asm.watchDone = pinnedProvider.WatchInBackground(watchCtx, s.opts.PinnedRefresh)
+	// A client that stops on its own ends the watcher too: there is nothing
+	// left for it to poll. Close stops the watcher before the client, so a
+	// stop seen here is never the assembly's own teardown.
+	go func() {
+		select {
+		case <-client.Done():
+			logger.Warn("Telegram client stopped; tool calls and resource reads now answer with the reason", "err", client.Err())
+			stopWatch()
+		case <-watchCtx.Done():
+		}
+	}()
 	return asm, nil
+}
+
+// clientDownMiddleware answers tool calls and resource reads with
+// clientDownText once the assembly's Telegram client has stopped: a call
+// arriving afterwards never reaches Telegram, and a call that failed because
+// the client stopped under it gets the same answer instead of its raw error.
+func (s *Server) clientDownMiddleware(client telegramClient) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method != methodCallTool && method != methodReadResource {
+				return next(ctx, method, req)
+			}
+			if down := client.Err(); down != nil {
+				return clientDownResult(method, s.clientDownText(down))
+			}
+			res, err := next(ctx, method, req)
+			if down := client.Err(); down != nil && callFailed(res, err) {
+				return clientDownResult(method, s.clientDownText(down))
+			}
+			return res, err
+		}
+	}
+}
+
+// callFailed reports whether a tools/call or resources/read outcome is a
+// failure: a protocol error, or a tool result flagged IsError.
+func callFailed(res mcp.Result, err error) bool {
+	if err != nil {
+		return true
+	}
+	tr, ok := res.(*mcp.CallToolResult)
+	return ok && tr.IsError
+}
+
+// clientDownResult delivers text as the outcome of method: a tool error the
+// model reads, or a resource-read error.
+func clientDownResult(method, text string) (mcp.Result, error) {
+	if method == methodCallTool {
+		return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil
+	}
+	return nil, errors.New(text)
+}
+
+// clientDownText says why an assembly's Telegram client stopped and what
+// recovers it on this transport. Over HTTP the pool acts on the next request:
+// a refused session is deleted and the request answered 401, which sends the
+// MCP client back through the QR login, and any other stop is rebuilt. Over
+// stdio nothing restarts the client inside this process, so the fix involves
+// the host reconnecting the server.
+func (s *Server) clientDownText(err error) string {
+	refused := errors.Is(err, tgclient.ErrSessionUnauthorized)
+	switch {
+	case s.opts.Transport == TransportHTTP && refused:
+		return fmt.Sprintf("Telegram refused this account's session (%v): it was logged out, revoked or expired. The server has stopped using it, and the client's next request is answered with an authorisation error that sends it through the Telegram QR login again.", err)
+	case s.opts.Transport == TransportHTTP:
+		return fmt.Sprintf("The Telegram connection for this account stopped (%v). Retry the call: the next request reconnects it.", err)
+	case refused:
+		return fmt.Sprintf("Telegram refused this server's session (%v), so every Telegram tool is unavailable until the session is replaced. %s", err, notLoggedInMessage)
+	default:
+		return fmt.Sprintf("mcp-telegram's Telegram client stopped (%v), so every Telegram tool is unavailable until this MCP server is reconnected. If it stops again, the stored session may be corrupt: `mcp-telegram logout` followed by `mcp-telegram login` recovers it.", err)
+	}
 }
 
 // pinnedWatchExitTimeout bounds how long Close waits for the pinned-chat

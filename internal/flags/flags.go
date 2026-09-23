@@ -91,8 +91,8 @@ func requirePositive(name string) func(context.Context, *cli.Command, int) error
 }
 
 // APIIDFlag defines --api-id. It is intentionally NOT marked Required so that
-// `mcp-telegram run` can still start the MCP stdio transport when credentials
-// are absent and surface a JSON-RPC init error through the protocol.
+// `mcp-telegram run` can still start without credentials and report them
+// missing in login-required mode (see server.Server.Run).
 // `login`/`logout` re-check for a non-zero value in their Action closures.
 func APIIDFlag() *cli.IntFlag {
 	return &cli.IntFlag{

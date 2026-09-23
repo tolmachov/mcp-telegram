@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/session"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -472,6 +473,10 @@ func TestSummarizeMisconfigurationBlocksStartup(t *testing.T) {
 			t.Error("a configuration problem must not be re-checked against Telegram")
 			return "", false, nil
 		}
+		s.openLocalSession = func() (session.Storage, error) {
+			t.Error("a configuration problem must not start a Telegram client")
+			return nil, errors.New("unreachable")
+		}
 	})
 	tools, err := cs.ListTools(t.Context(), &mcp.ListToolsParams{})
 	require.NoError(t, err)
@@ -496,4 +501,54 @@ func TestSummarizeMisconfigurationBlocksStartup(t *testing.T) {
 	srv, err := New(opts)
 	require.NoError(t, err)
 	require.ErrorContains(t, srv.Run(t.Context()), "summarize-batch-tokens must be positive")
+}
+
+// blockingSession parks LoadSession until the client's own context ends, so
+// a client started on it never becomes ready.
+type blockingSession struct{}
+
+func (blockingSession) LoadSession(ctx context.Context) ([]byte, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (blockingSession) StoreSession(context.Context, []byte) error { return nil }
+
+// TestRunCancelledDuringStartupReturnsQuietly pins that a host shutting the
+// server down while the Telegram client is still starting is not a failure:
+// Run returns nil without an Error record and without detouring through
+// login-required mode.
+func TestRunCancelledDuringStartupReturnsQuietly(t *testing.T) {
+	stdinR, stdinW := io.Pipe()
+	defer func() { _ = stdinW.Close() }()
+	var logs bytes.Buffer
+	srv, err := New(Options{
+		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
+		Summarize: testSummarize,
+		Version:   "test",
+		Stdin:     stdinR,
+		Stdout:    io.Discard,
+		ErrOut:    &logs,
+		Transport: TransportStdio,
+	})
+	require.NoError(t, err)
+	started := make(chan struct{})
+	srv.openLocalSession = func() (session.Storage, error) {
+		close(started)
+		return blockingSession{}, nil
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Run(ctx) }()
+	<-started
+	cancel()
+
+	select {
+	case runErr := <-errCh:
+		require.NoError(t, runErr)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Server.Run did not return within 3s after ctx cancel during startup")
+	}
+	assert.NotContains(t, logs.String(), "level=ERROR")
+	assert.NotContains(t, logs.String(), "login-required")
 }

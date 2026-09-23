@@ -25,8 +25,9 @@ const (
 // JSON-RPC method names the middlewares key off. The SDK's own constants are
 // unexported, so we spell them out.
 const (
-	methodListTools = "tools/list"
-	methodCallTool  = "tools/call"
+	methodListTools    = "tools/list"
+	methodCallTool     = "tools/call"
+	methodReadResource = "resources/read"
 )
 
 // serveMode says how a variant serves tools. Encoding it as one enum instead of

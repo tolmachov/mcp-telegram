@@ -6,11 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/gotd/contrib/middleware/floodwait"
+	"github.com/gotd/log"
+	"github.com/gotd/log/logslog"
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
@@ -102,21 +106,21 @@ func (a userAuthenticator) SignUp(_ context.Context) (auth.UserInfo, error) {
 // level) so users understand why a tool is slow.
 type FloodWaitCallback func(ctx context.Context, duration time.Duration)
 
-// newClient builds a gotd client over storage behind the flood-wait
-// middleware. The returned run drives the client and must wrap every use of
-// it: the middleware only waits out a FLOOD_WAIT inside it. If onFloodWait is
-// non-nil, it is invoked each time the middleware sleeps for a flood wait.
-func newClient(cfg *Config, storage session.Storage, onFloodWait FloodWaitCallback) (*telegram.Client, func(context.Context, func(context.Context) error) error) {
+// newClient builds a gotd client over storage from opts, with the flood-wait
+// middleware in front of opts.Middlewares. The returned run drives the client
+// and must wrap every use of it: the middleware only waits out a FLOOD_WAIT
+// inside it. If onFloodWait is non-nil, it is invoked each time the middleware
+// sleeps for a flood wait.
+func newClient(cfg *Config, storage session.Storage, onFloodWait FloodWaitCallback, opts telegram.Options) (*telegram.Client, func(context.Context, func(context.Context) error) error) {
 	waiter := floodwait.NewWaiter().WithMaxWait(cfg.FloodWaitMaxWait)
 	if onFloodWait != nil {
 		waiter = waiter.WithCallback(func(ctx context.Context, wait floodwait.FloodWait) {
 			onFloodWait(ctx, wait.Duration)
 		})
 	}
-	client := telegram.NewClient(cfg.APIID, cfg.APIHash, telegram.Options{
-		SessionStorage: storage,
-		Middlewares:    []telegram.Middleware{waiter},
-	})
+	opts.SessionStorage = storage
+	opts.Middlewares = append([]telegram.Middleware{waiter}, opts.Middlewares...)
+	client := telegram.NewClient(cfg.APIID, cfg.APIHash, opts)
 	run := func(ctx context.Context, f func(context.Context) error) error {
 		return waiter.Run(ctx, func(ctx context.Context) error {
 			return client.Run(ctx, f)
@@ -131,7 +135,7 @@ func Login(ctx context.Context, cfg *Config, phone string, in io.Reader, out io.
 	if err != nil {
 		return fmt.Errorf("opening session storage: %w", err)
 	}
-	client, run := newClient(cfg, storage, nil)
+	client, run := newClient(cfg, storage, nil, telegram.Options{})
 
 	err = run(ctx, func(ctx context.Context) error {
 		status, err := client.Auth().Status(ctx)
@@ -175,7 +179,7 @@ func Logout(ctx context.Context, cfg *Config, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("opening session storage: %w", err)
 	}
-	client, run := newClient(cfg, storage, nil)
+	client, run := newClient(cfg, storage, nil, telegram.Options{})
 
 	remoteErr := run(ctx, func(ctx context.Context) error {
 		if _, err := client.API().AuthLogOut(ctx); err != nil {
@@ -202,4 +206,44 @@ func wrapIf(err error, operation string) error {
 		return nil
 	}
 	return fmt.Errorf("%s: %w", operation, err)
+}
+
+// refusalWatch is the one place a client learns that Telegram has declared
+// its session dead: every call's reply passes through it, and a refusal
+// (IsSessionUnauthorized) is reported to onRefused before the call returns
+// it, so the client's owner stops using the session whichever tool, resource
+// or background poller happened to make the call.
+func refusalWatch(onRefused func(error)) telegram.Middleware {
+	return telegram.MiddlewareFunc(func(next tg.Invoker) telegram.InvokeFunc {
+		return func(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
+			err := next.Invoke(ctx, input, output)
+			if err != nil && IsSessionUnauthorized(err) {
+				onRefused(err)
+			}
+			return err //nolint:wrapcheck // a middleware passes Telegram's reply through unchanged.
+		}
+	})
+}
+
+// gotdLogger hands gotd the caller's logger, floored at Warn: gotd logs every
+// connection's lifecycle at Info and every call at Debug, which would bury the
+// server's own records, while its warnings (a permanent connection failure, a
+// dropped key) are what an operator needs.
+func gotdLogger(logger *slog.Logger) log.Logger {
+	return logslog.New(slog.New(warnFloor{logger.Handler()}).With("subsystem", "gotd"))
+}
+
+// warnFloor passes on only records at Warn and above.
+type warnFloor struct{ slog.Handler }
+
+func (h warnFloor) Enabled(ctx context.Context, level slog.Level) bool {
+	return level >= slog.LevelWarn && h.Handler.Enabled(ctx, level)
+}
+
+func (h warnFloor) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return warnFloor{h.Handler.WithAttrs(attrs)}
+}
+
+func (h warnFloor) WithGroup(name string) slog.Handler {
+	return warnFloor{h.Handler.WithGroup(name)}
 }
