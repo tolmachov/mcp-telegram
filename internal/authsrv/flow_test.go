@@ -496,7 +496,7 @@ func TestFullAuthorizationFlow(t *testing.T) {
 	info, err := a.Verifier()(context.Background(), tr.AccessToken, nil)
 	require.NoError(t, err)
 	assert.Equal(t, allowedUser.String(), info.UserID)
-	extra, ok := info.Extra[extraIdentityKey].(identityExtra)
+	extra, ok := info.Extra[extraIdentityKey].(UserIdentity)
 	require.True(t, ok)
 	assert.Equal(t, allowedUser, extra.ID)
 	assert.Equal(t, "durov", extra.Username)

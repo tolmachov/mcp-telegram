@@ -67,7 +67,7 @@ func (a *AuthServer) tokenFromCode(w http.ResponseWriter, r *http.Request, form 
 		a.tokenError(w, http.StatusBadRequest, "invalid_target", "unknown resource")
 		return
 	}
-	if !sessionstore.ValidSID(cc.SessionID) || !sessionstore.ValidSID(cc.JTI) || len(cc.SessionKey) != sessionKeyLen || normalizeResource(cc.Resource) != a.cfg.IssuerURL {
+	if !a.validGrant(cc.SessionID, cc.JTI, cc.SessionKey, cc.Resource) {
 		a.logger.Warn("authorization code rejected: malformed session identity")
 		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "invalid authorization code")
 		return
@@ -108,7 +108,7 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 		return
 	}
 	userID, err := tgid.Parse(rc.Subject)
-	if err != nil || !sessionstore.ValidSID(rc.SessionID) || !sessionstore.ValidSID(rc.Family) || len(rc.SessionKey) != sessionKeyLen || rc.Generation < 0 || normalizeResource(rc.Resource) != a.cfg.IssuerURL {
+	if err != nil || rc.Generation < 0 || !a.validGrant(rc.SessionID, rc.Family, rc.SessionKey, rc.Resource) {
 		a.logger.Warn("refresh rejected: malformed grant identity")
 		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "invalid refresh token")
 		return
@@ -176,7 +176,7 @@ type mintInput struct {
 
 func (a *AuthServer) mintTokens(w http.ResponseWriter, in mintInput) {
 	now := a.now()
-	if in.LoginAt <= 0 || in.LoginAt > now.Unix() || !sessionstore.ValidSID(in.SessionID) || !sessionstore.ValidSID(in.Family) || len(in.SessionKey) != sessionKeyLen || in.Generation < 0 || normalizeResource(in.Resource) != a.cfg.IssuerURL {
+	if in.LoginAt <= 0 || in.LoginAt > now.Unix() || in.Generation < 0 || !a.validGrant(in.SessionID, in.Family, in.SessionKey, in.Resource) {
 		a.logger.Error("mint rejected: invalid grant state", "subject", in.Subject)
 		a.tokenError(w, http.StatusInternalServerError, "server_error", "internal error")
 		return
@@ -206,6 +206,16 @@ func (a *AuthServer) mintTokens(w http.ResponseWriter, in mintInput) {
 }
 
 func normalizeResource(resource string) string { return strings.TrimRight(resource, "/") }
+
+// validGrant reports whether a token's grant identity is well formed: the
+// session id and family are storage-safe, the session key has the minted
+// length, and the resource is this server. A failure means a forged, corrupt
+// or obsolete token; every token path checks it before the identity reaches
+// storage or a new token.
+func (a *AuthServer) validGrant(sid, family string, key []byte, resource string) bool {
+	return sessionstore.ValidSID(sid) && sessionstore.ValidSID(family) &&
+		len(key) == sessionKeyLen && normalizeResource(resource) == a.cfg.IssuerURL
+}
 
 func verifyPKCE(verifier, challenge string) bool {
 	if verifier == "" || challenge == "" {

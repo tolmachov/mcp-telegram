@@ -8,23 +8,13 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
 
-	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
-// extraIdentityKey is the single TokenInfo.Extra key this package sets. All
-// identity material travels as one typed identityExtra value, so a value-type
-// drift is a compile error rather than a silently-zero type assertion.
+// extraIdentityKey is the single TokenInfo.Extra key this package sets. The
+// identity travels as one UserIdentity value, so a value-type drift is a
+// compile error rather than a silently-zero type assertion.
 const extraIdentityKey = "mcp-telegram/identity"
-
-// identityExtra is the identity payload the verifier stores in
-// TokenInfo.Extra and Identity reads back.
-type identityExtra struct {
-	ID         tgid.UserID
-	Username   string
-	SessionID  string
-	SessionKey []byte
-}
 
 // Verifier returns the auth.TokenVerifier for RequireBearerToken. It opens
 // the sealed access token, re-checks the allowlist, and exposes the user
@@ -45,10 +35,6 @@ func (a *AuthServer) Verifier() auth.TokenVerifier {
 		if !now.Before(time.Unix(c.ExpiresAt, 0)) {
 			return nil, fmt.Errorf("%w: token expired", auth.ErrInvalidToken)
 		}
-		if normalizeResource(c.Resource) != a.cfg.IssuerURL {
-			a.logger.Warn("access token rejected: resource mismatch")
-			return nil, fmt.Errorf("%w: resource mismatch", auth.ErrInvalidToken)
-		}
 		userID, err := tgid.Parse(c.Subject)
 		if err != nil {
 			a.logger.Warn("access token rejected: malformed subject", "reason", err)
@@ -61,11 +47,8 @@ func (a *AuthServer) Verifier() auth.TokenVerifier {
 			a.logger.Warn("access token rejected: user no longer allowed", "user_id", userID)
 			return nil, fmt.Errorf("%w: user not allowed", auth.ErrInvalidToken)
 		}
-		// The mandatory session id must be well-formed: it reaches the storage
-		// layer as an object-name suffix. A malformed or empty value means a
-		// forged, corrupt, or obsolete token.
-		if !sessionstore.ValidSID(c.SessionID) || !sessionstore.ValidSID(c.Family) || len(c.SessionKey) != sessionKeyLen {
-			a.logger.Warn("access token rejected: malformed session id", "user_id", userID)
+		if !a.validGrant(c.SessionID, c.Family, c.SessionKey, c.Resource) {
+			a.logger.Warn("access token rejected: malformed grant identity", "user_id", userID)
 			return nil, fmt.Errorf("%w: not a valid access token", auth.ErrInvalidToken)
 		}
 		u := UserIdentity{ID: userID, Username: c.Username, SessionID: c.SessionID, SessionKey: c.SessionKey}
@@ -96,7 +79,7 @@ func (u UserIdentity) TokenInfo(expires time.Time) *auth.TokenInfo {
 	return &auth.TokenInfo{
 		Expiration: expires,
 		UserID:     u.ID.String(),
-		Extra:      map[string]any{extraIdentityKey: identityExtra(u)},
+		Extra:      map[string]any{extraIdentityKey: u},
 	}
 }
 
@@ -117,12 +100,9 @@ func IdentityFromTokenInfo(info *auth.TokenInfo) (*UserIdentity, bool) {
 	if info == nil {
 		return nil, false
 	}
-	extra, ok := info.Extra[extraIdentityKey].(identityExtra)
-	if !ok || extra.ID <= 0 {
+	u, ok := info.Extra[extraIdentityKey].(UserIdentity)
+	if !ok || u.ID <= 0 {
 		return nil, false
 	}
-	return &UserIdentity{
-		ID: extra.ID, Username: extra.Username,
-		SessionID: extra.SessionID, SessionKey: extra.SessionKey,
-	}, true
+	return &u, true
 }

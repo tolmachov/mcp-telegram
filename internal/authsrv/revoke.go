@@ -61,14 +61,6 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		ok()
 		return
 	}
-	// A non-empty sid becomes a storage object-name/path suffix below; a
-	// malformed one means a forged/corrupt token — acknowledge without touching
-	// storage.
-	if !sessionstore.ValidSID(sid) || !sessionstore.ValidSID(family) {
-		a.logger.Warn("revocation ignored: malformed session id", "user_id", userID)
-		ok()
-		return
-	}
 	// Durably mark the session revoked (a tombstone) and delete its blob. The
 	// tombstone — not the delete — is what makes revocation reliable: a warm
 	// gotd client may re-store (resurrect) the blob, but the refresh gate checks
@@ -100,12 +92,14 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 }
 
 // openRevocationTarget opens a token presented for revocation and returns its
-// subject, session id, and client id. Per RFC 7009 §2.1 token_type_hint only
-// orders the attempts: the hinted kind is tried first, then the other kind.
+// subject, session id, family and client id. Per RFC 7009 §2.1 token_type_hint
+// only orders the attempts: the hinted kind is tried first, then the other
+// kind. A token with a malformed grant identity (forged or corrupt) counts as
+// unrecognized, so revocation never touches storage with it.
 func (a *AuthServer) openRevocationTarget(token, hint string) (sub, sid, family, clientID string, ok bool) {
 	tryRefresh := func() bool {
 		rc, err := openBlob(a.sealer, refreshBlob, token, a.now())
-		if err != nil {
+		if err != nil || !a.validGrant(rc.SessionID, rc.Family, rc.SessionKey, rc.Resource) {
 			return false
 		}
 		sub, sid, family, clientID = rc.Subject, rc.SessionID, rc.Family, rc.ClientID
@@ -113,7 +107,7 @@ func (a *AuthServer) openRevocationTarget(token, hint string) (sub, sid, family,
 	}
 	tryAccess := func() bool {
 		ac, err := openBlob(a.sealer, accessBlob, token, a.now())
-		if err != nil {
+		if err != nil || !a.validGrant(ac.SessionID, ac.Family, ac.SessionKey, ac.Resource) {
 			return false
 		}
 		sub, sid, family, clientID = ac.Subject, ac.SessionID, ac.Family, ac.ClientID
