@@ -2,7 +2,6 @@ package authsrv
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,7 +14,7 @@ func validConfig(t *testing.T) *Config {
 	t.Helper()
 	return &Config{
 		IssuerURL: "https://mcp.example.com",
-		Allow:     AllowUsers(123456),
+		Allow:     Allowlist{ids: []tgid.UserID{123456}},
 		TokenKeys: []string{testKey(t)},
 	}
 }
@@ -38,19 +37,17 @@ func TestParseAllowlist(t *testing.T) {
 	t.Run("specific ids", func(t *testing.T) {
 		a, err := ParseAllowlist([]string{"123", "  456  "})
 		require.NoError(t, err)
-		assert.False(t, a.IsWildcard())
-		assert.Equal(t, []tgid.UserID{123, 456}, a.UserIDs())
+		assert.Equal(t, Allowlist{ids: []tgid.UserID{123, 456}}, a)
 	})
 	t.Run("wildcard alone", func(t *testing.T) {
 		a, err := ParseAllowlist([]string{"*"})
 		require.NoError(t, err)
-		assert.True(t, a.IsWildcard())
-		assert.Empty(t, a.UserIDs())
+		assert.Equal(t, AllowAll(), a)
 	})
 	t.Run("blanks ignored", func(t *testing.T) {
 		a, err := ParseAllowlist([]string{"", "123", "  "})
 		require.NoError(t, err)
-		assert.Equal(t, []tgid.UserID{123}, a.UserIDs())
+		assert.Equal(t, Allowlist{ids: []tgid.UserID{123}}, a)
 	})
 	t.Run("wildcard mixed with id rejected", func(t *testing.T) {
 		_, err := ParseAllowlist([]string{"*", "123"})
@@ -106,11 +103,10 @@ func TestConfigValidate(t *testing.T) {
 	fail("issuer with query", func(c *Config) { c.IssuerURL = "https://mcp.example.com?x=1" }, "query or fragment")
 	fail("issuer with fragment", func(c *Config) { c.IssuerURL = "https://mcp.example.com#frag" }, "query or fragment")
 	fail("empty allowlist", func(c *Config) { c.Allow = Allowlist{} }, "allowed Telegram user ID")
-	fail("non-positive user id", func(c *Config) { c.Allow = AllowUsers(0) }, "must be positive")
-	fail("negative user id", func(c *Config) { c.Allow = AllowUsers(-5) }, "must be positive")
+	fail("non-positive user id", func(c *Config) { c.Allow = Allowlist{ids: []tgid.UserID{0}} }, "must be positive")
+	fail("negative user id", func(c *Config) { c.Allow = Allowlist{ids: []tgid.UserID{-5}} }, "must be positive")
 	fail("no token keys", func(c *Config) { c.TokenKeys = nil }, "token key")
 	fail("bad token key", func(c *Config) { c.TokenKeys = []string{"nope"} }, "invalid token keys")
-	fail("negative refresh TTL", func(c *Config) { c.RefreshTokenTTL = -time.Hour }, "must not be negative")
 	fail("malformed extra redirect", func(c *Config) { c.ExtraRedirects = []string{"https://%"} }, "invalid extra redirect")
 	fail("negative trusted hops", func(c *Config) { c.TrustedProxyHops = -1 }, "trusted proxy hops")
 	fail("too many trusted hops", func(c *Config) { c.TrustedProxyHops = 17 }, "trusted proxy hops")
@@ -137,7 +133,7 @@ func TestNewRequiresCollaborators(t *testing.T) {
 }
 
 func TestUserAllowed(t *testing.T) {
-	cfg := &Config{Allow: AllowUsers(111, 222)}
+	cfg := &Config{Allow: Allowlist{ids: []tgid.UserID{111, 222}}}
 	assert.True(t, cfg.userAllowed(111))
 	assert.True(t, cfg.userAllowed(222))
 	assert.False(t, cfg.userAllowed(333))

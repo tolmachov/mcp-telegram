@@ -203,7 +203,7 @@ func TestExtractSubstring(t *testing.T) {
 // treated as an empty (exhausted) page rather than an error. Callers rely on
 // this to terminate FetchAll pagination without failing.
 func TestProcessHistoryNotModified(t *testing.T) {
-	p := NewProvider(nil)
+	p := NewProviderWithRate(nil, DefaultRateLimitRPS)
 	result, err := p.processHistory(&tg.MessagesMessagesNotModified{}, &tg.InputPeerEmpty{}, 50)
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -214,7 +214,7 @@ func TestProcessHistoryNotModified(t *testing.T) {
 // TestProcessHistoryHasMore pins the correctness-first contract: slice pages
 // continue until Telegram returns an empty raw page, even when a page is short.
 func TestProcessHistoryHasMore(t *testing.T) {
-	p := NewProvider(nil)
+	p := NewProviderWithRate(nil, DefaultRateLimitRPS)
 	peer := &tg.InputPeerEmpty{}
 
 	msgs := func(n int) []tg.MessageClass {
@@ -291,7 +291,7 @@ func TestProcessHistoryHasMore(t *testing.T) {
 // silently dropped. Telegram guarantees positive IDs, but a zero-ID message
 // would cause FormatRegularRef to panic at the tool boundary.
 func TestExtractMessagesDropsZeroID(t *testing.T) {
-	p := NewProvider(nil)
+	p := NewProviderWithRate(nil, DefaultRateLimitRPS)
 	msgs := []tg.MessageClass{
 		&tg.Message{ID: 0, Message: "zero"},
 		&tg.Message{ID: 1, Message: "valid"},

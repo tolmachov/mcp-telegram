@@ -136,7 +136,7 @@ func (p *Provider) SearchGlobal(ctx context.Context, opts GlobalSearchOptions) (
 		return nil, fmt.Errorf("global searching messages: %w", err)
 	}
 
-	return p.processGlobalHistory(history, opts.Limit)
+	return p.processGlobalHistory(history)
 }
 
 // processGlobalHistory converts a cross-chat search response into per-chat
@@ -145,7 +145,7 @@ func (p *Provider) SearchGlobal(ctx context.Context, opts GlobalSearchOptions) (
 // chat it belongs to and look up the display title. It also extracts the
 // next pagination cursor from the last message when the response is a slice
 // and exposes next_rate.
-func (p *Provider) processGlobalHistory(history tg.MessagesMessagesClass, _ int) (*GlobalSearchResult, error) {
+func (p *Provider) processGlobalHistory(history tg.MessagesMessagesClass) (*GlobalSearchResult, error) {
 	var rawMessages []tg.MessageClass
 	var users []tg.UserClass
 	var chats []tg.ChatClass

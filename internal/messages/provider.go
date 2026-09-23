@@ -28,11 +28,6 @@ type Provider struct {
 // NewProviderWithRate when you need a different ceiling.
 const DefaultRateLimitRPS = 1
 
-// NewProvider creates a new message provider with the default 1 RPS rate limit.
-func NewProvider(client *tg.Client) *Provider {
-	return NewProviderWithRate(client, DefaultRateLimitRPS)
-}
-
 // NewProviderWithRate creates a new message provider with an explicit
 // requests-per-second limit. Values ≤ 0 fall back to DefaultRateLimitRPS
 // so the limiter can never be constructed with a zero/negative rate (which

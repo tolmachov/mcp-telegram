@@ -126,32 +126,3 @@ func TestFilterTextOnlyAllEmpty(t *testing.T) {
 	msgs := []Message{{ID: 1}, {ID: 2}}
 	assert.Empty(t, FilterTextOnly(msgs))
 }
-
-func TestReverseOddLength(t *testing.T) {
-	msgs := []Message{{ID: 1}, {ID: 2}, {ID: 3}}
-	Reverse(msgs)
-	assert.Equal(t, []Message{{ID: 3}, {ID: 2}, {ID: 1}}, msgs)
-}
-
-func TestReverseEmptyAndSingle(t *testing.T) {
-	var empty []Message
-	Reverse(empty)
-	assert.Empty(t, empty)
-
-	single := []Message{{ID: 99}}
-	Reverse(single)
-	assert.Equal(t, 99, single[0].ID)
-}
-
-func TestFormatBatchForSummaryIncludesTextMessages(t *testing.T) {
-	msgs := []Message{
-		{ID: 1, Date: time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC), SenderID: 42, Text: "hello"},
-		{ID: 2, Date: time.Date(2026, 4, 10, 9, 1, 0, 0, time.UTC), SenderID: 99, Text: ""}, // no text — skipped
-		{ID: 3, Date: time.Date(2026, 4, 10, 9, 2, 0, 0, time.UTC), SenderID: 42, Text: "world"},
-	}
-	out := FormatBatchForSummary(msgs)
-
-	assert.Contains(t, out, "hello")
-	assert.NotContains(t, out, "sender_id: \n")
-	assert.Contains(t, out, "world")
-}

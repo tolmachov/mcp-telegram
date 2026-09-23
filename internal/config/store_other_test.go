@@ -86,19 +86,6 @@ func TestFileStoreSetOverwritesExistingValue(t *testing.T) {
 	assert.Equal(t, "updated", got)
 }
 
-func TestFileStoreLoadAll(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-
-	s, err := NewStore()
-	require.NoError(t, err)
-	require.NoError(t, s.Set("a", "1"))
-	require.NoError(t, s.Set("b", "2"))
-
-	all, err := s.LoadAll()
-	require.NoError(t, err)
-	assert.Equal(t, map[string]string{"a": "1", "b": "2"}, all)
-}
-
 func TestFileStoreIgnoresLegacyJSON(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", dir)
@@ -126,7 +113,10 @@ func TestFileStoreIndependentWritesDoNotLoseData(t *testing.T) {
 	go func() { done <- second.Set("second", "two") }()
 	require.NoError(t, <-done)
 	require.NoError(t, <-done)
-	all, err := first.LoadAll()
+	keys, err := first.List()
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{"first": "one", "second": "two"}, all)
+	assert.Equal(t, []string{"first", "second"}, keys)
+	got, err := first.Get("second")
+	require.NoError(t, err)
+	assert.Equal(t, "two", got)
 }

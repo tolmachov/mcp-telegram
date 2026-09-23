@@ -29,9 +29,9 @@ var defaultExtraRedirects = []string{
 	"https://claude.com/api/mcp/auth_callback",
 }
 
-// defaultRefreshTokenTTL bounds how long a refresh token may be used before
-// the user must log in again.
-const defaultRefreshTokenTTL = 30 * 24 * time.Hour
+// refreshTokenTTL bounds how long a refresh token may be used before the user
+// must log in again.
+const refreshTokenTTL = 30 * 24 * time.Hour
 
 // wildcardUser is the sentinel flag entry that opens the login gate to any
 // Telegram account. It cannot be combined with specific user IDs.
@@ -52,9 +52,6 @@ type Allowlist struct {
 // AllowAll returns an Allowlist that admits any Telegram account. The
 // deployment is then only as private as its URL.
 func AllowAll() Allowlist { return Allowlist{all: true} }
-
-// AllowUsers returns an Allowlist restricted to the given Telegram user IDs.
-func AllowUsers(ids ...tgid.UserID) Allowlist { return Allowlist{ids: ids} }
 
 // ParseAllowlist builds an Allowlist from raw --auth-allowed-users entries.
 // A single "*" means wildcard; every other entry must be a positive Telegram
@@ -89,12 +86,6 @@ func ParseAllowlist(entries []string) (Allowlist, error) {
 	return Allowlist{ids: ids}, nil
 }
 
-// IsWildcard reports whether the gate admits any account.
-func (a Allowlist) IsWildcard() bool { return a.all }
-
-// UserIDs returns a copy of the explicit allowlist (empty for a wildcard).
-func (a Allowlist) UserIDs() []tgid.UserID { return slices.Clone(a.ids) }
-
 // configured reports whether the gate admits anyone at all — true for a
 // wildcard or a non-empty list, false for the zero value.
 func (a Allowlist) configured() bool { return a.all || len(a.ids) > 0 }
@@ -110,9 +101,10 @@ type Config struct {
 	// e.g. "https://mcp-telegram.example.com". It is the OAuth issuer, the
 	// MCP resource identifier, and the AAD binding of all sealed blobs.
 	IssuerURL string
-	// Allow is the login gate: either specific Telegram accounts (AllowUsers)
-	// or any account (AllowAll). Required — an unconfigured (zero) Allow fails
-	// Validate, so the server never starts wide open by accident.
+	// Allow is the login gate built by ParseAllowlist: either specific
+	// Telegram accounts or any account (AllowAll). Required — an unconfigured
+	// (zero) Allow fails Validate, so the server never starts wide open by
+	// accident.
 	Allow Allowlist
 	// TokenKeys are base64-encoded 32-byte master keys. The first key seals
 	// new blobs; all keys can open existing ones, enabling rotation without
@@ -122,9 +114,6 @@ type Config struct {
 	// registration on top of the defaults (claude.ai/claude.com callbacks)
 	// and the always-allowed loopback URIs.
 	ExtraRedirects []string
-	// RefreshTokenTTL caps refresh-token lifetime. Zero means the default
-	// (30 days).
-	RefreshTokenTTL time.Duration
 	// TrustedProxyHops controls how many rightmost proxy addresses are trusted
 	// when deriving the client IP. Zero ignores forwarding headers entirely.
 	TrustedProxyHops int
@@ -174,9 +163,6 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("invalid extra redirect URI %q: %w", r, err)
 		}
 	}
-	if c.RefreshTokenTTL < 0 {
-		return fmt.Errorf("refresh token TTL must not be negative")
-	}
 	if c.TrustedProxyHops < 0 || c.TrustedProxyHops > 16 {
 		return fmt.Errorf("trusted proxy hops must be between 0 and 16")
 	}
@@ -190,12 +176,4 @@ func (c *Config) Validate() error {
 // With a wildcard gate every account passes.
 func (c *Config) userAllowed(id tgid.UserID) bool {
 	return c.Allow.allows(id)
-}
-
-// refreshTokenTTL returns the configured refresh-token TTL or the default.
-func (c *Config) refreshTokenTTL() time.Duration {
-	if c.RefreshTokenTTL > 0 {
-		return c.RefreshTokenTTL
-	}
-	return defaultRefreshTokenTTL
 }

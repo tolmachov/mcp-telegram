@@ -27,10 +27,9 @@ func (s resolverStore) Get(key string) (string, error) {
 	}
 	return value, nil
 }
-func (resolverStore) Set(string, string) error            { return nil }
-func (resolverStore) Delete(string) error                 { return nil }
-func (resolverStore) List() ([]string, error)             { return nil, nil }
-func (resolverStore) LoadAll() (map[string]string, error) { return nil, nil }
+func (resolverStore) Set(string, string) error { return nil }
+func (resolverStore) Delete(string) error      { return nil }
+func (resolverStore) List() ([]string, error)  { return nil, nil }
 
 func TestResolverPrecedenceAndTypes(t *testing.T) {
 	values := fakeValues{

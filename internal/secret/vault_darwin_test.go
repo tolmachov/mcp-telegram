@@ -4,7 +4,6 @@ package secret
 
 import (
 	"errors"
-	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -66,9 +65,9 @@ func TestVaultUsesIndependentLiveItems(t *testing.T) {
 	got, err := v.ConfigGet("A")
 	require.NoError(t, err)
 	assert.Equal(t, "external-update", got)
-	all, err := v.ConfigLoadAll()
+	keys, err := v.ConfigList()
 	require.NoError(t, err)
-	assert.True(t, maps.Equal(map[string]string{"A": "external-update", "B": "two"}, all))
+	assert.Equal(t, []string{"A", "B"}, keys)
 }
 
 func TestVaultSessionCopiesAndZeroMeansAbsent(t *testing.T) {

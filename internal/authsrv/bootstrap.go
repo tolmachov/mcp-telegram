@@ -31,7 +31,7 @@ const (
 	finalizeTimeout = 15 * time.Second
 )
 
-// errTooManyLogins is returned by addPending when the registry is full.
+// errTooManyLogins is returned by reservePending when the registry is full.
 var errTooManyLogins = fmt.Errorf("too many concurrent login attempts")
 
 var errAuthServerNotRunning = fmt.Errorf("authorization server is not running")
@@ -77,15 +77,10 @@ func (p *pendingLogin) tryConsume() bool {
 	return true
 }
 
-// newLoginID returns a 128-bit random hex login identifier.
-func newLoginID() (string, error) {
-	return randomHex(16)
-}
-
 // reservePending atomically consumes admission capacity before the expensive
 // MTProto login flow is started. The reservation is activated afterwards.
 func (a *AuthServer) reservePending(request, ip string) (*pendingLogin, error) {
-	id, err := newLoginID()
+	id, err := randomHex(16) // 128-bit login identifier
 	if err != nil {
 		return nil, err
 	}
@@ -145,19 +140,6 @@ func (a *AuthServer) activatePending(p *pendingLogin, flow LoginFlow) bool {
 	}
 	p.flow = flow
 	return true
-}
-
-// addPending remains a compact test helper for already-created fake flows.
-func (a *AuthServer) addPending(request string, flow LoginFlow, ip string) error {
-	p, err := a.reservePending(request, ip)
-	if err != nil {
-		return err
-	}
-	if !a.activatePending(p, flow) {
-		flow.Abort()
-		return context.Canceled
-	}
-	return nil
 }
 
 // lookupPending returns the live pending login with the given id. Entries

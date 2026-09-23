@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -57,12 +58,6 @@ func NewSummarizer(provider Provider, msgProvider *messages.Provider, batchToken
 	}
 }
 
-// Summarize performs rolling summarization of a chat.
-func (s *Summarizer) Summarize(ctx context.Context, chatID int64, goal string, since time.Time, onProgress ProgressCallback) (string, error) {
-	result, err := s.SummarizeDetailed(ctx, chatID, goal, since, 2000, onProgress)
-	return result.Summary, err
-}
-
 // SummarizeDetailed fetches at most maxMessages and preserves usable work when
 // a later Telegram page fails.
 func (s *Summarizer) SummarizeDetailed(ctx context.Context, chatID int64, goal string, since time.Time, maxMessages int, onProgress ProgressCallback) (Result, error) {
@@ -91,7 +86,7 @@ func (s *Summarizer) SummarizeDetailed(ctx context.Context, chatID int64, goal s
 	}
 
 	// Reverse to chronological order (FetchAll returns reverse chronological)
-	messages.Reverse(fetched.Messages)
+	slices.Reverse(fetched.Messages)
 
 	// Filter text-only messages (ignore media-only)
 	textMessages := messages.FilterTextOnly(fetched.Messages)

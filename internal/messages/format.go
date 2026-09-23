@@ -124,19 +124,6 @@ func backupMessageBody(msg Message) string {
 	return "[media: " + strings.Join(parts, ", ") + "]"
 }
 
-// FormatBatchForSummary formats a batch of messages for summarization.
-func FormatBatchForSummary(messages []Message) string {
-	var sb strings.Builder
-	for _, msg := range messages {
-		if msg.Text == "" {
-			continue
-		}
-		sb.WriteString(FormatForSummary(msg))
-		sb.WriteString("\n")
-	}
-	return sb.String()
-}
-
 // FilterTextOnly returns only messages with non-empty text.
 func FilterTextOnly(messages []Message) []Message {
 	result := make([]Message, 0, len(messages))
@@ -146,11 +133,4 @@ func FilterTextOnly(messages []Message) []Message {
 		}
 	}
 	return result
-}
-
-// Reverse reverses a slice of messages in place.
-func Reverse(messages []Message) {
-	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
-		messages[i], messages[j] = messages[j], messages[i]
-	}
 }

@@ -27,7 +27,7 @@ func TestSweepOrphanSessions(t *testing.T) {
 	require.NoError(t, store.Session(allowedUser, staleSID, nil).StoreSession(ctx, []byte("stale")))
 
 	// Written "now": a live session (gotd re-stores keep active blobs fresh).
-	sweepTime := base.Add(defaultRefreshTokenTTL + sweepMargin + time.Hour)
+	sweepTime := base.Add(refreshTokenTTL + sweepMargin + time.Hour)
 	store.Now = func() time.Time { return sweepTime.Add(-time.Minute) }
 	require.NoError(t, store.Session(allowedUser, freshSID, nil).StoreSession(ctx, []byte("fresh")))
 
@@ -49,9 +49,9 @@ func TestSweepOrphanSessions(t *testing.T) {
 	}
 }
 
-// TestSweepRespectsConfiguredTTL pins that a shorter configured
-// RefreshTokenTTL tightens the sweep cutoff accordingly.
-func TestSweepRespectsConfiguredTTL(t *testing.T) {
+// TestSweepSessionCutoffBoundary pins the session cutoff on both sides of
+// refreshTokenTTL + sweepMargin.
+func TestSweepSessionCutoffBoundary(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	store := sessionstore.NewMemory()
@@ -59,19 +59,17 @@ func TestSweepRespectsConfiguredTTL(t *testing.T) {
 	const sid = "0123456789abcdef0123456789abcdef"
 	require.NoError(t, store.Session(allowedUser, sid, nil).StoreSession(ctx, []byte("s")))
 
-	cfg := testConfig(t)
-	cfg.RefreshTokenTTL = 24 * time.Hour
-	a, _ := newTestServer(t, cfg, store, neverStartLogin)
+	a, _ := newTestServer(t, testConfig(t), store, neverStartLogin)
 
 	// Just inside the cutoff: kept.
-	a.now = func() time.Time { return base.Add(cfg.RefreshTokenTTL + sweepMargin - time.Minute) }
+	a.now = func() time.Time { return base.Add(refreshTokenTTL + sweepMargin - time.Minute) }
 	a.sweepOrphanSessions(ctx)
 	exists, err := store.Exists(ctx, allowedUser, sid)
 	require.NoError(t, err)
 	assert.True(t, exists, "session inside the cutoff must be kept")
 
 	// Just past it: reclaimed.
-	a.now = func() time.Time { return base.Add(cfg.RefreshTokenTTL + sweepMargin + time.Minute) }
+	a.now = func() time.Time { return base.Add(refreshTokenTTL + sweepMargin + time.Minute) }
 	a.sweepOrphanSessions(ctx)
 	exists, err = store.Exists(ctx, allowedUser, sid)
 	require.NoError(t, err)
@@ -92,7 +90,7 @@ func TestSweepExpiredTombstones(t *testing.T) {
 	store.Now = func() time.Time { return base }
 	require.NoError(t, store.Revoke(ctx, allowedUser, staleSID))
 
-	sweepTime := base.Add(defaultRefreshTokenTTL + sweepMargin + time.Hour)
+	sweepTime := base.Add(refreshTokenTTL + sweepMargin + time.Hour)
 	store.Now = func() time.Time { return sweepTime.Add(-time.Minute) }
 	require.NoError(t, store.Revoke(ctx, allowedUser, freshSID))
 
@@ -108,14 +106,14 @@ func TestSweepExpiredTombstones(t *testing.T) {
 	assert.True(t, fresh, "fresh tombstone must survive to keep rejecting live tokens")
 }
 
-// TestSweepTombstoneRespectsConfiguredTTL pins the tombstone cutoff on BOTH
+// TestSweepTombstoneCutoffBoundary pins the tombstone cutoff on BOTH
 // sides of refreshTokenTTL + sweepMargin. The two-sided boundary matters more
 // here than for session blobs: a tombstone reclaimed early (say after an hour)
 // would re-open the exact resurrection hole tombstones exist to close — a warm
 // client re-stores the blob, the tombstone is gone, and a revoked refresh token
 // works again. TestSweepExpiredTombstones alone cannot catch that mutation (its
 // fresh tombstone is only a minute old at sweep time).
-func TestSweepTombstoneRespectsConfiguredTTL(t *testing.T) {
+func TestSweepTombstoneCutoffBoundary(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	store := sessionstore.NewMemory()
@@ -123,21 +121,19 @@ func TestSweepTombstoneRespectsConfiguredTTL(t *testing.T) {
 	const sid = "0123456789abcdef0123456789abcdef"
 	require.NoError(t, store.Revoke(ctx, allowedUser, sid))
 
-	cfg := testConfig(t)
-	cfg.RefreshTokenTTL = 24 * time.Hour
-	a, _ := newTestServer(t, cfg, store, neverStartLogin)
+	a, _ := newTestServer(t, testConfig(t), store, neverStartLogin)
 
 	// Just inside the cutoff: the tombstone must survive — a refresh token from
 	// the revoked grant could still be presented until LoginAt+TTL, and the
 	// margin absorbs clock skew on top.
-	a.now = func() time.Time { return base.Add(cfg.RefreshTokenTTL + sweepMargin - time.Minute) }
+	a.now = func() time.Time { return base.Add(refreshTokenTTL + sweepMargin - time.Minute) }
 	a.sweepExpiredTombstones(ctx)
 	revoked, err := store.Revoked(ctx, allowedUser, sid)
 	require.NoError(t, err)
 	assert.True(t, revoked, "tombstone inside the cutoff must survive to keep rejecting live tokens")
 
 	// Just past it: reclaimed.
-	a.now = func() time.Time { return base.Add(cfg.RefreshTokenTTL + sweepMargin + time.Minute) }
+	a.now = func() time.Time { return base.Add(refreshTokenTTL + sweepMargin + time.Minute) }
 	a.sweepExpiredTombstones(ctx)
 	revoked, err = store.Revoked(ctx, allowedUser, sid)
 	require.NoError(t, err)

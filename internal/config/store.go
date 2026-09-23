@@ -30,7 +30,6 @@ type Store interface {
 	Set(key, value string) error
 	Delete(key string) error
 	List() ([]string, error)
-	LoadAll() (map[string]string, error)
 }
 
 // ResolveKey translates a user-facing alias (e.g. "api-id") to its canonical

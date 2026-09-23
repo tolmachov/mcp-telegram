@@ -41,7 +41,3 @@ func (s *keychainStore) Delete(key string) error {
 func (s *keychainStore) List() ([]string, error) {
 	return s.vault.ConfigList()
 }
-
-func (s *keychainStore) LoadAll() (map[string]string, error) {
-	return s.vault.ConfigLoadAll()
-}

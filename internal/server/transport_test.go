@@ -33,9 +33,13 @@ func testAuth(t *testing.T, issuer string) (*authsrv.Config, sessionstore.Store)
 	if _, err := rand.Read(key); err != nil {
 		t.Fatalf("generating key: %v", err)
 	}
+	allow, err := authsrv.ParseAllowlist([]string{"42"})
+	if err != nil {
+		t.Fatalf("parsing allowlist: %v", err)
+	}
 	return &authsrv.Config{
 		IssuerURL: issuer,
-		Allow:     authsrv.AllowUsers(42),
+		Allow:     allow,
 		TokenKeys: []string{base64.StdEncoding.EncodeToString(key)},
 	}, sessionstore.NewMemory()
 }

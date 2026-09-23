@@ -171,20 +171,6 @@ func (v *Vault) ConfigList() ([]string, error) {
 	return keys, nil
 }
 
-func (v *Vault) ConfigLoadAll() (map[string]string, error) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	items, err := v.backend.List(configAccountPrefix)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]string, len(items))
-	for account, data := range items {
-		out[strings.TrimPrefix(account, configAccountPrefix)] = string(data)
-	}
-	return out, nil
-}
-
 func (v *Vault) SessionLoad() ([]byte, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()

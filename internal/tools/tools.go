@@ -19,7 +19,6 @@ import (
 // plain string type with no exported wire-value constants, so we define them
 // here for readability at call sites.
 const (
-	logLevelDebug   mcp.LoggingLevel = "debug"
 	logLevelInfo    mcp.LoggingLevel = "info"
 	logLevelWarning mcp.LoggingLevel = "warning"
 	logLevelError   mcp.LoggingLevel = "error"

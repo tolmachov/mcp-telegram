@@ -2,8 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,7 +11,6 @@ import (
 	"time"
 
 	"github.com/tolmachov/mcp-telegram/internal/authsrv"
-	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
@@ -25,20 +22,13 @@ func TestRunHTTPWithAuthWiring(t *testing.T) {
 	addr := freePort(t)
 	issuer := "http://" + addr
 
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		t.Fatalf("generating key: %v", err)
-	}
+	auth, store := testAuth(t, issuer)
 	srv, err := New(Options{
-		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
-		Transport: TransportHTTP,
-		HTTPAddr:  addr,
-		Auth: &authsrv.Config{
-			IssuerURL: issuer,
-			Allow:     authsrv.AllowUsers(42),
-			TokenKeys: []string{base64.StdEncoding.EncodeToString(key)},
-		},
-		SessionStore: sessionstore.NewMemory(),
+		Config:       &tgclient.Config{APIID: 1, APIHash: "hash"},
+		Transport:    TransportHTTP,
+		HTTPAddr:     addr,
+		Auth:         auth,
+		SessionStore: store,
 		Stdin:        strings.NewReader(""),
 		Stdout:       io.Discard,
 		ErrOut:       io.Discard,

@@ -72,7 +72,7 @@ func (a *AuthServer) tokenFromCode(w http.ResponseWriter, r *http.Request, form 
 		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "invalid authorization code")
 		return
 	}
-	redeemed, err := a.store.RedeemCode(r.Context(), cc.JTI, cc.SessionID, now.Add(a.cfg.refreshTokenTTL()))
+	redeemed, err := a.store.RedeemCode(r.Context(), cc.JTI, cc.SessionID, now.Add(refreshTokenTTL))
 	if err != nil {
 		a.logger.Error("authorization code state write failed", "err", err)
 		a.tokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "authorization state unavailable, retry")
@@ -99,7 +99,7 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "invalid refresh token")
 		return
 	}
-	if expired(rc.LoginAt, a.cfg.refreshTokenTTL(), now) {
+	if expired(rc.LoginAt, refreshTokenTTL, now) {
 		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "refresh token expired, log in again")
 		return
 	}

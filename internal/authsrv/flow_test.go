@@ -56,6 +56,20 @@ func newFakeFlow() *fakeFlow {
 	return &fakeFlow{url: "tg://login?token=initial", done: make(chan struct{})}
 }
 
+// addPending registers an already-created fake flow the way the /authorize handler does:
+// reserve admission capacity, then activate the reservation.
+func (a *AuthServer) addPending(request string, flow LoginFlow, ip string) error {
+	p, err := a.reservePending(request, ip)
+	if err != nil {
+		return err
+	}
+	if !a.activatePending(p, flow) {
+		flow.Abort()
+		return context.Canceled
+	}
+	return nil
+}
+
 func (f *fakeFlow) TokenURL() (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -185,7 +199,7 @@ func testConfig(t *testing.T) *Config {
 	t.Helper()
 	return &Config{
 		IssuerURL: testIssuer,
-		Allow:     AllowUsers(allowedUser),
+		Allow:     Allowlist{ids: []tgid.UserID{allowedUser}},
 		TokenKeys: []string{testKey(t)},
 	}
 }
@@ -931,8 +945,8 @@ func TestTokenRejections(t *testing.T) {
 			assert.Equal(t, "invalid_grant", oe.Error)
 		})
 		t.Run("user removed from allowlist", func(t *testing.T) {
-			a.cfg.Allow = AllowUsers(forbiddenUser)
-			t.Cleanup(func() { a.cfg.Allow = AllowUsers(allowedUser) })
+			a.cfg.Allow = Allowlist{ids: []tgid.UserID{forbiddenUser}}
+			t.Cleanup(func() { a.cfg.Allow = Allowlist{ids: []tgid.UserID{allowedUser}} })
 			_, oe, status := refreshGrant(t, ts, clientID, tr.RefreshToken)
 			assert.Equal(t, http.StatusBadRequest, status)
 			assert.Equal(t, "invalid_grant", oe.Error)
@@ -942,7 +956,7 @@ func TestTokenRejections(t *testing.T) {
 			// past LoginAt+TTL invalidates even a freshly minted token.
 			refreshed, _, status := refreshGrant(t, ts, clientID, tr.RefreshToken)
 			require.Equal(t, http.StatusOK, status)
-			a.now = func() time.Time { return time.Now().Add(defaultRefreshTokenTTL + time.Hour) }
+			a.now = func() time.Time { return time.Now().Add(refreshTokenTTL + time.Hour) }
 			t.Cleanup(func() { a.now = time.Now })
 			_, oe, status := refreshGrant(t, ts, clientID, refreshed.RefreshToken)
 			assert.Equal(t, http.StatusBadRequest, status)
@@ -978,8 +992,8 @@ func TestVerifierRejections(t *testing.T) {
 		assert.ErrorIs(t, err, auth.ErrInvalidToken)
 	})
 	t.Run("user removed from allowlist", func(t *testing.T) {
-		a.cfg.Allow = AllowUsers(forbiddenUser)
-		t.Cleanup(func() { a.cfg.Allow = AllowUsers(allowedUser) })
+		a.cfg.Allow = Allowlist{ids: []tgid.UserID{forbiddenUser}}
+		t.Cleanup(func() { a.cfg.Allow = Allowlist{ids: []tgid.UserID{allowedUser}} })
 		_, err := a.Verifier()(context.Background(), tr.AccessToken, nil)
 		assert.ErrorIs(t, err, auth.ErrInvalidToken)
 	})

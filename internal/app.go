@@ -263,7 +263,7 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					if err != nil {
 						return err
 					}
-					return tgclient.Login(ctx, cfg, cmd.String(flags.Phone), cmd.Root().Reader, cmd.Root().Writer, cmd.Root().ErrWriter)
+					return tgclient.Login(ctx, cfg, cmd.String(flags.Phone), cmd.Root().Reader, cmd.Root().Writer)
 				},
 			},
 			{
@@ -278,7 +278,7 @@ func New(in io.Reader, out, errOut io.Writer) *cli.Command {
 					if err != nil {
 						return err
 					}
-					return tgclient.Logout(ctx, cfg, cmd.Root().Reader, cmd.Root().Writer, cmd.Root().ErrWriter)
+					return tgclient.Logout(ctx, cfg, cmd.Root().Writer)
 				},
 			},
 			{

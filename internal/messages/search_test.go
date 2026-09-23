@@ -77,7 +77,7 @@ func TestProcessGlobalHistoryPeerKinds(t *testing.T) {
 				Users:    users,
 				Chats:    chats,
 			}
-			res, err := p.processGlobalHistory(history, 50)
+			res, err := p.processGlobalHistory(history)
 			require.NoError(t, err)
 			require.Len(t, res.Messages, 1)
 			got := res.Messages[0]
@@ -114,7 +114,7 @@ func TestProcessGlobalHistoryCursorSkipsServiceMessages(t *testing.T) {
 		Users:    users,
 	}
 
-	res, err := p.processGlobalHistory(history, 3)
+	res, err := p.processGlobalHistory(history)
 	require.NoError(t, err)
 	assert.Equal(t, 2, res.Count)
 	assert.Equal(t, 1, res.SkippedCount)
@@ -145,7 +145,7 @@ func TestProcessGlobalHistoryCursorAllServiceMessages(t *testing.T) {
 		Users:    users,
 	}
 
-	res, err := p.processGlobalHistory(history, 3)
+	res, err := p.processGlobalHistory(history)
 	require.NoError(t, err)
 	assert.Equal(t, 0, res.Count)
 	assert.Equal(t, 3, res.SkippedCount)
@@ -169,7 +169,7 @@ func TestProcessGlobalHistoryDropsZeroID(t *testing.T) {
 	}
 	history := &tg.MessagesMessagesSlice{Count: 100, Messages: raw, Users: users}
 
-	res, err := p.processGlobalHistory(history, 50)
+	res, err := p.processGlobalHistory(history)
 	require.NoError(t, err)
 	require.Equal(t, 1, res.Count, "the zero-ID message must be dropped")
 	assert.Equal(t, 5, res.Messages[0].ID)
@@ -190,7 +190,7 @@ func TestProcessGlobalHistoryPartialPageNoCursor(t *testing.T) {
 		},
 		Users: users,
 	}
-	res, err := p.processGlobalHistory(history, 50)
+	res, err := p.processGlobalHistory(history)
 	require.NoError(t, err)
 	assert.False(t, res.HasMore)
 	assert.Nil(t, res.NextCursor)
@@ -214,7 +214,7 @@ func TestProcessGlobalHistoryNextRate(t *testing.T) {
 	}
 	slice.SetNextRate(777)
 
-	res, err := p.processGlobalHistory(slice, 3)
+	res, err := p.processGlobalHistory(slice)
 	require.NoError(t, err)
 	require.NotNil(t, res.NextCursor)
 	assert.Equal(t, 777, res.NextCursor.Rate)
@@ -237,7 +237,7 @@ func TestProcessGlobalHistoryCursorRejectsMissingAccessHash(t *testing.T) {
 	}
 	history := &tg.MessagesMessagesSlice{Count: 100, Messages: raw, Users: users}
 
-	_, err := p.processGlobalHistory(history, 3)
+	_, err := p.processGlobalHistory(history)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "access_hash")
 }
@@ -281,7 +281,7 @@ func TestNewGlobalSearchCursor(t *testing.T) {
 func TestProcessGlobalHistoryNotModified(t *testing.T) {
 	p := &Provider{}
 
-	res, err := p.processGlobalHistory(&tg.MessagesMessagesNotModified{}, 10)
+	res, err := p.processGlobalHistory(&tg.MessagesMessagesNotModified{})
 	require.NoError(t, err)
 	require.NotNil(t, res)
 	assert.Empty(t, res.Messages)
@@ -292,7 +292,7 @@ func TestProcessGlobalHistoryNotModified(t *testing.T) {
 // is after MaxDate without making any Telegram API call (nil client is safe
 // because the guard fires before ResolvePeer).
 func TestSearchDateInversion(t *testing.T) {
-	p := NewProvider(nil)
+	p := NewProviderWithRate(nil, DefaultRateLimitRPS)
 	later := time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC)
 	earlier := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 
@@ -308,7 +308,7 @@ func TestSearchDateInversion(t *testing.T) {
 
 // TestSearchGlobalDateInversion verifies the same guard in SearchGlobal.
 func TestSearchGlobalDateInversion(t *testing.T) {
-	p := NewProvider(nil)
+	p := NewProviderWithRate(nil, DefaultRateLimitRPS)
 	later := time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC)
 	earlier := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 

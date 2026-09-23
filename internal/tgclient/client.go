@@ -147,8 +147,7 @@ func CreateClient(cfg *Config, onFloodWait FloodWaitCallback) (*telegram.Client,
 }
 
 // Login performs interactive sign-in to Telegram
-func Login(ctx context.Context, cfg *Config, phone string, in io.Reader, out, errOut io.Writer) error {
-	_ = errOut
+func Login(ctx context.Context, cfg *Config, phone string, in io.Reader, out io.Writer) error {
 	client, waiter, err := CreateClient(cfg, nil)
 	if err != nil {
 		return fmt.Errorf("creating Telegram client: %w", err)
@@ -200,8 +199,7 @@ func Login(ctx context.Context, cfg *Config, phone string, in io.Reader, out, er
 }
 
 // Logout logs out from Telegram
-func Logout(ctx context.Context, cfg *Config, _ io.Reader, out, errOut io.Writer) error {
-	_ = errOut
+func Logout(ctx context.Context, cfg *Config, out io.Writer) error {
 	client, waiter, err := CreateClient(cfg, nil)
 	if err != nil {
 		return fmt.Errorf("creating Telegram client: %w", err)

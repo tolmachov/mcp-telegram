@@ -65,9 +65,6 @@ func TestMcpLogSlogFallback(t *testing.T) {
 
 	// Test that nil session + info doesn't panic (lower level, no output expected)
 	mcpLog(ctx, nil, logLevelInfo, "test-info", map[string]any{"k": "v"})
-
-	// Test that nil session + debug doesn't panic (lower level, no output expected)
-	mcpLog(ctx, nil, logLevelDebug, "test-debug", map[string]any{"k": "v"})
 }
 
 func TestClampWindow(t *testing.T) {

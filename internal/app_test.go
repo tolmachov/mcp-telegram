@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -48,6 +49,16 @@ func runBuildAuthOptions(t *testing.T, args ...string) (*authsrv.Config, session
 	return gotCfg, gotStore, gotErr
 }
 
+// mustAllowlist parses allowlist entries the way --auth-allowed-users does.
+func mustAllowlist(t *testing.T, entries ...string) authsrv.Allowlist {
+	t.Helper()
+	allow, err := authsrv.ParseAllowlist(entries)
+	if err != nil {
+		t.Fatalf("ParseAllowlist: %v", err)
+	}
+	return allow
+}
+
 func testKey(t *testing.T) string {
 	t.Helper()
 	raw := make([]byte, 32)
@@ -76,8 +87,8 @@ func TestBuildAuthOptionsEncryptsSessions(t *testing.T) {
 	if cfg == nil || store == nil {
 		t.Fatal("expected non-nil HTTP auth config and store")
 	}
-	if want := (tgid.UserID(123456789)); cfg.Allow.IsWildcard() || len(cfg.Allow.UserIDs()) != 1 || cfg.Allow.UserIDs()[0] != want {
-		t.Errorf("Allow = %+v, want single user [%v]", cfg.Allow, want)
+	if want := mustAllowlist(t, "123456789"); !reflect.DeepEqual(cfg.Allow, want) {
+		t.Errorf("Allow = %+v, want %+v", cfg.Allow, want)
 	}
 
 	const user = tgid.UserID(123456789)
@@ -115,11 +126,8 @@ func TestBuildAuthOptionsWildcard(t *testing.T) {
 	if cfg == nil || store == nil {
 		t.Fatal("expected non-nil config and store for wildcard")
 	}
-	if !cfg.Allow.IsWildcard() {
-		t.Error("Allow.IsWildcard() = false, want true for --auth-allowed-users '*'")
-	}
-	if len(cfg.Allow.UserIDs()) != 0 {
-		t.Errorf("Allow.UserIDs() = %v, want empty with wildcard", cfg.Allow.UserIDs())
+	if !reflect.DeepEqual(cfg.Allow, authsrv.AllowAll()) {
+		t.Errorf("Allow = %+v, want wildcard for --auth-allowed-users '*'", cfg.Allow)
 	}
 }
 
@@ -177,7 +185,7 @@ func TestBuildAuthOptionsValidation(t *testing.T) {
 			"--auth-session-dir", t.TempDir(),
 		}
 		cfg, _, err := runBuildAuthOptions(t, args...)
-		if err != nil || cfg == nil || len(cfg.Allow.UserIDs()) != 1 || cfg.Allow.UserIDs()[0] != tgid.UserID(123) {
+		if err != nil || cfg == nil || !reflect.DeepEqual(cfg.Allow, mustAllowlist(t, "123")) {
 			t.Errorf("whitespace id not trimmed: cfg=%v err=%v", cfg, err)
 		}
 	})

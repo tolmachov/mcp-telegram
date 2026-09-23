@@ -98,19 +98,3 @@ func (s *fileStore) List() ([]string, error) {
 	sort.Strings(keys)
 	return keys, nil
 }
-
-func (s *fileStore) LoadAll() (map[string]string, error) {
-	keys, err := s.List()
-	if err != nil {
-		return nil, err
-	}
-	values := make(map[string]string, len(keys))
-	for _, key := range keys {
-		value, err := s.Get(key)
-		if err != nil {
-			return nil, err
-		}
-		values[key] = value
-	}
-	return values, nil
-}

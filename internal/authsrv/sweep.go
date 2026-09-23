@@ -75,7 +75,7 @@ func (a *AuthServer) sweepOrphanSessions(ctx context.Context) {
 		a.logger.Error("orphan-session sweep: listing sessions failed", "err", err)
 		return
 	}
-	cutoff := a.cfg.refreshTokenTTL() + sweepMargin
+	cutoff := refreshTokenTTL + sweepMargin
 	now := a.now()
 	for _, ref := range refs {
 		age := now.Sub(ref.UpdatedAt)
@@ -104,7 +104,7 @@ func (a *AuthServer) sweepExpiredTombstones(ctx context.Context) {
 		a.logger.Error("tombstone sweep: listing tombstones failed", "err", err)
 		return
 	}
-	cutoff := a.cfg.refreshTokenTTL() + sweepMargin
+	cutoff := refreshTokenTTL + sweepMargin
 	now := a.now()
 	for _, ref := range refs {
 		age := now.Sub(ref.UpdatedAt)

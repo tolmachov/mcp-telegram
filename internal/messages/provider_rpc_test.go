@@ -227,7 +227,7 @@ func TestSearchGlobalAndForumTopicsBuildTelegramRequests(t *testing.T) {
 }
 
 func TestProviderPublicValidation(t *testing.T) {
-	p := NewProvider(nil)
+	p := NewProviderWithRate(nil, DefaultRateLimitRPS)
 	_, err := p.Search(t.Context(), 1, SearchOptions{})
 	assert.ErrorContains(t, err, "search query is required")
 	_, err = p.Search(t.Context(), 1, SearchOptions{
