@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
-
-	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // Search runs a substring search inside a single chat via messages.search.
@@ -22,18 +20,27 @@ func (p *Provider) Search(ctx context.Context, chatID int64, opts SearchOptions)
 	if opts.Limit <= 0 {
 		opts.Limit = 50
 	}
-	if !opts.MinDate.IsZero() && !opts.MaxDate.IsZero() && !opts.MinDate.Before(opts.MaxDate) {
-		return nil, fmt.Errorf("min_date (%s) is not before max_date (%s): the date window is empty",
-			opts.MinDate.Format(time.RFC3339), opts.MaxDate.Format(time.RFC3339))
+	if err := checkDateWindow(opts.MinDate, opts.MaxDate); err != nil {
+		return nil, err
 	}
 
 	var related []int64
 	if opts.FromSenderID != 0 {
 		related = append(related, opts.FromSenderID)
 	}
-	return withPeerRetry(ctx, p, chatID, related, func(peer tg.InputPeerClass) (*FetchResult, error) {
+	return withPeerRetry(ctx, p, chatID, related, nil, func(peer tg.InputPeerClass) (*FetchResult, error) {
 		return p.searchWithPeer(ctx, chatID, peer, opts)
 	})
+}
+
+// checkDateWindow rejects a window whose lower bound is not before its upper
+// bound; a zero bound is open.
+func checkDateWindow(minDate, maxDate time.Time) error {
+	if !minDate.IsZero() && !maxDate.IsZero() && !minDate.Before(maxDate) {
+		return fmt.Errorf("min_date (%s) is not before max_date (%s): the date window is empty",
+			minDate.Format(time.RFC3339), maxDate.Format(time.RFC3339))
+	}
+	return nil
 }
 
 func (p *Provider) searchWithPeer(ctx context.Context, chatID int64, peer tg.InputPeerClass, opts SearchOptions) (*FetchResult, error) {
@@ -73,8 +80,8 @@ func (p *Provider) searchWithPeer(ctx context.Context, chatID int64, peer tg.Inp
 		req.SetFromID(fromPeer)
 	}
 
-	if err := p.limiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("waiting for Telegram rate limit: %w", err)
+	if err := p.wait(ctx); err != nil {
+		return nil, err
 	}
 
 	history, err := p.client.MessagesSearch(ctx, req)
@@ -82,10 +89,7 @@ func (p *Provider) searchWithPeer(ctx context.Context, chatID int64, peer tg.Inp
 		return nil, fmt.Errorf("searching messages: %w", err)
 	}
 
-	result, err := p.processHistory(history, peer, opts.Limit)
-	if err != nil {
-		return nil, err
-	}
+	result := p.processHistory(history, peer)
 	result.ChatID = chatID
 	return result, nil
 }
@@ -103,9 +107,8 @@ func (p *Provider) SearchGlobal(ctx context.Context, opts GlobalSearchOptions) (
 	if opts.Limit <= 0 {
 		opts.Limit = 50
 	}
-	if !opts.MinDate.IsZero() && !opts.MaxDate.IsZero() && !opts.MinDate.Before(opts.MaxDate) {
-		return nil, fmt.Errorf("min_date (%s) is not before max_date (%s): the date window is empty",
-			opts.MinDate.Format(time.RFC3339), opts.MaxDate.Format(time.RFC3339))
+	if err := checkDateWindow(opts.MinDate, opts.MaxDate); err != nil {
+		return nil, err
 	}
 
 	req := &tg.MessagesSearchGlobalRequest{
@@ -127,8 +130,8 @@ func (p *Provider) SearchGlobal(ctx context.Context, opts GlobalSearchOptions) (
 		req.MaxDate = telegramBefore(opts.MaxDate)
 	}
 
-	if err := p.limiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("waiting for Telegram rate limit: %w", err)
+	if err := p.wait(ctx); err != nil {
+		return nil, err
 	}
 
 	history, err := p.client.MessagesSearchGlobal(ctx, req)
@@ -146,68 +149,28 @@ func (p *Provider) SearchGlobal(ctx context.Context, opts GlobalSearchOptions) (
 // next pagination cursor from the last message when the response is a slice
 // and exposes next_rate.
 func (p *Provider) processGlobalHistory(history tg.MessagesMessagesClass) (*GlobalSearchResult, error) {
-	var rawMessages []tg.MessageClass
-	var users []tg.UserClass
-	var chats []tg.ChatClass
-	var nextRate int
-	var hasNextRate bool
-	var paginatable bool
-
-	switch hist := history.(type) {
-	case *tg.MessagesMessages:
-		rawMessages = hist.Messages
-		users = hist.Users
-		chats = hist.Chats
-	case *tg.MessagesMessagesSlice:
-		paginatable = true
-		rawMessages = hist.Messages
-		users = hist.Users
-		chats = hist.Chats
-		if rate, ok := hist.GetNextRate(); ok {
-			nextRate = rate
-			hasNextRate = true
-		}
-	case *tg.MessagesChannelMessages:
-		paginatable = true
-		rawMessages = hist.Messages
-		users = hist.Users
-		chats = hist.Chats
-	case *tg.MessagesMessagesNotModified:
+	hist, ok := history.AsModified()
+	if !ok {
 		// Telegram signals "nothing changed" — return an empty result so the
 		// caller sees zero matches rather than a hard error.
 		return &GlobalSearchResult{Messages: make([]GlobalMessage, 0)}, nil
-	default:
-		return nil, fmt.Errorf("unexpected response type: %T", history)
+	}
+	rawMessages := hist.GetMessages()
+	_, complete := hist.(*tg.MessagesMessages)
+	paginatable := !complete
+	nextRate := 0
+	if slice, ok := hist.(*tg.MessagesMessagesSlice); ok {
+		nextRate, _ = slice.GetNextRate()
 	}
 
 	// Build per-ID maps once so extractGlobalChat is O(1) per message instead
-	// of O(users+chats). For a typical page of 50 messages spanning dozens of
-	// dialogs this saves a noticeable amount of work; more importantly it
-	// scales cleanly if limit grows.
-	userMap := make(map[int64]string, len(users))
-	userByID := make(map[int64]*tg.User, len(users))
-	for _, u := range users {
-		if user, ok := u.(*tg.User); ok {
-			userMap[user.ID] = tgclient.UserName(user)
-			userByID[user.ID] = user
-		}
-	}
-
-	// Two parallel maps for chat lookups:
-	//   - chatTitleMap holds the *display title* keyed by the bare Telegram ID.
-	//   - channelByID holds full channel records so access_hash lookups for
-	//     cursor construction are O(1).
-	chatTitleMap := make(map[int64]string, len(chats))
-	channelByID := make(map[int64]*tg.Channel, len(chats))
-	for _, c := range chats {
-		switch chat := c.(type) {
-		case *tg.Chat:
-			chatTitleMap[chat.ID] = chat.Title
-		case *tg.Channel:
-			chatTitleMap[chat.ID] = chat.Title
-			channelByID[chat.ID] = chat
-		}
-	}
+	// of O(users+chats). The name maps give display titles keyed by the bare
+	// Telegram ID; userByID / channelByID hold full records so access_hash
+	// lookups for cursor construction are O(1) too.
+	users, chats := tg.UserClassArray(hist.GetUsers()), tg.ChatClassArray(hist.GetChats())
+	userMap, chatTitleMap := nameMaps(users, chats)
+	userByID := users.UserToMap()
+	channelByID := chats.ChannelToMap()
 
 	result := &GlobalSearchResult{
 		Messages: make([]GlobalMessage, 0, len(rawMessages)),
@@ -266,11 +229,7 @@ func (p *Provider) processGlobalHistory(history tg.MessagesMessagesClass) (*Glob
 		if lastPeerKind == "" || lastMsgID <= 0 {
 			return result, nil
 		}
-		rate := 0
-		if hasNextRate {
-			rate = nextRate
-		}
-		cursor, err := NewGlobalSearchCursor(rate, lastPeerKind, lastPeerID, lastAccessHash, lastMsgID)
+		cursor, err := NewGlobalSearchCursor(nextRate, lastPeerKind, lastPeerID, lastAccessHash, lastMsgID)
 		if err != nil {
 			// A failing invariant here means processGlobalHistory built an
 			// inconsistent cursor — e.g. a user/channel peer with no
@@ -337,26 +296,15 @@ func lastGlobalCursorAnchor(
 	channelByID map[int64]*tg.Channel,
 ) (peerKind PeerKind, peerRawID, accessHash int64, msgID int) {
 	for i := len(rawMessages) - 1; i >= 0; i-- {
-		switch msg := rawMessages[i].(type) {
-		case *tg.Message:
-			if msg.ID <= 0 || msg.PeerID == nil {
-				continue
-			}
-			// nil name maps are safe: only peerKind, chatID (the bare id), and
-			// accessHash feed cursor construction; the title lookup is discarded.
-			peerRawID, _, peerKind, accessHash = extractGlobalChat(msg.PeerID, nil, nil, userByID, channelByID)
-			if peerKind != "" {
-				return peerKind, peerRawID, accessHash, msg.ID
-			}
-		case *tg.MessageService:
-			if msg.ID <= 0 || msg.PeerID == nil {
-				continue
-			}
-			// Same nil-map rationale as the *tg.Message case above.
-			peerRawID, _, peerKind, accessHash = extractGlobalChat(msg.PeerID, nil, nil, userByID, channelByID)
-			if peerKind != "" {
-				return peerKind, peerRawID, accessHash, msg.ID
-			}
+		msg, ok := rawMessages[i].AsNotEmpty()
+		if !ok || msg.GetID() <= 0 || msg.GetPeerID() == nil {
+			continue
+		}
+		// nil name maps are safe: only peerKind, chatID (the bare id), and
+		// accessHash feed cursor construction; the title lookup is discarded.
+		peerRawID, _, peerKind, accessHash = extractGlobalChat(msg.GetPeerID(), nil, nil, userByID, channelByID)
+		if peerKind != "" {
+			return peerKind, peerRawID, accessHash, msg.GetID()
 		}
 	}
 	return "", 0, 0, 0

@@ -204,8 +204,7 @@ func TestExtractSubstring(t *testing.T) {
 // this to terminate FetchAll pagination without failing.
 func TestProcessHistoryNotModified(t *testing.T) {
 	p := NewProviderWithRate(nil, DefaultRateLimitRPS)
-	result, err := p.processHistory(&tg.MessagesMessagesNotModified{}, &tg.InputPeerEmpty{}, 50)
-	require.NoError(t, err)
+	result := p.processHistory(&tg.MessagesMessagesNotModified{}, &tg.InputPeerEmpty{})
 	require.NotNil(t, result)
 	assert.Empty(t, result.Messages)
 	assert.False(t, result.HasMore)
@@ -227,8 +226,7 @@ func TestProcessHistoryHasMore(t *testing.T) {
 
 	t.Run("short slice still exposes an advancing raw cursor", func(t *testing.T) {
 		hist := &tg.MessagesMessagesSlice{Count: 1000, Messages: msgs(37)}
-		res, err := p.processHistory(hist, peer, 50)
-		require.NoError(t, err)
+		res := p.processHistory(hist, peer)
 		assert.True(t, res.HasMore)
 		assert.Equal(t, 37, res.NextID)
 		assert.Equal(t, 37, res.Count)
@@ -236,8 +234,7 @@ func TestProcessHistoryHasMore(t *testing.T) {
 
 	t.Run("full slice signals more", func(t *testing.T) {
 		hist := &tg.MessagesMessagesSlice{Count: 1000, Messages: msgs(50)}
-		res, err := p.processHistory(hist, peer, 50)
-		require.NoError(t, err)
+		res := p.processHistory(hist, peer)
 		assert.True(t, res.HasMore, "a page filled to the limit implies more may follow")
 		assert.Equal(t, 50, res.NextID)
 	})
@@ -246,15 +243,13 @@ func TestProcessHistoryHasMore(t *testing.T) {
 		// Telegram returns the non-slice type only when the whole history fits,
 		// so HasMore must be false even when the page equals the limit.
 		hist := &tg.MessagesMessages{Messages: msgs(50)}
-		res, err := p.processHistory(hist, peer, 50)
-		require.NoError(t, err)
+		res := p.processHistory(hist, peer)
 		assert.False(t, res.HasMore)
 	})
 
 	t.Run("short channel page still continues", func(t *testing.T) {
 		hist := &tg.MessagesChannelMessages{Count: 1000, Messages: msgs(10)}
-		res, err := p.processHistory(hist, peer, 50)
-		require.NoError(t, err)
+		res := p.processHistory(hist, peer)
 		assert.True(t, res.HasMore)
 		assert.Equal(t, 10, res.NextID)
 	})
@@ -264,8 +259,7 @@ func TestProcessHistoryHasMore(t *testing.T) {
 			&tg.MessageService{ID: 42},
 			&tg.MessageService{ID: 41},
 		}}
-		res, err := p.processHistory(hist, peer, 50)
-		require.NoError(t, err)
+		res := p.processHistory(hist, peer)
 		assert.Empty(t, res.Messages)
 		assert.True(t, res.HasMore)
 		assert.Equal(t, 41, res.NextID)
@@ -280,8 +274,7 @@ func TestProcessHistoryHasMore(t *testing.T) {
 			&tg.Message{ID: 0},
 		}
 		hist := &tg.MessagesMessagesSlice{Count: 1000, Messages: zero}
-		res, err := p.processHistory(hist, peer, 2)
-		require.NoError(t, err)
+		res := p.processHistory(hist, peer)
 		assert.Empty(t, res.Messages)
 		assert.False(t, res.HasMore)
 	})

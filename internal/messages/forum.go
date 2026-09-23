@@ -56,7 +56,7 @@ type ForumTopicsResult struct {
 // Telegram only accepts this call for forum-enabled supergroups; for any other
 // peer it returns an error, which is propagated to the caller.
 func (p *Provider) FetchForumTopics(ctx context.Context, chatID int64, query string, limit, offsetTopic, offsetID, offsetDate, seen int) (*ForumTopicsResult, error) {
-	return withPeerRetry(ctx, p, chatID, nil, func(peer tg.InputPeerClass) (*ForumTopicsResult, error) {
+	return withPeerRetry(ctx, p, chatID, nil, nil, func(peer tg.InputPeerClass) (*ForumTopicsResult, error) {
 		return p.fetchForumTopicsWithPeer(ctx, peer, query, limit, offsetTopic, offsetID, offsetDate, seen)
 	})
 }
@@ -77,8 +77,8 @@ func (p *Provider) fetchForumTopicsWithPeer(ctx context.Context, peer tg.InputPe
 		req.SetQ(query)
 	}
 
-	if err := p.limiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("waiting for Telegram rate limit: %w", err)
+	if err := p.wait(ctx); err != nil {
+		return nil, err
 	}
 
 	resp, err := p.client.MessagesGetForumTopics(ctx, req)
@@ -110,11 +110,8 @@ func buildForumTopicsResult(resp *tg.MessagesForumTopics, seen int) (*ForumTopic
 	// top-message date for the pagination cursor.
 	msgDates := make(map[int]int, len(resp.Messages))
 	for _, mc := range resp.Messages {
-		switch m := mc.(type) {
-		case *tg.Message:
-			msgDates[m.ID] = m.Date
-		case *tg.MessageService:
-			msgDates[m.ID] = m.Date
+		if m, ok := mc.AsNotEmpty(); ok {
+			msgDates[m.GetID()] = m.GetDate()
 		}
 	}
 

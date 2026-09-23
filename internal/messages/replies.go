@@ -27,7 +27,7 @@ func (p *Provider) FetchReplies(ctx context.Context, chatID int64, rootMsgID int
 		opts.Limit = 50
 	}
 
-	result, err := withPeerRetry(ctx, p, chatID, nil, func(peer tg.InputPeerClass) (*FetchResult, error) {
+	result, err := withPeerRetry(ctx, p, chatID, nil, nil, func(peer tg.InputPeerClass) (*FetchResult, error) {
 		return p.fetchRepliesWithPeer(ctx, peer, rootMsgID, opts)
 	})
 	if err != nil {
@@ -49,8 +49,8 @@ func (p *Provider) fetchRepliesWithPeer(ctx context.Context, peer tg.InputPeerCl
 		req.OffsetDate = telegramBefore(offsetDate)
 	}
 
-	if err := p.limiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("waiting for Telegram rate limit: %w", err)
+	if err := p.wait(ctx); err != nil {
+		return nil, err
 	}
 
 	history, err := p.client.MessagesGetReplies(ctx, req)
@@ -58,10 +58,7 @@ func (p *Provider) fetchRepliesWithPeer(ctx context.Context, peer tg.InputPeerCl
 		return nil, fmt.Errorf("getting replies: %w", err)
 	}
 
-	result, err := p.processHistory(history, peer, opts.Limit)
-	if err != nil {
-		return nil, err
-	}
+	result := p.processHistory(history, peer)
 
 	applyMinDateFilter(result, opts.MinDate)
 	return result, nil

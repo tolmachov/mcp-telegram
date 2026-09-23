@@ -43,10 +43,18 @@ func NewProviderWithRate(client *tg.Client, rps int) *Provider {
 	}
 }
 
+// wait blocks until the provider's rate limiter admits one Telegram request.
+func (p *Provider) wait(ctx context.Context) error {
+	if err := p.limiter.Wait(ctx); err != nil {
+		return fmt.Errorf("waiting for Telegram rate limit: %w", err)
+	}
+	return nil
+}
+
 // Fetch retrieves messages from a chat with the given options.
 // It handles pagination internally and returns enriched messages with sender names.
 func (p *Provider) Fetch(ctx context.Context, chatID int64, opts FetchOptions) (*FetchResult, error) {
-	result, err := withPeerRetry(ctx, p, chatID, nil, func(peer tg.InputPeerClass) (*FetchResult, error) {
+	result, err := withPeerRetry(ctx, p, chatID, nil, nil, func(peer tg.InputPeerClass) (*FetchResult, error) {
 		return p.fetchWithPeer(ctx, peer, opts)
 	})
 	if err != nil {
@@ -97,8 +105,8 @@ func (p *Provider) fetchWithPeer(ctx context.Context, peer tg.InputPeerClass, op
 		historyRequest.MinID = readInboxMaxID
 	}
 
-	if err := p.limiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("waiting for Telegram rate limit: %w", err)
+	if err := p.wait(ctx); err != nil {
+		return nil, err
 	}
 
 	history, err := p.client.MessagesGetHistory(ctx, historyRequest)
@@ -106,10 +114,7 @@ func (p *Provider) fetchWithPeer(ctx context.Context, peer tg.InputPeerClass, op
 		return nil, fmt.Errorf("getting messages: %w", err)
 	}
 
-	result, err := p.processHistory(history, peer, opts.Limit)
-	if err != nil {
-		return nil, err
-	}
+	result := p.processHistory(history, peer)
 
 	applyMinDateFilter(result, opts.MinDate)
 
@@ -191,7 +196,7 @@ func ceilUnix(t time.Time) int64 {
 // newer than a specific ID. When after > 0, the returned slice may be
 // shorter than requested if the anchor is near the end of the chat.
 func (p *Provider) FetchContext(ctx context.Context, chatID int64, anchorID, before, after int) (*FetchResult, error) {
-	result, err := withPeerRetry(ctx, p, chatID, nil, func(peer tg.InputPeerClass) (*FetchResult, error) {
+	result, err := withPeerRetry(ctx, p, chatID, nil, nil, func(peer tg.InputPeerClass) (*FetchResult, error) {
 		return p.fetchContextWithPeer(ctx, peer, anchorID, before, after)
 	})
 	if err != nil {
@@ -220,18 +225,15 @@ func (p *Provider) fetchContextWithPeer(ctx context.Context, peer tg.InputPeerCl
 		Limit:     limit,
 	}
 
-	if err := p.limiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("waiting for Telegram rate limit: %w", err)
+	if err := p.wait(ctx); err != nil {
+		return nil, err
 	}
 	history, err := p.client.MessagesGetHistory(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("getting message context: %w", err)
 	}
 
-	result, err := p.processHistory(history, peer, limit)
-	if err != nil {
-		return nil, err
-	}
+	result := p.processHistory(history, peer)
 
 	// Flip reverse-chronological → chronological so downstream consumers
 	// (and the LLM) see the natural reading order.
@@ -279,7 +281,7 @@ func (p *Provider) fetchContextWithPeer(ctx context.Context, peer tg.InputPeerCl
 // scheduled messages, so callers can render "no pending" without branching
 // on error vs empty.
 func (p *Provider) FetchScheduled(ctx context.Context, chatID int64) (*FetchResult, error) {
-	result, err := withPeerRetry(ctx, p, chatID, nil, func(peer tg.InputPeerClass) (*FetchResult, error) {
+	result, err := withPeerRetry(ctx, p, chatID, nil, nil, func(peer tg.InputPeerClass) (*FetchResult, error) {
 		return p.fetchScheduledWithPeer(ctx, peer)
 	})
 	if err != nil {
@@ -290,8 +292,8 @@ func (p *Provider) FetchScheduled(ctx context.Context, chatID int64) (*FetchResu
 }
 
 func (p *Provider) fetchScheduledWithPeer(ctx context.Context, peer tg.InputPeerClass) (*FetchResult, error) {
-	if err := p.limiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("waiting for Telegram rate limit: %w", err)
+	if err := p.wait(ctx); err != nil {
+		return nil, err
 	}
 	history, err := p.client.MessagesGetScheduledHistory(ctx, &tg.MessagesGetScheduledHistoryRequest{
 		Peer: peer,
@@ -300,12 +302,7 @@ func (p *Provider) fetchScheduledWithPeer(ctx context.Context, peer tg.InputPeer
 		return nil, fmt.Errorf("getting scheduled messages: %w", err)
 	}
 
-	// Scheduled messages are unpaginated; limit=0 leaves HasMore false and it
-	// is cleared explicitly below regardless.
-	result, err := p.processHistory(history, peer, 0)
-	if err != nil {
-		return nil, err
-	}
+	result := p.processHistory(history, peer)
 	// Scheduled messages don't paginate — clear fields that only make sense
 	// for regular history to avoid confusing callers.
 	result.HasMore = false
@@ -324,20 +321,12 @@ func (p *Provider) fetchScheduledWithPeer(ctx context.Context, peer tg.InputPeer
 // errors.Is(err, context.Canceled) or errors.Is(err, context.DeadlineExceeded)
 // and still use the partial FetchResult — any other error is a hard failure.
 func (p *Provider) FetchAll(ctx context.Context, chatID int64, opts FetchOptions, onBatch BatchCallback) (*FetchResult, error) {
-	peer, err := p.peers.Resolve(ctx, p.client, chatID)
-	if err != nil {
-		return nil, fmt.Errorf("resolving peer: %w", err)
-	}
-
-	result, err := p.fetchAllWithPeer(ctx, peer, opts, onBatch)
-	if err != nil && tgclient.ShouldRefreshPeer(err) && (result == nil || len(result.Messages) == 0) {
-		p.peers.Invalidate(chatID)
-		peer, resolveErr := p.peers.Resolve(ctx, p.client, chatID)
-		if resolveErr != nil {
-			return result, fmt.Errorf("freshly resolving peer: %w", resolveErr)
-		}
-		result, err = p.fetchAllWithPeer(ctx, peer, opts, onBatch)
-	}
+	// A stale peer is retried only while nothing has been collected: a retry
+	// would restart pagination and discard the partial result.
+	collected := func(r *FetchResult) bool { return len(r.Messages) > 0 }
+	result, err := withPeerRetry(ctx, p, chatID, nil, collected, func(peer tg.InputPeerClass) (*FetchResult, error) {
+		return p.fetchAllWithPeer(ctx, peer, opts, onBatch)
+	})
 	if result != nil {
 		result.ChatID = chatID
 	}
@@ -456,57 +445,25 @@ func (p *Provider) fetchAllWithPeer(ctx context.Context, peer tg.InputPeerClass,
 // Slice responses continue until Telegram returns an empty raw page. This may
 // cost one final empty request, but it cannot truncate short or service-only
 // pages. NextID is derived from the raw page, not the rendered DTOs.
-func (p *Provider) processHistory(history tg.MessagesMessagesClass, peer tg.InputPeerClass, _ int) (*FetchResult, error) {
+func (p *Provider) processHistory(history tg.MessagesMessagesClass, peer tg.InputPeerClass) *FetchResult {
 	result := &FetchResult{
 		Users: make(map[int64]string),
 		Chats: make(map[int64]string),
 	}
 
-	var messages []tg.MessageClass
-	var users []tg.UserClass
-	var chats []tg.ChatClass
-	hasMore := false
-
-	switch hist := history.(type) {
-	case *tg.MessagesMessages:
-		// The complete history fit in one response — there is never more to page.
-		messages = hist.Messages
-		users = hist.Users
-		chats = hist.Chats
-	case *tg.MessagesMessagesSlice:
-		messages = hist.Messages
-		users = hist.Users
-		chats = hist.Chats
-		hasMore = len(hist.Messages) > 0
-	case *tg.MessagesChannelMessages:
-		messages = hist.Messages
-		users = hist.Users
-		chats = hist.Chats
-		hasMore = len(hist.Messages) > 0
-	case *tg.MessagesMessagesNotModified:
+	hist, ok := history.AsModified()
+	if !ok {
 		// Telegram signals "nothing changed" — return an empty page so callers
 		// behave as if the history is exhausted rather than erroring out.
-		return result, nil
-	default:
-		return nil, fmt.Errorf("unexpected response type: %T", history)
+		return result
 	}
+	messages := hist.GetMessages()
+	// A plain MessagesMessages holds the complete history — there is never
+	// more to page.
+	_, complete := hist.(*tg.MessagesMessages)
+	hasMore := !complete && len(messages) > 0
 
-	// Build user/chat maps
-	for _, u := range users {
-		if user, ok := u.(*tg.User); ok {
-			result.Users[user.ID] = tgclient.UserName(user)
-		}
-	}
-	for _, c := range chats {
-		switch chat := c.(type) {
-		case *tg.Chat:
-			result.Chats[chat.ID] = chat.Title
-		case *tg.Channel:
-			result.Chats[chat.ID] = chat.Title
-		}
-	}
-
-	// Extract messages
+	result.Users, result.Chats = nameMaps(hist.GetUsers(), hist.GetChats())
 	result.Messages = p.extractMessages(messages, result.Users, result.Chats, peer)
 	result.Count = len(result.Messages)
 	result.RawCount = len(messages)
@@ -519,21 +476,35 @@ func (p *Provider) processHistory(history tg.MessagesMessagesClass, peer tg.Inpu
 		}
 	}
 
-	return result, nil
+	return result
 }
 
 func lastRawMessageID(messages []tg.MessageClass) int {
-	for i := len(messages) - 1; i >= 0; i-- {
-		switch msg := messages[i].(type) {
-		case *tg.Message:
-			return msg.ID
-		case *tg.MessageService:
-			return msg.ID
-		case *tg.MessageEmpty:
-			return msg.ID
+	if len(messages) == 0 {
+		return 0
+	}
+	return messages[len(messages)-1].GetID()
+}
+
+// nameMaps indexes display names by bare Telegram ID: users by their full
+// name, basic groups and channels by title.
+func nameMaps(users []tg.UserClass, chats []tg.ChatClass) (map[int64]string, map[int64]string) {
+	userNames := make(map[int64]string, len(users))
+	for _, u := range users {
+		if user, ok := u.(*tg.User); ok {
+			userNames[user.ID] = tgclient.UserName(user)
 		}
 	}
-	return 0
+	chatTitles := make(map[int64]string, len(chats))
+	for _, c := range chats {
+		switch chat := c.(type) {
+		case *tg.Chat:
+			chatTitles[chat.ID] = chat.Title
+		case *tg.Channel:
+			chatTitles[chat.ID] = chat.Title
+		}
+	}
+	return userNames, chatTitles
 }
 
 func (p *Provider) extractMessages(messages []tg.MessageClass, users map[int64]string, chats map[int64]string, peer tg.InputPeerClass) []Message {

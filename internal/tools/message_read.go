@@ -187,29 +187,13 @@ func (h *MessageReadHandler) markChatAsRead(ctx context.Context, chatID int64) e
 }
 
 func topHistoryMessageID(history tg.MessagesMessagesClass) int {
-	var raw []tg.MessageClass
-	switch h := history.(type) {
-	case *tg.MessagesMessages:
-		raw = h.Messages
-	case *tg.MessagesMessagesSlice:
-		raw = h.Messages
-	case *tg.MessagesChannelMessages:
-		raw = h.Messages
+	h, ok := history.AsModified()
+	if !ok {
+		return 0
 	}
-	for _, item := range raw {
-		switch msg := item.(type) {
-		case *tg.Message:
-			if msg.ID > 0 {
-				return msg.ID
-			}
-		case *tg.MessageService:
-			if msg.ID > 0 {
-				return msg.ID
-			}
-		case *tg.MessageEmpty:
-			if msg.ID > 0 {
-				return msg.ID
-			}
+	for _, msg := range h.GetMessages() {
+		if id := msg.GetID(); id > 0 {
+			return id
 		}
 	}
 	return 0
