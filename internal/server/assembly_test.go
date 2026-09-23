@@ -231,9 +231,9 @@ func TestStdioRefusedSessionEntersLoginRequiredState(t *testing.T) {
 }
 
 // TestClientDownMiddlewareAnswersForAStoppedClient pins both halves of the
-// middleware: a call that fails because the client stopped under it keeps its
-// own outcome with the transport's answer appended, a call that succeeded
-// anyway keeps its result, and later calls never reach the handler.
+// middleware: a call the client stopped under keeps its own outcome, failed
+// or not, with the transport's answer appended, and later calls never reach
+// the handler.
 func TestClientDownMiddlewareAnswersForAStoppedClient(t *testing.T) {
 	refused := fmt.Errorf("%w: %w", tgclient.ErrSessionUnauthorized, tgerr.New(401, "AUTH_KEY_UNREGISTERED"))
 	for _, transport := range []string{TransportStdio, TransportHTTP} {
@@ -267,15 +267,29 @@ func TestClientDownMiddlewareAnswersForAStoppedClient(t *testing.T) {
 		require.ErrorIs(t, err, readErr, "the read's own error is kept")
 		assert.ErrorContains(t, err, want)
 
+		// A batch the stop cut short returns what it managed, with a
+		// warning; the answer is appended to it too. The handler's own
+		// Content has room to grow, which the middleware must not write
+		// into.
 		tgClient = newFakeClient()
-		succeeded := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "done"}}}
+		var backing [4]mcp.Content
+		backing[0] = &mcp.TextContent{Text: `{"successful":2,"warning":"context canceled."}`}
+		handlerContent := backing[:1]
+		cutShort := &mcp.CallToolResult{Content: handlerContent, StructuredContent: map[string]any{"successful": 2}}
 		racing := srv.clientDownMiddleware(tgClient)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
 			tgClient.stop(refused)
-			return succeeded, nil
+			return cutShort, nil
 		})
 		res, err = racing(t.Context(), methodCallTool, call)
 		require.NoError(t, err)
-		assert.Same(t, succeeded, res, "a call that succeeded keeps its result")
+		tr = res.(*mcp.CallToolResult)
+		assert.False(t, tr.IsError, "a call that returned what it managed stays a success")
+		assert.Equal(t, cutShort.StructuredContent, tr.StructuredContent)
+		require.Len(t, tr.Content, 2, transport)
+		assert.Same(t, handlerContent[0], tr.Content[0], "the call's own outcome is kept")
+		assert.Equal(t, want, tr.Content[1].(*mcp.TextContent).Text, transport)
+		assert.Len(t, cutShort.Content, 1, "the handler's result is not changed")
+		assert.Nil(t, backing[1], "nor is its Content's spare capacity written")
 
 		unreachable := srv.clientDownMiddleware(tgClient)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
 			t.Fatal("a call after the client stopped must not reach the handler")

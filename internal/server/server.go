@@ -493,11 +493,12 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 }
 
 // clientDownMiddleware tells tool calls and resource reads why the assembly's
-// Telegram client has stopped. A call arriving afterwards never reaches
-// Telegram and is answered with clientDownText alone. A call that ran and
-// failed while the client stopped under it keeps its own outcome — the real
-// cause and any note, such as the partial file a backup saved — with
-// clientDownText appended.
+// Telegram client has stopped; clientDownText is the one place that says so.
+// A call arriving afterwards never reaches Telegram and is answered with
+// clientDownText alone. A call the client stopped under keeps its own outcome
+// — the real cause and any note, such as the partial file a backup saved, or
+// the chats a batch still marked as read — with clientDownText appended,
+// whether it failed or returned what it managed before the stop.
 //
 // Completion is left out on purpose: its suggestions go to the user's input
 // box, not to the model, and it answers an empty list on any failure by
@@ -514,22 +515,12 @@ func (s *Server) clientDownMiddleware(client telegramClient) mcp.Middleware {
 				return clientDownResult(method, s.clientDownText(down))
 			}
 			res, err := next(ctx, method, req)
-			if down := client.Err(); down != nil && callFailed(res, err) {
+			if down := client.Err(); down != nil {
 				return withClientDown(res, err, s.clientDownText(down))
 			}
 			return res, err
 		}
 	}
-}
-
-// callFailed reports whether a tools/call or resources/read outcome is a
-// failure: a protocol error, or a tool result flagged IsError.
-func callFailed(res mcp.Result, err error) bool {
-	if err != nil {
-		return true
-	}
-	tr, ok := res.(*mcp.CallToolResult)
-	return ok && tr.IsError
 }
 
 // clientDownResult delivers text as the outcome of method: a tool error the
@@ -541,15 +532,22 @@ func clientDownResult(method, text string) (mcp.Result, error) {
 	return nil, errors.New(text)
 }
 
-// withClientDown appends text to a failed outcome (see callFailed): to the
-// error of a failed call, or as a further text block of a tool error.
+// withClientDown appends text to the outcome of a call the client stopped
+// under: to the error of a failed call, or as a further text block of a tool
+// result, failed or not, leaving the handler's own result untouched. A
+// resource read that succeeded has no text to append to and is kept as it is:
+// what it read is still true.
 func withClientDown(res mcp.Result, err error, text string) (mcp.Result, error) {
 	if err != nil {
 		return res, fmt.Errorf("%w %s", err, text)
 	}
-	tr := *res.(*mcp.CallToolResult)
-	tr.Content = append(slices.Clip(tr.Content), &mcp.TextContent{Text: text})
-	return &tr, nil
+	tr, ok := res.(*mcp.CallToolResult)
+	if !ok {
+		return res, nil
+	}
+	appended := *tr
+	appended.Content = append(slices.Clip(tr.Content), &mcp.TextContent{Text: text})
+	return &appended, nil
 }
 
 // clientDownText says why an assembly's Telegram client stopped and what
