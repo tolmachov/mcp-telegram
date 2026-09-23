@@ -299,6 +299,6 @@ func TestMarkAsReadDeadSessionStopsBatch(t *testing.T) {
 	require.NotNil(t, out)
 	assert.Zero(t, out.TotalChats)
 	assert.Equal(t, []int64{channelID, groupID}, out.SkippedIDs)
-	assert.Contains(t, out.Warning, "no longer accepts this account's session")
+	assert.Contains(t, out.Warning, "AUTH_KEY_UNREGISTERED", "the server explains the dead session; the warning names the cause")
 	assert.Len(t, inv.RequestTypes(), len(script), "no call follows the systemic failure")
 }

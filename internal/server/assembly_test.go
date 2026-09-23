@@ -243,7 +243,7 @@ func TestClientDownMiddlewareAnswersForAStoppedClient(t *testing.T) {
 
 		// A backup that stopped part-way reports the file it saved; that
 		// outcome must survive the client going down under it.
-		const backupFailure = "Failed to back up chat 5: fetching batch 2: telegram session is not authorized. The 200 messages fetched before the failure were saved to /tmp/backup.json."
+		const backupFailure = "Failed to back up chat 5: fetching batch 2: engine was closed. The 200 messages fetched before the failure were saved to /tmp/backup.json."
 		tgClient := newFakeClient()
 		failing := srv.clientDownMiddleware(tgClient)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
 			tgClient.stop(refused)

@@ -18,8 +18,8 @@ import (
 )
 
 // TestFailureText covers the single rendering of handler errors: the flood
-// wait and dead-session guidance, the peer hint, the failure's own hint, and
-// its outcome note.
+// wait and unconfirmed-refusal guidance, the peer hint, the failure's own
+// hint, and its outcome note.
 func TestFailureText(t *testing.T) {
 	flood := &tgerr.Error{Code: 420, Message: "FLOOD_WAIT_265", Type: "FLOOD_WAIT", Argument: 265}
 	// The client hands a call the verdict once the home DC confirms the
@@ -45,10 +45,12 @@ func TestFailureText(t *testing.T) {
 		assert.Contains(t, failureText("JoinChat", failed("join", wrapped)), "265 seconds")
 	})
 
+	// The server appends the transport's explanation of a dead session (see
+	// clientDownText in the server package), so the failure shows only the
+	// error.
 	t.Run("dead session", func(t *testing.T) {
-		txt := failureText("GetMe", failed("get current user", dead))
-		assert.Contains(t, txt, "Failed to get current user: Telegram no longer accepts this account's session")
-		assert.Contains(t, txt, "signs in again")
+		assert.Equal(t, "Failed to get current user: telegram session is not authorized: rpc error code 401: AUTH_KEY_UNREGISTERED.",
+			failureText("GetMe", failed("get current user", dead)))
 	})
 
 	t.Run("an unconfirmed refusal says what it means for the session", func(t *testing.T) {

@@ -338,21 +338,18 @@ func unconfirmedRefusalHint(err *tgclient.UnconfirmedRefusalError) string {
 	if err.Check == nil {
 		return "The session itself is still valid, so do not ask the user to sign in again: the Telegram server this call was routed to (such as the one storing a file) refused the authorisation the server handed it, and keeps refusing such calls until the server reconnects to Telegram. Other tools keep working."
 	}
-	return "Whether the session is still valid is unknown: retry shortly, and ask the user to sign in again only if a later call reports that Telegram no longer accepts the session."
+	return "Whether the session is still valid is unknown: retry shortly, and ask the user to sign in again only if a later call reports that Telegram refused the session."
 }
 
 // systemicText renders err, for which tgclient.IsSystemic holds: a flood wait
-// gets its fixed guidance, a dead session says what happened, and a cancelled
-// or expired call shows the error itself. How to recover a dead session
-// depends on the transport, so the server says that: once the home DC
-// confirms Telegram refuses the session the client stops, and the server
-// answers the failed call and every later one with the transport's recovery.
+// gets its fixed guidance, and anything else shows the error itself. A dead
+// session is explained by the server, not here, because how to recover it
+// depends on the transport: once the home DC confirms Telegram refuses the
+// session the client stops, and the server appends its explanation to the
+// call the client stopped under and answers every later one with it.
 func systemicText(tool string, err error) string {
 	if flood, ok := floodWaitMessage(tool, err); ok {
 		return flood
-	}
-	if errors.Is(err, tgclient.ErrSessionUnauthorized) {
-		return fmt.Sprintf("Telegram no longer accepts this account's session (%v): it was logged out, revoked or expired, so no Telegram call can succeed until the account signs in again.", err)
 	}
 	return sentence(err)
 }
