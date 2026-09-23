@@ -23,7 +23,7 @@ func TestChatSummarizeBuildResult(t *testing.T) {
 	end := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
 
 	t.Run("success returns full summary", func(t *testing.T) {
-		errRes, out, err := h.buildResult(in, since, end, "the summary", nil)
+		errRes, out, err := h.buildResult(in, since, end, summarize.Result{Summary: "the summary"}, nil)
 		require.NoError(t, err)
 		require.Nil(t, errRes)
 		require.NotNil(t, out)
@@ -34,14 +34,14 @@ func TestChatSummarizeBuildResult(t *testing.T) {
 	})
 
 	t.Run("sampling unsupported surfaces as error", func(t *testing.T) {
-		_, out, err := h.buildResult(in, since, end, "", summarize.ErrSamplingUnsupported)
+		_, out, err := h.buildResult(in, since, end, summarize.Result{Summary: ""}, summarize.ErrSamplingUnsupported)
 		require.Nil(t, out)
 		require.ErrorIs(t, err, summarize.ErrSamplingUnsupported)
 		assert.Contains(t, failureText("SummarizeChat", err), "sampling")
 	})
 
 	t.Run("late failure with partial text is salvaged", func(t *testing.T) {
-		errRes, out, err := h.buildResult(in, since, end, "batches 1-18", errors.New("batch 19/20: boom"))
+		errRes, out, err := h.buildResult(in, since, end, summarize.Result{Summary: "batches 1-18"}, errors.New("batch 19/20: boom"))
 		require.NoError(t, err)
 		require.NotNil(t, out)
 		assert.Equal(t, "batches 1-18", out.Summary)
@@ -56,7 +56,7 @@ func TestChatSummarizeBuildResult(t *testing.T) {
 	})
 
 	t.Run("failure with no text is a hard error", func(t *testing.T) {
-		_, out, err := h.buildResult(in, since, end, "   ", errors.New("batch 1/20: boom"))
+		_, out, err := h.buildResult(in, since, end, summarize.Result{Summary: "   "}, errors.New("batch 1/20: boom"))
 		require.Nil(t, out)
 		require.Error(t, err)
 		assert.Equal(t, "Failed to summarize chat 7: batch 1/20: boom.", failureText("SummarizeChat", err))

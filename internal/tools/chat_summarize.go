@@ -117,7 +117,7 @@ func (h *ChatSummarizeHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	}
 
 	result, err := h.summarizer.Summarize(ctx, req.Session, h.msgProvider, in.ChatID, in.Goal, since, maxMessages, onProgress)
-	return h.buildDetailedResult(in, since, periodEnd, result, err)
+	return h.buildResult(in, since, periodEnd, result, err)
 }
 
 // buildResult shapes the tool response from a summarizer outcome, kept separate
@@ -125,11 +125,7 @@ func (h *ChatSummarizeHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 // driving a live LLM. On success it returns the full summary; on a late failure
 // that still produced text it returns a partial result (salvaging completed
 // batches); and a total failure is returned as the handler error.
-func (h *ChatSummarizeHandler) buildResult(in SummarizeChatInput, since, periodEnd time.Time, result string, err error) (*mcp.CallToolResult, *SummarizeChatResult, error) {
-	return h.buildDetailedResult(in, since, periodEnd, summarize.Result{Summary: result}, err)
-}
-
-func (h *ChatSummarizeHandler) buildDetailedResult(in SummarizeChatInput, since, periodEnd time.Time, result summarize.Result, err error) (*mcp.CallToolResult, *SummarizeChatResult, error) {
+func (h *ChatSummarizeHandler) buildResult(in SummarizeChatInput, since, periodEnd time.Time, result summarize.Result, err error) (*mcp.CallToolResult, *SummarizeChatResult, error) {
 	out := &SummarizeChatResult{
 		ChatID:            in.ChatID,
 		Goal:              in.Goal,
