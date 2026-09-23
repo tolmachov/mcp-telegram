@@ -6,6 +6,7 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/tolmachov/mcp-telegram/internal/presentation"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
@@ -50,7 +51,7 @@ func (h *MessageReactionHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "SetReaction",
 		Description: "Set or clear your emoji reactions on a message. Pass one or more emoji in `emojis` to react (this replaces any reactions you previously set); pass an empty list (or omit it) to remove all your reactions. Only standard emoji reactions are supported (not custom or paid). Works on regular messages only — scheduled handles (\"s:...\") are rejected. The chat must permit the chosen reaction, otherwise Telegram returns an error.",
-		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{OpenWorldHint: new(true)},
 	}, h.handle)
 }
 
@@ -58,7 +59,7 @@ func (h *MessageReactionHandler) handle(ctx context.Context, req *mcp.CallToolRe
 	if in.ChatID == 0 {
 		return errChatIDRequired(), nil, nil
 	}
-	ref, err := ParseMessageRef(in.MessageID)
+	ref, err := presentation.ParseMessageRef(in.MessageID)
 	if err != nil {
 		return errInvalidMessageID(in.MessageID, err), nil, nil
 	}

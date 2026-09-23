@@ -9,6 +9,7 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/tolmachov/mcp-telegram/internal/presentation"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
@@ -104,7 +105,7 @@ func (h *MessageSendHandler) Register(s *mcp.Server) {
 		InputSchema: inputSchemaWithEnums[SendMessageInput](map[string][]any{
 			"mode": {"send", "schedule", "draft"},
 		}),
-		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{OpenWorldHint: new(true)},
 	}, h.handle)
 }
 
@@ -133,7 +134,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	var replyToID int
 	var replyHandle string
 	if in.ReplyToMessageID != "" {
-		ref, err := ParseMessageRef(in.ReplyToMessageID)
+		ref, err := presentation.ParseMessageRef(in.ReplyToMessageID)
 		if err != nil {
 			return errInvalidMessageID(in.ReplyToMessageID, err), nil, nil
 		}
@@ -222,7 +223,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		msgID, date := extractScheduledMessageID(updates)
 		if msgID > 0 {
 			res.Status = "scheduled"
-			res.MessageID = FormatScheduledRef(msgID)
+			res.MessageID = presentation.FormatScheduledRef(msgID)
 			res.ScheduleAt = scheduleAtOut
 			res.Note = "Stored on Telegram's servers — delivered automatically at schedule_at even if you're offline."
 			if date > 0 {
@@ -240,7 +241,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		}
 		res.Status = "sent_immediate"
 		if msgID > 0 {
-			res.MessageID = FormatRegularRef(msgID)
+			res.MessageID = presentation.FormatRegularRef(msgID)
 		} else {
 			res.Note = "message_id unavailable: Telegram returned an unrecognised update type. The message was delivered but cannot be referenced for edits or deletes until fetched via GetMessages."
 		}
@@ -264,7 +265,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	}
 	res.Status = "sent"
 	if msgID > 0 {
-		res.MessageID = FormatRegularRef(msgID)
+		res.MessageID = presentation.FormatRegularRef(msgID)
 	} else {
 		res.Note = "message_id unavailable: Telegram returned an unrecognised update type. The message was delivered but cannot be referenced for edits or deletes until fetched via GetMessages."
 	}

@@ -89,7 +89,7 @@ func (h *JoinChatHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "JoinChat",
 		Description: "Join a Telegram channel, group, or supergroup. Accepts a public @username, a numeric chat ID, or an invite link (t.me/+hash or t.me/joinchat/hash) for private chats. Joining is reversible — use LeaveChat to undo. Some chats require admin approval; in that case the result status is \"requested\" rather than \"joined\". If joining is gated behind an in-app verification step, the status is \"action_required\" and detail explains what the user must do in an official Telegram client to finish. Legacy basic groups can only be joined via an invite link.",
-		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{OpenWorldHint: new(true)},
 	}, h.handle)
 }
 
@@ -98,7 +98,7 @@ func (h *LeaveChatHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "LeaveChat",
 		Description: "Leave a Telegram channel, group, or supergroup you are a member of. Accepts a public @username or a numeric chat ID. This removes the chat from your dialog list; rejoining a private chat afterwards requires a fresh invite link. The call is rejected unless confirm=true. You cannot leave a channel you own.",
-		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptrTrue(), OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: new(true), OpenWorldHint: new(true)},
 	}, h.handle)
 }
 

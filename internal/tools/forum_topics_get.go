@@ -8,6 +8,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
+	"github.com/tolmachov/mcp-telegram/internal/presentation"
 )
 
 // ForumTopicsGetHandler handles the GetForumTopics tool.
@@ -64,7 +65,7 @@ func (h *ForumTopicsGetHandler) Register(s *mcp.Server) {
 			"Returns up to `limit` topics (default 100) with pagination via `cursor` and an optional title `query` filter. " +
 			"To read the messages inside a topic, pass the topic's `id` to GetReplies as `message_id` (or to SearchMessages as `top_msg_id`). " +
 			"Only works on forum-enabled supergroups; non-forum chats return an error, and an empty result means the supergroup has no topics.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
 	}, h.handle)
 }
 
@@ -114,10 +115,10 @@ func (h *ForumTopicsGetHandler) handle(ctx context.Context, req *mcp.CallToolReq
 			Date:        t.Date,
 		}
 		if t.ID > 0 {
-			dto.ID = FormatRegularRef(t.ID)
+			dto.ID = presentation.FormatRegularRef(t.ID)
 		}
 		if t.TopMessageID > 0 {
-			dto.TopMessageID = FormatRegularRef(t.TopMessageID)
+			dto.TopMessageID = presentation.FormatRegularRef(t.TopMessageID)
 		}
 		out.Topics = append(out.Topics, dto)
 	}

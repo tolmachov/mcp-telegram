@@ -53,7 +53,7 @@ func (h *UsernameResolveHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "ResolveUsername",
 		Description: "Resolve a Telegram username to get user/chat/channel ID and information. Use this when you have a @username but need a numeric chat ID for other tools. Returns structured entities with kind, id, and metadata.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
 	}, h.handle)
 }
 

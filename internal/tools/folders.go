@@ -304,7 +304,7 @@ func (h *GetFoldersHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "GetFolders",
 		Description: "List your Telegram chat folders (dialog filters) with their numeric ID, title, category flags, and the bare IDs of included/excluded/pinned chats. Call this first to find the folder_id needed by AddChatsToFolder, RemoveChatsFromFolder, and DeleteFolder. Shared/imported folders are reported with kind \"shared_folder\" and cannot have their chats edited here.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
 	}, h.handle)
 }
 
@@ -369,7 +369,7 @@ func (h *CreateFolderHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "CreateFolder",
 		Description: "Create a new Telegram chat folder (dialog filter). Provide a title (max 12 characters) and at least one source of chats: an explicit list of @usernames / numeric chat IDs, and/or category flags like include_groups or include_channels. The folder ID is assigned automatically. Add or remove chats later with AddChatsToFolder / RemoveChatsFromFolder.",
-		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{OpenWorldHint: new(true)},
 	}, h.handle)
 }
 
@@ -467,7 +467,7 @@ func (h *DeleteFolderHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "DeleteFolder",
 		Description: "Delete a Telegram chat folder (dialog filter) by its numeric ID. This removes only the folder view — your chats and their messages are untouched. Find the folder_id with GetFolders. The call is rejected unless confirm=true.",
-		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptrTrue(), OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: new(true), OpenWorldHint: new(true)},
 	}, h.handle)
 }
 
@@ -528,7 +528,7 @@ func (h *AddChatsToFolderHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "AddChatsToFolder",
 		Description: "Add one or more chats, groups, or channels to an existing Telegram folder. Identify the folder by its numeric folder_id (from GetFolders) and pass chats as @usernames or numeric chat IDs. Chats already in the folder are reported as already_present; references that can't be resolved are reported as skipped. Reversible with RemoveChatsFromFolder.",
-		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{OpenWorldHint: new(true)},
 	}, h.handle)
 }
 
@@ -606,7 +606,7 @@ func (h *RemoveChatsFromFolderHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "RemoveChatsFromFolder",
 		Description: "Remove one or more chats, groups, or channels from an existing Telegram folder. Identify the folder by its numeric folder_id (from GetFolders) and pass chats as @usernames or numeric chat IDs. This only drops them from the folder's explicit include/pinned lists; the chats themselves are untouched. Chats not in the folder are reported as not_present. To remove the whole folder, use DeleteFolder.",
-		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{OpenWorldHint: new(true)},
 	}, h.handle)
 }
 

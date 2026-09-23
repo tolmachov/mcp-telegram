@@ -8,6 +8,7 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/tolmachov/mcp-telegram/internal/presentation"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
@@ -59,7 +60,7 @@ func (h *MessageEditHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "EditMessage",
 		Description: "Edit a message you previously sent. Only your own messages can be edited. For channel posts, admin rights may be required. To edit a scheduled (pending) message, pass its \"s:...\" handle and provide a new schedule_at — the edit both rewrites the text and sets the new send time.",
-		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{OpenWorldHint: new(true)},
 	}, h.handle)
 }
 
@@ -67,7 +68,7 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	if in.ChatID == 0 {
 		return errChatIDRequired(), nil, nil
 	}
-	ref, err := ParseMessageRef(in.MessageID)
+	ref, err := presentation.ParseMessageRef(in.MessageID)
 	if err != nil {
 		return errInvalidMessageID(in.MessageID, err), nil, nil
 	}
@@ -131,7 +132,7 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		res.Kind = kindScheduled
 		res.ScheduleAt = in.ScheduleAt
 		if editedMsgID > 0 {
-			res.MessageID = FormatScheduledRef(editedMsgID)
+			res.MessageID = presentation.FormatScheduledRef(editedMsgID)
 		} else {
 			// Telegram did not return the updated handle — preserve the input.
 			res.MessageID = ref.Format()
@@ -140,7 +141,7 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	} else {
 		res.Kind = kindRegular
 		if editedMsgID > 0 {
-			res.MessageID = FormatRegularRef(editedMsgID)
+			res.MessageID = presentation.FormatRegularRef(editedMsgID)
 		} else {
 			res.MessageID = ref.Format()
 			res.Note = "message_id may be stale: Telegram returned an unrecognised update type. Verify via GetMessages."

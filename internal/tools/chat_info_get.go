@@ -30,7 +30,7 @@ func (h *ChatInfoGetHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "GetChatInfo",
 		Description: "Get detailed information about a specific chat, group, or channel including member count, description, and settings. Requires a chat ID — use SearchChats to find one.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
 	}, h.handle)
 }
 

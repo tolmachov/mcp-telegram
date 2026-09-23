@@ -7,6 +7,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
+	"github.com/tolmachov/mcp-telegram/internal/presentation"
 )
 
 const (
@@ -33,10 +34,10 @@ type GetMessageContextInput struct {
 }
 
 type getMessageContextOutput struct {
-	ChatID   int64        `json:"chat_id"`
-	AnchorID string       `json:"anchor_id"`
-	Messages []messageDTO `json:"messages"`
-	Count    int          `json:"count"`
+	ChatID   int64                  `json:"chat_id"`
+	AnchorID string                 `json:"anchor_id"`
+	Messages []presentation.Message `json:"messages"`
+	Count    int                    `json:"count"`
 }
 
 // Register adds the tool to the MCP server.
@@ -44,7 +45,7 @@ func (h *MessageContextGetHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "GetMessageContext",
 		Description: "Get a window of messages around a specific anchor message: `before` messages before it, the anchor itself, and `after` messages after it, returned in chronological order. Defaults to 5+5 (max 50 each). Useful for understanding a message in conversation context. For plain pagination, use GetMessages.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
 	}, h.handle)
 }
 
@@ -55,7 +56,7 @@ func (h *MessageContextGetHandler) handle(ctx context.Context, req *mcp.CallTool
 	if in.MessageID == "" {
 		return errResult("message_id is required. Pass an opaque handle returned by GetMessages or ResolveMessageLink."), nil, nil
 	}
-	ref, err := ParseMessageRef(in.MessageID)
+	ref, err := presentation.ParseMessageRef(in.MessageID)
 	if err != nil {
 		return errInvalidMessageID(in.MessageID, err), nil, nil
 	}
@@ -79,11 +80,11 @@ func (h *MessageContextGetHandler) handle(ctx context.Context, req *mcp.CallTool
 
 	out := &getMessageContextOutput{
 		ChatID:   in.ChatID,
-		AnchorID: FormatRegularRef(ref.ID),
-		Messages: make([]messageDTO, 0, len(result.Messages)),
+		AnchorID: presentation.FormatRegularRef(ref.ID),
+		Messages: make([]presentation.Message, 0, len(result.Messages)),
 	}
 	for _, m := range result.Messages {
-		out.Messages = append(out.Messages, toMessageDTO(m, false))
+		out.Messages = append(out.Messages, presentation.FromMessage(m, false))
 	}
 	out.Count = len(out.Messages)
 	return nil, out, nil

@@ -9,6 +9,8 @@ import (
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/tolmachov/mcp-telegram/internal/presentation"
 )
 
 // MessageLinkResolveHandler handles the ResolveMessageLink tool. It turns a
@@ -61,7 +63,7 @@ func (h *MessageLinkResolveHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "ResolveMessageLink",
 		Description: "Parse a Telegram message URL into a chat_id + opaque message handle ready for GetMessages / GetMessageContext / DeleteMessages. Supports public (t.me/<username>/<id>), private-channel (t.me/c/<internal_id>/<id>), and forum (…/<topic_id>/<id>) link forms. Forum links also return topic_message_id, an opaque handle ready for SearchMessages.top_msg_id. Returns chat metadata from Telegram for public links; private-channel links are resolved offline (no API call) and carry no chat_title.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
 	}, h.handle)
 }
 
@@ -76,10 +78,10 @@ func (h *MessageLinkResolveHandler) handle(ctx context.Context, _ *mcp.CallToolR
 	}
 
 	out := &ResolveMessageLinkResult{
-		MessageID: FormatRegularRef(parsed.MessageID),
+		MessageID: presentation.FormatRegularRef(parsed.MessageID),
 	}
 	if parsed.TopicID > 0 {
-		out.TopicMessageID = FormatRegularRef(parsed.TopicID)
+		out.TopicMessageID = presentation.FormatRegularRef(parsed.TopicID)
 	}
 
 	if parsed.Username != "" {

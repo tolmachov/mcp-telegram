@@ -8,6 +8,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
+	"github.com/tolmachov/mcp-telegram/internal/presentation"
 )
 
 // MessagesSearchGlobalHandler handles the SearchMessagesGlobal tool.
@@ -36,11 +37,12 @@ type SearchMessagesGlobalInput struct {
 
 // globalMessageDTO is the tool-boundary representation of a message returned
 // from cross-chat search. It carries chat attribution inline since results
-// span many chats. The embedded messageDTO keeps the regular-message shape
-// (opaque id handle, sender, text, media, entities) identical to GetMessages
-// output, so downstream tools can consume the shape interchangeably.
+// span many chats. The embedded presentation.Message keeps the regular-message
+// shape (opaque id handle, sender, text, media, entities) identical to
+// GetMessages output, so downstream tools can consume the shape
+// interchangeably.
 type globalMessageDTO struct {
-	messageDTO
+	presentation.Message
 	ChatID    int64  `json:"chat_id"`
 	ChatTitle string `json:"chat_title,omitempty"`
 }
@@ -68,7 +70,7 @@ func (h *MessagesSearchGlobalHandler) Register(s *mcp.Server) {
 			"Supports date range via `from_date` / `to_date` (RFC3339; `to_date` is exclusive — pass midnight of the next day to include a full day) and pagination via the opaque `cursor` string (copy `next_cursor` from a previous response). " +
 			"For searching inside one specific chat use SearchMessages instead — it exposes more filters (sender, media type, thread). " +
 			"Only standard FLOOD_WAIT applies; there is no per-day quota on this method.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
 	}, h.handle)
 }
 
@@ -119,9 +121,9 @@ func (h *MessagesSearchGlobalHandler) handle(ctx context.Context, req *mcp.CallT
 
 	for _, gm := range result.Messages {
 		out.Messages = append(out.Messages, globalMessageDTO{
-			messageDTO: toMessageDTO(gm.Message, false),
-			ChatID:     gm.ChatID,
-			ChatTitle:  gm.ChatTitle,
+			Message:   presentation.FromMessage(gm.Message, false),
+			ChatID:    gm.ChatID,
+			ChatTitle: gm.ChatTitle,
 		})
 	}
 

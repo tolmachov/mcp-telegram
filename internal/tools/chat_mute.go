@@ -54,7 +54,7 @@ func (h *ChatMuteHandler) Register(s *mcp.Server) {
 		// idempotent only for muted=false; muting with a duration resets
 		// the timer on every call. MCP annotations apply at the tool
 		// level, not per-call, so we can't truthfully claim idempotence.
-		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{OpenWorldHint: new(true)},
 	}, h.handle)
 }
 

@@ -68,16 +68,8 @@ func (a *AuthServer) Verifier() auth.TokenVerifier {
 			a.logger.Warn("access token rejected: malformed session id", "user_id", userID)
 			return nil, fmt.Errorf("%w: not a valid access token", auth.ErrInvalidToken)
 		}
-		return &auth.TokenInfo{
-			Expiration: time.Unix(c.ExpiresAt, 0),
-			UserID:     c.Subject,
-			Extra: map[string]any{
-				extraIdentityKey: identityExtra{
-					ID: userID, Username: c.Username,
-					SessionID: c.SessionID, SessionKey: c.SessionKey,
-				},
-			},
-		}, nil
+		u := UserIdentity{ID: userID, Username: c.Username, SessionID: c.SessionID, SessionKey: c.SessionKey}
+		return u.TokenInfo(time.Unix(c.ExpiresAt, 0)), nil
 	}
 }
 
@@ -96,6 +88,16 @@ type UserIdentity struct {
 	// token. It is passed to the session store to decrypt this session's blob
 	// Treat as secret: never log it.
 	SessionKey []byte
+}
+
+// TokenInfo encodes u as the bearer TokenInfo that IdentityFromTokenInfo
+// reads back. TokenInfo.UserID is the decimal Telegram user ID.
+func (u UserIdentity) TokenInfo(expires time.Time) *auth.TokenInfo {
+	return &auth.TokenInfo{
+		Expiration: expires,
+		UserID:     u.ID.String(),
+		Extra:      map[string]any{extraIdentityKey: identityExtra(u)},
+	}
 }
 
 // Identity returns the authenticated user of the request, or ok=false when

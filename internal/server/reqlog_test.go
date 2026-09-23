@@ -8,10 +8,11 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/tolmachov/mcp-telegram/internal/authsrv"
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 	"github.com/tolmachov/mcp-telegram/internal/tools"
 )
@@ -31,7 +32,7 @@ func runMiddleware(t *testing.T, level slog.Leveler, userID tgid.UserID, method 
 	if userID > 0 {
 		if ctr, ok := req.(*mcp.CallToolRequest); ok {
 			ctr.Extra = &mcp.RequestExtra{
-				TokenInfo: &auth.TokenInfo{UserID: userID.String()},
+				TokenInfo: authsrv.UserIdentity{ID: userID}.TokenInfo(time.Now().Add(time.Hour)),
 			}
 		}
 	}

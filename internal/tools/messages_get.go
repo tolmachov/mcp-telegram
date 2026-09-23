@@ -55,7 +55,7 @@ func (h *MessagesGetHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "GetMessages",
 		Description: "Get messages from a specific chat. Returns up to `limit` regular messages (default 50, max 100). Continue with `cursor` alone; it embeds the original chat and filters. Use `before_message_id` only to choose the first-page anchor. Date filtering uses inclusive `from_date` and exclusive `to_date`. Set `include_scheduled=true` to additionally fetch pending scheduled messages in a separate field.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
 	}, h.handle)
 }
 
@@ -82,7 +82,7 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		}
 		opts.Limit = clampLimit(in.Limit, opts.Limit, 100)
 		if in.BeforeMessageID != "" {
-			ref, err := ParseMessageRef(in.BeforeMessageID)
+			ref, err := presentation.ParseMessageRef(in.BeforeMessageID)
 			if err != nil {
 				return errInvalidMessageID(in.BeforeMessageID, err), nil, nil
 			}

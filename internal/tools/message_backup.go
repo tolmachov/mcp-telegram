@@ -153,7 +153,7 @@ func (h *MessageBackupHandler) Register(s *mcp.Server) {
 			// provide an explicit filepath get file-overwrite semantics and
 			// may treat that case as idempotent, but the tool as a whole
 			// cannot advertise it.
-			OpenWorldHint: ptrTrue(),
+			OpenWorldHint: new(true),
 		},
 	}, h.handle)
 }

@@ -79,7 +79,7 @@ func (h *ChatSummarizeHandler) Register(s *mcp.Server) {
 		// to external LLM providers (sampling, Gemini, Ollama, Anthropic)
 		// which may cache, log, or bill for the content — it is not a
 		// pure read of Telegram state. OpenWorldHint reflects that.
-		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{OpenWorldHint: new(true)},
 	}, h.handle)
 }
 

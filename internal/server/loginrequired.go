@@ -26,15 +26,6 @@ const loginRequiredTool = "TelegramLoginRequired"
 // host's tool-call timeout.
 const authProbeTimeout = 20 * time.Second
 
-// ptrTrue returns a fresh *bool for the SDK's tri-state annotation fields.
-// Mirrors the helper of the same name in internal/tools (unexported there, so
-// not importable); a package-level `var openWorld = true` would hand the SDK
-// an alias into mutable package state instead.
-func ptrTrue() *bool {
-	b := true
-	return &b
-}
-
 // blockedError marks a condition our own startup callback detected — a failed
 // auth check, or a session that connected fine but is not authorized. It
 // carries the user-facing explanation, and it exists so the callback can
@@ -145,7 +136,7 @@ func (s *Server) runLoginRequired(ctx context.Context, reason string) error {
 		Description: "mcp-telegram is NOT connected to Telegram — every Telegram tool (sending, reading, searching, summarizing) is missing from this server for that reason. " +
 			"Reason: " + reason + " " +
 			"Call this to re-check the live authorization state; it reports whether a login performed elsewhere has taken effect.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
 	}, s.loginRequiredHandler(reason))
 
 	s.logger.Warn("serving in login-required mode",

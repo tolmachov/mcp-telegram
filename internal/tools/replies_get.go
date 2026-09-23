@@ -7,6 +7,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
+	"github.com/tolmachov/mcp-telegram/internal/presentation"
 )
 
 // RepliesGetHandler handles the GetReplies tool.
@@ -36,16 +37,16 @@ type GetRepliesInput struct {
 }
 
 // getRepliesOutput mirrors getMessagesOutput's regular-message envelope (same
-// messageDTO shape so downstream tools can consume either) with the thread
-// root echoed back for context.
+// presentation.Message shape so downstream tools can consume either) with the
+// thread root echoed back for context.
 type getRepliesOutput struct {
-	ChatID         int64        `json:"chat_id"`
-	MessageID      string       `json:"message_id"`
-	Messages       []messageDTO `json:"messages"`
-	Count          int          `json:"count"`
-	HasMore        bool         `json:"has_more"`
-	NextCursor     string       `json:"next_cursor,omitempty"`
-	PaginationHint string       `json:"pagination_hint,omitempty"`
+	ChatID         int64                  `json:"chat_id"`
+	MessageID      string                 `json:"message_id"`
+	Messages       []presentation.Message `json:"messages"`
+	Count          int                    `json:"count"`
+	HasMore        bool                   `json:"has_more"`
+	NextCursor     string                 `json:"next_cursor,omitempty"`
+	PaginationHint string                 `json:"pagination_hint,omitempty"`
 }
 
 // Register adds the GetReplies tool to the MCP server.
@@ -58,14 +59,14 @@ func (h *RepliesGetHandler) Register(s *mcp.Server) {
 			"Returns up to `limit` messages (default 50, max 100) newest-first. Continue with `cursor` alone; use `before_message_id` only for an initial anchor. Date filtering uses inclusive `from_date` and exclusive `to_date`. " +
 			"A message's `replies.count` (from GetMessages/SearchMessages) tells you how many comments a post has before you fetch them here. " +
 			"An empty result (count 0) may mean the message has no thread, comments are disabled, or the id is wrong.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
 	}, h.handle)
 }
 
 func (h *RepliesGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in GetRepliesInput) (*mcp.CallToolResult, *getRepliesOutput, error) {
 	opts := messages.DefaultFetchOptions()
 	state := messagePageCursor{Kind: cursorKindReplies}
-	var rootRef MessageRef
+	var rootRef presentation.MessageRef
 	if in.Cursor != "" {
 		if in.ChatID != 0 || in.MessageID != "" || in.Limit != 0 || in.BeforeMessageID != "" || in.FromDate != "" || in.ToDate != "" {
 			return errResult("cursor is incompatible with every other field; pass the cursor alone"), nil, nil
@@ -77,14 +78,14 @@ func (h *RepliesGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest
 		}
 		in.ChatID, in.Limit = state.ChatID, state.Limit
 		in.FromDate, in.ToDate = state.FromDate, state.ToDate
-		rootRef = MessageRef{ID: state.RootMessageID}
+		rootRef = presentation.MessageRef{ID: state.RootMessageID}
 		opts.OffsetID, opts.Limit = state.OffsetID, state.Limit
 	} else {
 		if in.ChatID == 0 {
 			return errChatIDRequired(), nil, nil
 		}
 		var err error
-		rootRef, err = ParseMessageRef(in.MessageID)
+		rootRef, err = presentation.ParseMessageRef(in.MessageID)
 		if err != nil {
 			return errInvalidMessageID(in.MessageID, err), nil, nil
 		}
@@ -93,7 +94,7 @@ func (h *RepliesGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest
 		}
 		opts.Limit = clampLimit(in.Limit, opts.Limit, 100)
 		if in.BeforeMessageID != "" {
-			ref, err := ParseMessageRef(in.BeforeMessageID)
+			ref, err := presentation.ParseMessageRef(in.BeforeMessageID)
 			if err != nil {
 				return errInvalidMessageID(in.BeforeMessageID, err), nil, nil
 			}
@@ -127,12 +128,12 @@ func (h *RepliesGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest
 	out := &getRepliesOutput{
 		ChatID:    in.ChatID,
 		MessageID: rootRef.Format(),
-		Messages:  make([]messageDTO, 0, len(result.Messages)),
+		Messages:  make([]presentation.Message, 0, len(result.Messages)),
 		Count:     result.Count,
 		HasMore:   result.HasMore,
 	}
 	for _, m := range result.Messages {
-		out.Messages = append(out.Messages, toMessageDTO(m, false))
+		out.Messages = append(out.Messages, presentation.FromMessage(m, false))
 	}
 	if result.HasMore && result.NextID > 0 {
 		state.OffsetID = result.NextID

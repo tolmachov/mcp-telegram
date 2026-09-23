@@ -10,6 +10,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
+	"github.com/tolmachov/mcp-telegram/internal/presentation"
 )
 
 // MessagesSearchHandler handles the SearchMessages tool.
@@ -60,18 +61,18 @@ var mediaFilterMap = map[string]func() tg.MessagesFilterClass{
 
 // searchMessagesOutput mirrors getMessagesOutput but is declared separately
 // so schema generation doesn't alias the two tools. The per-message DTO
-// shape is identical (both use messageDTO) so downstream tools
+// shape is identical (both use presentation.Message) so downstream tools
 // (EditMessage, DeleteMessages, GetMessageContext) can consume either.
 // The envelope differs: this one adds Query, NextCursor, and PaginationHint
 // for search-specific pagination.
 type searchMessagesOutput struct {
-	ChatID         int64        `json:"chat_id"`
-	Query          string       `json:"query"`
-	Messages       []messageDTO `json:"messages"`
-	Count          int          `json:"count"`
-	HasMore        bool         `json:"has_more"`
-	NextCursor     string       `json:"next_cursor,omitempty"`
-	PaginationHint string       `json:"pagination_hint,omitempty"`
+	ChatID         int64                  `json:"chat_id"`
+	Query          string                 `json:"query"`
+	Messages       []presentation.Message `json:"messages"`
+	Count          int                    `json:"count"`
+	HasMore        bool                   `json:"has_more"`
+	NextCursor     string                 `json:"next_cursor,omitempty"`
+	PaginationHint string                 `json:"pagination_hint,omitempty"`
 }
 
 // Register adds the SearchMessages tool to the MCP server.
@@ -84,7 +85,7 @@ func (h *MessagesSearchHandler) Register(s *mcp.Server) {
 		InputSchema: inputSchemaWithEnums[SearchMessagesInput](map[string][]any{
 			"media_type": {"photos", "videos", "documents", "links", "voice", "music", "gif", "round_video", "round_voice"},
 		}),
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
 	}, h.handle)
 }
 
@@ -117,7 +118,7 @@ func (h *MessagesSearchHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	if in.Cursor != "" {
 		opts.Limit, opts.OffsetID, opts.TopMsgID = state.Limit, state.OffsetID, state.TopMsgID
 	} else if in.BeforeMessageID != "" {
-		ref, err := ParseMessageRef(in.BeforeMessageID)
+		ref, err := presentation.ParseMessageRef(in.BeforeMessageID)
 		if err != nil {
 			return errInvalidMessageID(in.BeforeMessageID, err), nil, nil
 		}
@@ -128,7 +129,7 @@ func (h *MessagesSearchHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	}
 
 	if in.TopMsgID != "" {
-		ref, err := ParseMessageRef(in.TopMsgID)
+		ref, err := presentation.ParseMessageRef(in.TopMsgID)
 		if err != nil {
 			return errResult(fmt.Sprintf("invalid top_msg_id %q: %v. Expected an opaque regular-message handle (e.g. \"42\") pointing at the thread/topic root.", in.TopMsgID, err)), nil, nil
 		}
@@ -170,13 +171,13 @@ func (h *MessagesSearchHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	out := &searchMessagesOutput{
 		ChatID:   in.ChatID,
 		Query:    query,
-		Messages: make([]messageDTO, 0, len(result.Messages)),
+		Messages: make([]presentation.Message, 0, len(result.Messages)),
 		Count:    result.Count,
 		HasMore:  result.HasMore,
 	}
 
 	for _, m := range result.Messages {
-		out.Messages = append(out.Messages, toMessageDTO(m, false))
+		out.Messages = append(out.Messages, presentation.FromMessage(m, false))
 	}
 
 	if result.HasMore && result.NextID > 0 {

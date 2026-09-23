@@ -8,6 +8,8 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tolmachov/mcp-telegram/internal/presentation"
 )
 
 func TestParseTMeLink(t *testing.T) {
@@ -152,8 +154,8 @@ func TestResolveMessageLinkPrivateForumTopicID(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, out)
-	assert.Equal(t, FormatRegularRef(11), out.TopicMessageID, "TopicMessageID should be opaque handle for topic root")
-	assert.Equal(t, FormatRegularRef(42), out.MessageID)
+	assert.Equal(t, presentation.FormatRegularRef(11), out.TopicMessageID, "TopicMessageID should be opaque handle for topic root")
+	assert.Equal(t, presentation.FormatRegularRef(42), out.MessageID)
 	assert.Equal(t, int64(1234567890), out.ChatID)
 }
 
@@ -169,7 +171,7 @@ func TestResolveMessageLinkNoTopicIDWhenNonForum(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, out)
 	assert.Empty(t, out.TopicMessageID)
-	assert.Equal(t, FormatRegularRef(42), out.MessageID)
+	assert.Equal(t, presentation.FormatRegularRef(42), out.MessageID)
 }
 
 // TestResolvedPeerInfo verifies that the canonical resolved peer (r.Peer) is

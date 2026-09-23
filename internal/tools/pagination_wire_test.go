@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
+	"github.com/tolmachov/mcp-telegram/internal/presentation"
 	telegramfake "github.com/tolmachov/mcp-telegram/internal/testutil/telegram"
 )
 
@@ -28,11 +29,11 @@ func TestPaginationThroughMCP(t *testing.T) {
 			if name == "SearchMessages" {
 				firstArgs["query"] = "release"
 				firstArgs["media_type"] = "photos"
-				firstArgs["top_msg_id"] = FormatRegularRef(7)
+				firstArgs["top_msg_id"] = presentation.FormatRegularRef(7)
 				firstArgs["from_sender_id"] = chatID
 			}
 			if name == "GetReplies" {
-				firstArgs["message_id"] = FormatRegularRef(7)
+				firstArgs["message_id"] = presentation.FormatRegularRef(7)
 			}
 
 			page := func(next bool) telegramfake.InvokeFunc {
@@ -146,9 +147,9 @@ func TestPaginationThroughMCP(t *testing.T) {
 			assert.Equal(t, false, body["has_more"])
 			assert.Equal(t, float64(1), body["count"])
 			assert.Equal(t, float64(chatID), body["chat_id"])
-			field, wantID := "messages", FormatRegularRef(19)
+			field, wantID := "messages", presentation.FormatRegularRef(19)
 			if name == "GetForumTopics" {
-				field, wantID = "topics", FormatRegularRef(9)
+				field, wantID = "topics", presentation.FormatRegularRef(9)
 			}
 			items := body[field].([]any)
 			require.Len(t, items, 1)

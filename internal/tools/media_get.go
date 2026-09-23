@@ -109,7 +109,7 @@ func (h *MediaGetHandler) Register(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "GetMedia",
 		Description: "Download a photo from Telegram using a media resource URI (telegram://media/...) returned by GetMessages. Returns MCP image content plus a short text status message.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
 	}, h.handle)
 }
 

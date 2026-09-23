@@ -30,7 +30,7 @@ func (h *MeGetHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "GetMe",
 		Description: "Get information about the currently authenticated Telegram user, including ID, name, username, and phone number.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
 	}, h.handle)
 }
 

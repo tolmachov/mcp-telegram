@@ -58,7 +58,7 @@ func (h *ChatsSearchHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "SearchChats",
 		Description: "Search for chats, groups, and channels by name using fuzzy matching. Searches local chats first, then globally. Returns up to `limit` results (default 10, max 50). Preferred over GetChats when looking for a specific chat.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
 	}, h.handle)
 }
 

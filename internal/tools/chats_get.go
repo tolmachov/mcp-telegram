@@ -55,7 +55,7 @@ func (h *ChatsGetHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "GetChats",
 		Description: "Get a paginated list of chats, groups, and channels. First call loads all chats (may be slow) and returns the first page. Pass the returned cursor to get subsequent pages from cache. Omit cursor to force a fresh reload. To find a specific chat by name, use SearchChats instead.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: new(true)},
 	}, h.handle)
 }
 

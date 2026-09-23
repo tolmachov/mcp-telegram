@@ -7,6 +7,7 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/tolmachov/mcp-telegram/internal/presentation"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
@@ -53,7 +54,7 @@ func (h *MessageForwardHandler) Register(s *mcp.Server) {
 		// DestructiveHint mirrors the other confirm-gated tools (DeleteMessages,
 		// LeaveChat): forwarding publishes content into another chat, an
 		// outward-facing side effect the handler asks to confirm.
-		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptrTrue(), OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: new(true), OpenWorldHint: new(true)},
 	}, h.handle)
 }
 
@@ -61,7 +62,7 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	if in.FromChatID == 0 {
 		return errResult("from_chat_id is required. Use SearchChats or GetChats to find the source chat ID."), nil, nil
 	}
-	ref, err := ParseMessageRef(in.MessageID)
+	ref, err := presentation.ParseMessageRef(in.MessageID)
 	if err != nil {
 		return errInvalidMessageID(in.MessageID, err), nil, nil
 	}
@@ -116,7 +117,7 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 		ToChatID:          in.ToChatID,
 	}
 	if forwardedMsgID > 0 {
-		res.NewMessageID = FormatRegularRef(forwardedMsgID)
+		res.NewMessageID = presentation.FormatRegularRef(forwardedMsgID)
 	} else {
 		res.Note = "new_message_id unavailable: Telegram returned an unrecognised update type"
 	}

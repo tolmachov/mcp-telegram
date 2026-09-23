@@ -92,13 +92,6 @@ func parseDateWindow(from, to string) (time.Time, time.Time, *mcp.CallToolResult
 	return minDate, maxDate, nil
 }
 
-// ptrTrue returns a pointer to true. Used for *bool fields on
-// mcp.ToolAnnotations (DestructiveHint, OpenWorldHint).
-func ptrTrue() *bool {
-	v := true
-	return &v
-}
-
 // sendProgress sends a single progress notification for the given request.
 // No-op when the request has no progress token. The token is set by the client
 // in _meta.progressToken; the SDK exposes it via req.Params.GetProgressToken().

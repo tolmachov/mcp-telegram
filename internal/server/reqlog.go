@@ -10,7 +10,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/authsrv"
-	"github.com/tolmachov/mcp-telegram/internal/tgid"
 	"github.com/tolmachov/mcp-telegram/internal/tools"
 )
 
@@ -122,14 +121,6 @@ func requestUser(ctx context.Context, req mcp.Request) (*authsrv.UserIdentity, b
 		if extra := req.GetExtra(); extra != nil {
 			if u, ok := authsrv.IdentityFromTokenInfo(extra.TokenInfo); ok {
 				return u, true
-			}
-			// Logging needs only the stable numeric subject. Keep it observable
-			// even if middleware from another version omitted our typed Extra;
-			// authorization and pool dispatch still require the full identity.
-			if extra.TokenInfo != nil {
-				if id, err := tgid.Parse(extra.TokenInfo.UserID); err == nil {
-					return &authsrv.UserIdentity{ID: id}, true
-				}
 			}
 		}
 	}

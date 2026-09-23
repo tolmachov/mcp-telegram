@@ -9,6 +9,7 @@ import (
 	"github.com/gotd/td/tgerr"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/tolmachov/mcp-telegram/internal/presentation"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
@@ -76,7 +77,7 @@ func (h *MessageDeleteHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "DeleteMessages",
 		Description: "Delete up to 100 messages from one chat in a single call. Regular handles (\"42\") delete delivered messages for all participants and cannot be undone; scheduled handles (\"s:42\") cancel pending delivery. One kind per call. Reports each message as deleted (verified gone), not_found (no such message in this chat) or forbidden (you lack the right to delete it for everyone — left untouched rather than deleted only for you). The call is rejected unless confirm=true. Use GetMessages first (with include_scheduled=true for the scheduled queue) to get the handles.",
-		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptrTrue(), OpenWorldHint: ptrTrue()},
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: new(true), OpenWorldHint: new(true)},
 	}, h.handle)
 }
 
@@ -91,7 +92,7 @@ func (h *MessageDeleteHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	var ids []int
 	scheduled := false
 	for i, s := range in.MessageIDs {
-		ref, err := ParseMessageRef(s)
+		ref, err := presentation.ParseMessageRef(s)
 		if err != nil {
 			return errInvalidMessageID(s, err), nil, nil
 		}
@@ -131,9 +132,9 @@ func (h *MessageDeleteHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 
 	res := &DeleteMessagesResult{Status: statusCompleted, ChatID: in.ChatID}
 	for _, id := range ids {
-		handle := FormatRegularRef(id)
+		handle := presentation.FormatRegularRef(id)
 		if scheduled {
-			handle = MessageRef{ID: id, Scheduled: true}.Format()
+			handle = presentation.MessageRef{ID: id, Scheduled: true}.Format()
 		}
 		st := statuses[id]
 		switch st {
