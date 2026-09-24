@@ -40,7 +40,7 @@ func TestFailureText(t *testing.T) {
 	// The client's flood-wait middleware wraps the original error when the
 	// wait exceeds its max, so detection must unwrap.
 	t.Run("wrapped by the flood-wait middleware (too long)", func(t *testing.T) {
-		wrapped := fmt.Errorf("telegram asked for a wait of 4m25s, which with the 0s already waited passes the 1m0s a call waits out: %w", flood)
+		wrapped := fmt.Errorf("telegram asked for a wait of 4m25s, which with the 0s already waited passes the 1m0s maximum: %w", flood)
 		assert.Contains(t, failureText("JoinChat", failed("join", wrapped)), "265 seconds")
 	})
 

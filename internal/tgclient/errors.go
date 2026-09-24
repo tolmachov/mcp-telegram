@@ -45,8 +45,8 @@ func isSessionRefusal(err error) bool {
 // call running out of time. Batch callers abort on it instead of recording a
 // per-item failure.
 func IsSystemic(err error) bool {
-	if _, ok := RetryAfter(err); ok {
-		return !IsSlowMode(err)
+	if wait, ok := RetryAfter(err); ok {
+		return wait.Scope != ScopeChat
 	}
 	return errors.Is(err, context.DeadlineExceeded) || IsBeyondRequest(err)
 }
@@ -63,14 +63,6 @@ func IsBeyondRequest(err error) bool {
 	}
 	return errors.Is(err, context.Canceled) || errors.Is(err, ErrClientStopped) || errors.Is(err, ErrSessionUnauthorized)
 }
-
-// errSlowModeWait is the type of the wait a chat in slow mode tells a call
-// to take before it sends there again: a condition of that chat alone.
-const errSlowModeWait = "SLOWMODE_WAIT"
-
-// IsSlowMode reports whether err is the wait a chat in slow mode tells a call
-// to take before it sends there again.
-func IsSlowMode(err error) bool { return tgerr.Is(err, errSlowModeWait) }
 
 // ShouldRefreshPeer identifies stale-access-hash errors for which a caller may
 // invalidate and perform exactly one fresh resolve/RPC attempt.

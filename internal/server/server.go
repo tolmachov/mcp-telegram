@@ -242,7 +242,7 @@ func (s *Server) connectStoredSession(ctx context.Context) (localClient, error) 
 	if err != nil {
 		return nil, fmt.Errorf("opening session storage: %w", err)
 	}
-	running, err := tgclient.StartClient(ctx, s.opts.Config, storage, s.logger, s.floodWaitLogger())
+	running, err := tgclient.StartClient(ctx, s.opts.Config, storage, s.logger)
 	if err != nil {
 		return nil, fmt.Errorf("starting Telegram client: %w", err)
 	}
@@ -287,30 +287,6 @@ func (s *Server) serveAssembly(ctx context.Context, client localClient) error {
 		return fmt.Errorf("running MCP server: %w", err)
 	}
 	return nil
-}
-
-// floodWaitLogger logs each wait Telegram tells a call to take, and whether
-// the call waits it out and retries or gives up: a call waits no more than
-// the configured max in all, so that it fails before the MCP client's
-// tool-call timeout instead of hanging into it, and every tool then renders
-// the wait it gave up on as a retry-after error (via tools.floodWaitMessage).
-func (s *Server) floodWaitLogger() tgclient.FloodWaitCallback {
-	floodMaxWait := s.opts.Config.FloodWaitMaxWait
-	return func(_ context.Context, wait time.Duration, retrying bool) {
-		if retrying {
-			s.logger.Warn("telegram told a call to wait; waiting it out",
-				"wait_seconds", wait.Seconds(),
-				"max_wait_seconds", floodMaxWait.Seconds(),
-				"reason", "Telegram rate limit; the call retries automatically after the wait",
-			)
-			return
-		}
-		s.logger.Warn("telegram told a call to wait longer than it may; failing fast",
-			"wait_seconds", wait.Seconds(),
-			"max_wait_seconds", floodMaxWait.Seconds(),
-			"reason", "the call's waits would add up past the configured max; the call fails fast with a retry-after error instead of blocking past the client timeout",
-		)
-	}
 }
 
 // assembly is one complete set of MCP servers built around one Telegram
@@ -431,8 +407,7 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 	// The message provider owns the rate limiter its fetches wait on. The
 	// RPS ceiling is configurable (--tg-rate-limit-rps) so operators can
 	// loosen it when fetches bottleneck on it. Raising it too high will trip
-	// Telegram's FLOOD_WAIT, which the tgclient flood-wait middleware reports
-	// via onFloodWait.
+	// Telegram's FLOOD_WAIT, which the tgclient flood-wait middleware logs.
 	msgProvider := messages.NewProvider(peers, s.opts.TGRateLimitRPS)
 
 	fullHandlers, researchHandlers := s.buildHandlers(api, peers, msgProvider, chatsCache)

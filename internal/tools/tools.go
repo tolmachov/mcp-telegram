@@ -13,7 +13,6 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/gotd/td/tg"
-	"github.com/gotd/td/tgerr"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/presentation"
@@ -185,11 +184,15 @@ func cryptoRandInt64() int64 {
 //   - a non-error result without a typed output is a handler bug and is
 //     reported as an error rather than an empty success.
 //
+// The handler runs with a flood-wait budget of its own
+// (tgclient.WithWaitBudget), so the Telegram calls of one tool call wait no
+// more than the configured maximum in all.
+//
 // Every tool with a typed output must be registered through this instead of
 // mcp.AddTool.
 func AddTool[In, Out any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, *Out]) {
 	mcp.AddTool(s, t, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, *Out, error) {
-		res, out, err := h(ctx, req, in)
+		res, out, err := h(tgclient.WithWaitBudget(ctx), req, in)
 		if err != nil {
 			return nil, nil, toolFailure(ctx, req, t.Name, err)
 		}
@@ -204,11 +207,11 @@ func AddTool[In, Out any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, *
 }
 
 // AddContentTool registers a tool with no typed output (e.g. GetMedia, which
-// returns image content), routing its handler errors through toolFailure like
-// AddTool does.
+// returns image content), routing its handler errors through toolFailure and
+// giving it a flood-wait budget like AddTool does.
 func AddContentTool[In any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, any]) {
 	mcp.AddTool(s, t, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
-		res, out, err := h(ctx, req, in)
+		res, out, err := h(tgclient.WithWaitBudget(ctx), req, in)
 		if err != nil {
 			return nil, nil, toolFailure(ctx, req, t.Name, err)
 		}
@@ -463,35 +466,34 @@ func firstMessageInUpdates(updates tg.UpdatesClass, typeIDs ...uint32) (int, int
 
 // floodWaitMessage returns the deterministic retry-after guidance for a wait
 // Telegram told a call to take (tgclient.RetryAfter) — including the forms the
-// flood-wait middleware wraps when the call would wait past its maximum or
-// its context ends while it waits — or ok=false when err is no such wait.
+// flood-wait middleware wraps when the tool call would wait past its maximum
+// or its context ends while it waits — or ok=false when err is no such wait.
 // describe renders it both for every tool's failure and for batch handlers
 // (e.g. MarkAsRead) that embed it in an aggregated result instead.
 //
-// A FLOOD_WAIT is an account-level limit (cumulative actions over a window,
-// not request rate), so a local rate limiter cannot prevent it — the only
-// remedy is to wait the reported duration and space the calls out, which the
-// message states so the model stops retry-spamming. Slow mode is one chat's
-// limit on sending, and the other waits are Telegram's own, so they say only
-// how long to wait.
+// What the guidance says follows the wait's scope. An account flood limit is
+// cumulative actions over a window, not request rate, so a local rate limiter
+// cannot prevent it — the only remedy is to wait the reported duration and
+// space the calls out, which the message states so the model stops
+// retry-spamming. Slow mode is one chat's limit on sending, and Telegram's
+// own delays say only how long to wait.
 func floodWaitMessage(tool string, err error) (string, bool) {
-	d, ok := tgclient.RetryAfter(err)
+	w, ok := tgclient.RetryAfter(err)
 	if !ok {
 		return "", false
 	}
-	d = d.Round(time.Second)
+	d := w.Duration.Round(time.Second)
 	wait := fmt.Sprintf("%s (%d seconds)", d, int(d/time.Second))
-	switch {
-	case tgclient.IsSlowMode(err):
+	switch w.Scope {
+	case tgclient.ScopeChat:
 		return fmt.Sprintf("This chat is in slow mode: wait %s before sending to it again.", wait), true
-	case tgerr.Is(err, tgerr.ErrFloodWait, tgerr.ErrPremiumFloodWait, "FLOOD_TEST_PHONE_WAIT", "FLOOD_SKIP_FAILED_WAIT"):
+	case tgclient.ScopeAccount:
 		return fmt.Sprintf(
 			"Telegram rate-limited this %s call: wait %s before retrying. This is an account-level flood limit (cumulative actions, not request rate), so spacing out %s calls is the only way to avoid it — do not retry immediately.",
 			tool, wait, tool,
 		), true
 	default:
-		rpcErr, _ := tgerr.As(err)
-		return fmt.Sprintf("Telegram told this %s call to wait %s before retrying (%s): do not retry sooner.", tool, wait, rpcErr.Type), true
+		return fmt.Sprintf("Telegram told this %s call to wait %s before retrying (%s): do not retry sooner.", tool, wait, w.Type), true
 	}
 }
 

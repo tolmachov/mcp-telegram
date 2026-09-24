@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -301,11 +300,11 @@ func (blockingStorage) StoreSession(context.Context, []byte) error { return nil 
 func TestStartClientClassifiesFailuresBeforeTheCallback(t *testing.T) {
 	cfg := &Config{APIID: 1, APIHash: "hash"}
 
-	_, err := StartClient(t.Context(), cfg, loadFailingStorage{err: tgerr.New(401, "AUTH_KEY_UNREGISTERED")}, discardLogger(), nil)
+	_, err := StartClient(t.Context(), cfg, loadFailingStorage{err: tgerr.New(401, "AUTH_KEY_UNREGISTERED")}, discardLogger())
 	require.ErrorIs(t, err, ErrSessionUnauthorized)
 
 	storageErr := errors.New("keychain access denied")
-	_, err = StartClient(t.Context(), cfg, loadFailingStorage{err: storageErr}, discardLogger(), nil)
+	_, err = StartClient(t.Context(), cfg, loadFailingStorage{err: storageErr}, discardLogger())
 	require.ErrorIs(t, err, storageErr)
 	assert.NotErrorIs(t, err, ErrSessionUnauthorized)
 }
@@ -315,7 +314,7 @@ func TestStartClientClassifiesFailuresBeforeTheCallback(t *testing.T) {
 func TestStartClientCancelledIsNotAVerdict(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	_, err := StartClient(ctx, &Config{APIID: 1, APIHash: "hash"}, blockingStorage{}, discardLogger(), nil)
+	_, err := StartClient(ctx, &Config{APIID: 1, APIHash: "hash"}, blockingStorage{}, discardLogger())
 	require.ErrorIs(t, err, context.Canceled)
 	assert.NotErrorIs(t, err, ErrSessionUnauthorized)
 }
@@ -348,7 +347,7 @@ func scripted(answers ...answer) answer {
 // startOnCluster starts a client through startClient against an in-process
 // Telegram cluster whose DCs route sets up; the client's home DC is homeDC.
 // Every wait of the test is bounded by clusterTimeout.
-func startOnCluster(t *testing.T, onFloodWait FloodWaitCallback, route func(*cluster.Cluster)) (*Running, error) {
+func startOnCluster(t *testing.T, logger *slog.Logger, route func(*cluster.Cluster)) (*Running, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), clusterTimeout)
 	t.Cleanup(cancel)
@@ -370,7 +369,7 @@ func startOnCluster(t *testing.T, onFloodWait FloodWaitCallback, route func(*clu
 	}
 
 	cfg := &Config{APIID: 1, APIHash: "hash", FloodWaitMaxWait: time.Minute}
-	r, err := startClient(ctx, cfg, &session.StorageMemory{}, discardLogger(), onFloodWait, telegram.Options{
+	r, err := startClient(ctx, cfg, &session.StorageMemory{}, logger, telegram.Options{
 		PublicKeys: c.Keys(),
 		Resolver:   c.Resolver(),
 		DCList:     c.List(),
@@ -396,14 +395,34 @@ func answerFile(server *tgtest.Server, req *tgtest.Request) error {
 	return server.SendResult(req, &tg.UploadFile{Type: &tg.StorageFileJpeg{}, Bytes: []byte("jpeg")}) //nolint:wrapcheck // the fake server hands the send error to tgtest as is.
 }
 
+// lockedBuffer is a log sink the client's goroutines may write to while the
+// test reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p) //nolint:wrapcheck // a bytes.Buffer write never fails.
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // TestStartClientWatchesRefusalsInsideFloodWait pins the real client's
-// wiring. A download waits out its flood wait, and the refusal its retry gets
-// goes through refusalWatch: another DC may have answered it, so the client
-// stops for a reconnect, and the download fails with why through stopWatch.
+// wiring. A download waits out its flood wait, logged through the client's
+// logger, and the refusal its retry gets goes through refusalWatch: another
+// DC may have answered it, so the client stops for a reconnect, and the
+// download fails with why through stopWatch.
 func TestStartClientWatchesRefusalsInsideFloodWait(t *testing.T) {
 	t.Parallel()
-	var waits atomic.Int32
-	r, err := startOnCluster(t, func(context.Context, time.Duration, bool) { waits.Add(1) }, func(c *cluster.Cluster) {
+	var logs lockedBuffer
+	r, err := startOnCluster(t, slog.New(slog.NewTextHandler(&logs, nil)), func(c *cluster.Cluster) {
 		c.Dispatch(homeDC, "home").
 			HandleFunc(tg.UsersGetUsersRequestTypeID, scripted(answerSelf)).
 			HandleFunc(tg.UploadGetFileRequestTypeID, scripted(answerErr(tgerr.New(420, "FLOOD_WAIT_0")), answerErr(tgerr.New(401, "AUTH_KEY_UNREGISTERED"))))
@@ -418,7 +437,7 @@ func TestStartClientWatchesRefusalsInsideFloodWait(t *testing.T) {
 	require.ErrorIs(t, err, errAwayRefusal)
 	assert.True(t, tgerr.Is(err, "AUTH_KEY_UNREGISTERED"), "the call keeps Telegram's code: %v", err)
 	assert.NotErrorIs(t, err, ErrSessionUnauthorized, "another DC's refusal is no verdict")
-	assert.Equal(t, int32(1), waits.Load(), "the flood-wait middleware retried the call first")
+	assert.Contains(t, logs.String(), "telegram told a call to wait; waiting it out", "the flood-wait middleware retried the call first")
 
 	select {
 	case <-r.Done():
@@ -442,7 +461,7 @@ func TestStartClientDownloadsFromAnotherDC(t *testing.T) {
 			return server.SendResult(req, result) //nolint:wrapcheck // the fake server hands the send error to tgtest as is.
 		}
 	}
-	r, err := startOnCluster(t, nil, func(c *cluster.Cluster) {
+	r, err := startOnCluster(t, discardLogger(), func(c *cluster.Cluster) {
 		c.Dispatch(homeDC, "home").
 			HandleFunc(tg.UsersGetUsersRequestTypeID, scripted(answerSelf)).
 			HandleFunc(tg.UploadGetFileRequestTypeID, scripted(answerErr(tgerr.New(303, fmt.Sprintf("FILE_MIGRATE_%d", fileDC))))).
@@ -470,7 +489,7 @@ func TestStartClientKeepsTheHomeDCsRefusal(t *testing.T) {
 	for _, code := range []string{"AUTH_KEY_UNREGISTERED", "SESSION_PASSWORD_NEEDED"} {
 		t.Run(code, func(t *testing.T) {
 			t.Parallel()
-			_, err := startOnCluster(t, nil, func(c *cluster.Cluster) {
+			_, err := startOnCluster(t, discardLogger(), func(c *cluster.Cluster) {
 				c.Dispatch(homeDC, "home").HandleFunc(tg.UsersGetUsersRequestTypeID, scripted(answerErr(tgerr.New(401, code))))
 			})
 			require.ErrorIs(t, err, ErrSessionUnauthorized)

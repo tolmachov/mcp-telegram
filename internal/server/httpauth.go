@@ -101,7 +101,7 @@ func userLogger(base *slog.Logger, user *authsrv.UserIdentity) *slog.Logger {
 func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 	return func(ctx context.Context, user *authsrv.UserIdentity) (pooledAssembly, error) {
 		logger := userLogger(s.logger, user)
-		running, err := tgclient.StartClient(ctx, s.opts.Config, s.opts.SessionStore.Session(user.ID, user.SessionID, user.SessionKey), logger, s.floodWaitLogger())
+		running, err := tgclient.StartClient(ctx, s.opts.Config, s.opts.SessionStore.Session(user.ID, user.SessionID, user.SessionKey), logger)
 		if err != nil {
 			if errors.Is(err, sessionstore.ErrCorruptSession) {
 				// A stored blob we cannot decrypt with this token's own session

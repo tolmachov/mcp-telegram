@@ -428,10 +428,6 @@ func TestServerAuxiliaryLifecycleBranches(t *testing.T) {
 		Transport: TransportStdio,
 	})
 	require.NoError(t, err)
-	logFloodWait := srv.floodWaitLogger()
-	logFloodWait(t.Context(), time.Second, true)
-	logFloodWait(t.Context(), 3*time.Second, false)
-
 	_, err = (&Server{opts: Options{Config: &tgclient.Config{}}}).startLogin(t.Context())
 	require.Error(t, err)
 

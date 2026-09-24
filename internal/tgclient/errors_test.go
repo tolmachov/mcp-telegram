@@ -24,7 +24,6 @@ func TestIsSystemic(t *testing.T) {
 	assert.True(t, IsSystemic(tgerr.New(500, "WORKER_BUSY_TOO_LONG_RETRY")))
 	assert.True(t, IsSystemic(tgerr.New(420, "FLOOD_PREMIUM_WAIT_5")))
 	assert.False(t, IsSystemic(tgerr.New(420, "SLOWMODE_WAIT_10")))
-	assert.True(t, IsSlowMode(fmt.Errorf("sending: %w", tgerr.New(420, "SLOWMODE_WAIT_10"))))
 	// A dead session is systemic once it is the verdict; Telegram's bare
 	// reply to one call is not (see Running.refusalWatch).
 	assert.True(t, IsSystemic(fmt.Errorf("%w: %w", ErrSessionUnauthorized, tgerr.New(401, "SESSION_REVOKED"))))

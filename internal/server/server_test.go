@@ -551,7 +551,7 @@ func TestRunCancelledDuringStartupReturnsQuietly(t *testing.T) {
 	require.NoError(t, err)
 	srv.connectLocal = func(ctx context.Context) (localClient, error) {
 		close(started)
-		running, err := tgclient.StartClient(ctx, srv.opts.Config, blockingSession{}, srv.logger, srv.floodWaitLogger())
+		running, err := tgclient.StartClient(ctx, srv.opts.Config, blockingSession{}, srv.logger)
 		if err != nil {
 			return nil, err
 		}

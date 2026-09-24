@@ -24,12 +24,12 @@ import (
 type Config struct {
 	APIID   int
 	APIHash string
-	// FloodWaitMaxWait caps how long the flood-wait middleware lets one call
-	// wait in all on the waits Telegram tells it to take: a wait that would
-	// take the call past it is returned as the call's error instead; the
-	// default lives on --flood-wait-max-seconds. Raising it lets the client
-	// wait out longer account-level limits at the cost of holding the call
-	// that waits; lowering it fails faster.
+	// FloodWaitMaxWait caps how long the Telegram calls of one tool call wait
+	// in all on the waits Telegram tells them to take (see WithWaitBudget): a
+	// wait that would take them past it is returned as the call's error
+	// instead; the default lives on --flood-wait-max-seconds. Raising it lets
+	// the client wait out longer account-level limits at the cost of holding
+	// the tool call that waits; lowering it fails faster.
 	FloodWaitMaxWait time.Duration
 }
 
@@ -100,11 +100,11 @@ func (a userAuthenticator) SignUp(_ context.Context) (auth.UserInfo, error) {
 }
 
 // newClient builds a gotd client over storage from opts, with the flood-wait
-// middleware (floodWait) in front of opts.Middlewares. If onFloodWait is
-// non-nil, it is told of every wait Telegram tells a call to take.
-func newClient(cfg *Config, storage session.Storage, onFloodWait FloodWaitCallback, opts telegram.Options) *telegram.Client {
+// middleware (floodWait), which logs every wait through logger, in front of
+// opts.Middlewares.
+func newClient(cfg *Config, storage session.Storage, logger *slog.Logger, opts telegram.Options) *telegram.Client {
 	opts.SessionStorage = storage
-	opts.Middlewares = append([]telegram.Middleware{floodWait(cfg.FloodWaitMaxWait, onFloodWait)}, opts.Middlewares...)
+	opts.Middlewares = append([]telegram.Middleware{floodWait(cfg.FloodWaitMaxWait, logger)}, opts.Middlewares...)
 	return telegram.NewClient(cfg.APIID, cfg.APIHash, opts)
 }
 
@@ -114,7 +114,7 @@ func Login(ctx context.Context, cfg *Config, phone string, in io.Reader, out io.
 	if err != nil {
 		return fmt.Errorf("opening session storage: %w", err)
 	}
-	client := newClient(cfg, storage, nil, telegram.Options{})
+	client := newClient(cfg, storage, slog.Default(), telegram.Options{})
 
 	err = client.Run(ctx, func(ctx context.Context) error {
 		status, err := client.Auth().Status(ctx)
@@ -158,7 +158,7 @@ func Logout(ctx context.Context, cfg *Config, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("opening session storage: %w", err)
 	}
-	client := newClient(cfg, storage, nil, telegram.Options{})
+	client := newClient(cfg, storage, slog.Default(), telegram.Options{})
 
 	remoteErr := client.Run(ctx, func(ctx context.Context) error {
 		if _, err := client.API().AuthLogOut(ctx); err != nil {

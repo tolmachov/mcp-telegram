@@ -48,7 +48,8 @@ context loading); admin and posting features are secondary. Two transports:
    the handler's Go error via `failed(op, err)` / `failedHint`: the registration
    helpers classify it (dead session, a stopped client, flood wait, a problem
    with the chat named — `tgclient.IsPeerSpecific`), render the text the model
-   sees and log it under the tool's name.
+   sees and log it under the tool's name. They also give the call its flood-wait
+   budget (`tgclient.WithWaitBudget`).
 5. Add the handler to `buildHandlers` in `internal/server/server.go`: `research`
    for read-only tools, `mutating` for anything that changes state. The split
    drives the server variants (see README "Server Variants").

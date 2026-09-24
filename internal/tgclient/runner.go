@@ -66,22 +66,23 @@ type Running struct {
 // The error is ErrSessionUnauthorized, wrapping the home DC's reply, when
 // Telegram does not accept the session — whether the readiness check is
 // refused or gotd ends Run on a 401 before the check runs — and otherwise the
-// failure that kept the client from finding out. gotd logs through logger at
-// Warn and above.
-func StartClient(ctx context.Context, cfg *Config, storage session.Storage, logger *slog.Logger, onFloodWait FloodWaitCallback) (*Running, error) {
-	return startClient(ctx, cfg, storage, logger, onFloodWait, telegram.Options{})
+// failure that kept the client from finding out. The client logs through
+// logger: gotd at Warn and above, and every wait Telegram tells a call to
+// take.
+func StartClient(ctx context.Context, cfg *Config, storage session.Storage, logger *slog.Logger) (*Running, error) {
+	return startClient(ctx, cfg, storage, logger, telegram.Options{})
 }
 
 // startClient is StartClient over base, the gotd options that say which
 // Telegram servers to reach: the defaults in production, an in-process
 // cluster in tests. Everything else the client needs is set here.
-func startClient(ctx context.Context, cfg *Config, storage session.Storage, logger *slog.Logger, onFloodWait FloodWaitCallback, base telegram.Options) (*Running, error) {
+func startClient(ctx context.Context, cfg *Config, storage session.Storage, logger *slog.Logger, base telegram.Options) (*Running, error) {
 	lifetime, stop := context.WithCancelCause(context.WithoutCancel(ctx))
 	r := &Running{lifetime: lifetime, stop: stop, done: make(chan struct{})}
 	base.Logger = gotdLogger(logger)
 	base.OnDead = r.connDead
 	base.Middlewares = []telegram.Middleware{r.refusalWatch()}
-	client := newClient(cfg, storage, onFloodWait, base)
+	client := newClient(cfg, storage, logger, base)
 	r.api = tg.NewClient(r.stopWatch(client))
 
 	// ready closes once the readiness check has passed. A check that fails

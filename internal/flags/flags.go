@@ -63,9 +63,10 @@ const DefaultSummarizeBatchTokens = 8000
 // flood-wait on bursty tools like BackupMessages.
 const DefaultRateLimitRPS = 1
 
-// DefaultFloodWaitMaxSeconds is the default ceiling for what one call waits
-// in all on the FLOOD_WAITs Telegram tells it to take. It MUST stay well below the MCP client's tool-call
-// timeout (Claude Desktop cancels at ~240s): auto-waiting longer is pointless
+// DefaultFloodWaitMaxSeconds is the default ceiling for what the Telegram
+// calls of one tool call wait in all on the FLOOD_WAITs Telegram tells them
+// to take. It MUST stay well below the MCP client's tool-call timeout (Claude
+// Desktop cancels at ~240s): auto-waiting longer is pointless
 // because the client cancels the call first, turning a recoverable rate limit
 // into a generic "no result received" timeout. So short, transient waits are
 // absorbed transparently, while anything longer fails fast and every tool
@@ -212,14 +213,14 @@ func PinnedRefreshSecsFlag() *cli.IntFlag {
 	}
 }
 
-// FloodWaitMaxSecsFlag defines --flood-wait-max-seconds: how long one call
-// waits in all on Telegram's FLOOD_WAITs before failing with a retry-after
-// error.
+// FloodWaitMaxSecsFlag defines --flood-wait-max-seconds: how long one tool
+// call waits in all on Telegram's FLOOD_WAITs before failing with a
+// retry-after error.
 func FloodWaitMaxSecsFlag() *cli.IntFlag {
 	return &cli.IntFlag{
 		Name:    FloodWaitMaxSecs,
 		Value:   DefaultFloodWaitMaxSeconds,
-		Usage:   "Maximum seconds one call waits in all on Telegram FLOOD_WAITs before failing fast with a retry-after hint. Keep it below your MCP client's tool-call timeout (Claude Desktop cancels at ~240s) — waiting longer just makes the client time out instead. Raise only for headless/automation runs with no such timeout.",
+		Usage:   "Maximum seconds one tool call waits in all on Telegram FLOOD_WAITs before failing fast with a retry-after hint. Keep it below your MCP client's tool-call timeout (Claude Desktop cancels at ~240s) — waiting longer just makes the client time out instead. Raise only for headless/automation runs with no such timeout.",
 		Sources: cli.EnvVars("MCP_TELEGRAM_FLOOD_WAIT_MAX_SECONDS"),
 		Action:  requirePositive(FloodWaitMaxSecs),
 	}
