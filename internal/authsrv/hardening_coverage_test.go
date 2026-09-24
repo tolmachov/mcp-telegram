@@ -38,17 +38,7 @@ func (noUserFlow) User() (LoginUser, bool) { return LoginUser{}, false }
 type failedSessionStore struct{ sessionstore.Store }
 
 func (s failedSessionStore) Session(tgid.UserID, string, []byte) session.Storage {
-	return failedSessionStorage{}
-}
-
-type failedSessionStorage struct{}
-
-func (failedSessionStorage) LoadSession(context.Context) ([]byte, error) {
-	return nil, session.ErrNotFound
-}
-
-func (failedSessionStorage) StoreSession(context.Context, []byte) error {
-	return errors.New("simulated session write failure")
+	return sessionstoretest.FailingSession{Err: errors.New("simulated session write failure")}
 }
 
 func TestAuthorizeBeforeStartFailsWithoutLaunchingTelegram(t *testing.T) {

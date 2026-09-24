@@ -14,6 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tolmachov/mcp-telegram/internal/sessionstore/sessionstoretest"
 	"github.com/tolmachov/mcp-telegram/internal/summarize"
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
@@ -520,16 +521,6 @@ func TestSummarizeMisconfigurationDisablesOnlySummarizeChat(t *testing.T) {
 	assert.ErrorContains(t, summarizeUnavailable(TransportHTTP, errors.New("bad")), "restart the server")
 }
 
-// blockingSession parks LoadSession until the client's own context ends, so
-// a client started on it never becomes ready.
-type blockingSession struct{}
-
-func (blockingSession) LoadSession(ctx context.Context) ([]byte, error) {
-	<-ctx.Done()
-	return nil, ctx.Err()
-}
-func (blockingSession) StoreSession(context.Context, []byte) error { return nil }
-
 // TestRunCancelledDuringStartupReturnsQuietly pins that a host shutting the
 // server down while the Telegram client is still starting is not a failure:
 // Run returns nil without an Error record and without detouring through
@@ -551,7 +542,7 @@ func TestRunCancelledDuringStartupReturnsQuietly(t *testing.T) {
 	require.NoError(t, err)
 	srv.connectLocal = func(ctx context.Context) (localClient, error) {
 		close(started)
-		running, err := tgclient.StartClient(ctx, srv.opts.Config, blockingSession{}, srv.logger)
+		running, err := tgclient.StartClient(ctx, srv.opts.Config, sessionstoretest.BlockingSession{}, srv.logger)
 		if err != nil {
 			return nil, err
 		}

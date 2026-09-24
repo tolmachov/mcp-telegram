@@ -32,18 +32,13 @@ type assemblyLoadFailure struct {
 }
 
 func (s *assemblyLoadFailure) Session(tgid.UserID, string, []byte) session.Storage {
-	return failingAssemblySession{err: s.loadErr}
+	return sessionstoretest.FailingSession{Err: s.loadErr}
 }
 
 func (s *assemblyLoadFailure) Delete(_ context.Context, _ tgid.UserID, sid string) error {
 	s.deleted = append(s.deleted, sid)
 	return s.deleteErr
 }
-
-type failingAssemblySession struct{ err error }
-
-func (s failingAssemblySession) LoadSession(context.Context) ([]byte, error) { return nil, s.err }
-func (s failingAssemblySession) StoreSession(context.Context, []byte) error  { return s.err }
 
 func TestAssemblyStartupPreservesUnavailableSessions(t *testing.T) {
 	for _, tc := range []struct {
