@@ -300,6 +300,30 @@ func TestBackupMessagesSavesPartialOnCancel(t *testing.T) {
 	assert.Zero(t, inv.Remaining())
 }
 
+// TestBackupMessagesReportsAClientStopAsAFailure verifies a backup whose
+// fetch the Telegram client's stop cancelled, while the call itself still
+// runs, saves what was fetched and reports the stop as a failure, not as the
+// caller's cancel.
+func TestBackupMessagesReportsAClientStopAsAFailure(t *testing.T) {
+	const channelID = int64(65)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "backup.txt")
+	inv := partialBackupScript(t, channelID, func() error { return context.Canceled })
+	peers := tgclient.NewResolver(t.Context(), tg.NewClient(inv))
+	handler := NewMessageBackupHandler(peers, messages.NewProvider(peers, 100_000), []string{dir})
+
+	res, out, err := handler.handle(t.Context(), &mcp.CallToolRequest{}, BackupMessagesInput{ChatID: channelID, Filepath: target})
+	require.Error(t, err)
+	assert.Nil(t, res)
+	assert.Nil(t, out)
+	text := failureText("BackupMessages", err)
+	assert.Contains(t, text, "The backup stopped mid-stream; a partial file with 2 messages was saved to "+target)
+	assert.NotContains(t, text, "cancelled; partial file saved")
+	_, statErr := os.Stat(target)
+	require.NoError(t, statErr)
+	assert.Zero(t, inv.Remaining())
+}
+
 // TestBackupMessagesSavesPartialOnTimeout verifies a backup cut short by a
 // deadline tells the model where the partial file is: the outcome rides in
 // the note, which a systemic failure keeps.

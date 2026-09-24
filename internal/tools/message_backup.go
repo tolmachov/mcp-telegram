@@ -425,10 +425,13 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	case partialErr == nil:
 		return textResult(fmt.Sprintf("Backup completed!\nMessages saved: %d\nFile: %s", len(result.Messages), absPath)),
 			&BackupMessagesResult{ChatID: in.ChatID, MessageCount: len(result.Messages), Filepath: absPath}, nil
-	case errors.Is(partialErr, context.Canceled):
+	case errors.Is(partialErr, context.Canceled) && ctx.Err() != nil:
 		// User-initiated cancel: not an error. Surface as success so the
 		// caller can decide whether to resume, without the LLM treating the
-		// partial file as a failure to retry blindly.
+		// partial file as a failure to retry blindly. Only the call's own
+		// context says the caller cancelled: a fetch cancelled while the call
+		// still runs was cut short by the Telegram client stopping under it,
+		// which is a failure.
 		return textResult(fmt.Sprintf(
 				"Backup cancelled; partial file saved.\nMessages saved: %d\nFile: %s",
 				len(result.Messages), absPath,
