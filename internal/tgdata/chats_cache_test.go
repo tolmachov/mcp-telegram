@@ -278,43 +278,49 @@ func TestChatsCacheLoad(t *testing.T) {
 	})
 
 	t.Run("a slow progress callback does not hold back a caller leaving", func(t *testing.T) {
-		l := newGatedLoader()
-		c := NewChatsCache(t.Context(), l.load)
+		synctest.Test(t, func(t *testing.T) {
+			l := newGatedLoader()
+			c := NewChatsCache(t.Context(), l.load)
 
-		inSlow, releaseSlow := make(chan struct{}), make(chan struct{})
-		slowDone := make(chan struct{})
-		go func() {
-			defer close(slowDone)
-			_, err := c.Load(t.Context(), func(int, string) {
-				close(inSlow)
-				<-releaseSlow
-			}, false)
-			assert.NoError(t, err)
-		}()
-		<-l.entered
+			// The slow caller joins first, so the relay is stuck in its
+			// callback with the leaver's still to come.
+			inSlow, releaseSlow := make(chan struct{}), make(chan struct{})
+			slowDone := make(chan struct{})
+			go func() {
+				defer close(slowDone)
+				_, err := c.Load(t.Context(), func(int, string) {
+					close(inSlow)
+					<-releaseSlow
+				}, false)
+				assert.NoError(t, err)
+			}()
+			synctest.Wait()
+			require.Equal(t, 1, c.watchers())
 
-		var leaverHeard atomic.Int64
-		leaverCtx, cancelLeaver := context.WithCancel(t.Context())
-		leaverDone := make(chan struct{})
-		go func() {
-			defer close(leaverDone)
-			_, _ = c.Load(leaverCtx, func(int, string) { leaverHeard.Add(1) }, false)
-		}()
-		require.Eventually(t, func() bool { return c.watchers() == 2 }, time.Second, time.Millisecond)
+			var leaverHeard atomic.Int64
+			leaverCtx, cancelLeaver := context.WithCancel(t.Context())
+			leaverDone := make(chan struct{})
+			go func() {
+				defer close(leaverDone)
+				_, _ = c.Load(leaverCtx, func(int, string) { leaverHeard.Add(1) }, false)
+			}()
+			synctest.Wait()
+			require.Equal(t, 2, c.watchers())
 
-		close(l.release)
-		<-inSlow // the load is stuck in the slow caller's callback
-		cancelLeaver()
-		select {
-		case <-leaverDone:
-		case <-time.After(time.Second):
-			require.FailNow(t, "a caller leaving waited for another caller's progress callback")
-		}
-		heardBeforeLeaving := leaverHeard.Load()
-		close(releaseSlow)
-		<-slowDone
-		assert.Equal(t, heardBeforeLeaving, leaverHeard.Load(), "no progress reaches a caller after it left")
+			close(l.release)
+			<-inSlow
+			cancelLeaver()
+			select {
+			case <-leaverDone:
+			case <-time.After(time.Second):
+				require.FailNow(t, "a caller leaving waited for another caller's progress callback")
+			}
+			close(releaseSlow)
+			<-slowDone
+			assert.Zero(t, leaverHeard.Load(), "no progress reaches a caller after it left")
+		})
 	})
+
 }
 
 // gatedLoader reports progress once release closes, then returns a fixed

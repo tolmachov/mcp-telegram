@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -72,16 +71,20 @@ type chatsFlight struct {
 	snap *ChatsSnapshot
 	err  error
 
-	mu       sync.Mutex
-	watchers map[int]progressWatcher
-	nextID   int
+	mu sync.Mutex
+	// watchers are the callers subscribed to the load's progress, in the
+	// order they joined.
+	watchers []*progressWatcher
 }
 
-// progressWatcher is one caller subscribed to a load's progress: onProgress
-// is called only while ctx, the caller's context, is live.
+// progressWatcher is one caller subscribed to a load's progress. mu is held
+// for each call to onProgress and to mark the caller gone, so no call starts
+// once left is set and leaving waits out only this caller's own call.
 type progressWatcher struct {
-	ctx        context.Context
 	onProgress ProgressFunc
+
+	mu   sync.Mutex
+	left bool
 }
 
 // NewChatsCache creates a cache that fills itself through load. life is the
@@ -100,13 +103,14 @@ func NewChatsCache(life context.Context, load ChatsLoader) *ChatsCache {
 // runs on the cache's lifetime (see NewChatsCache) bounded by
 // chatsLoadTimeout, never on a caller's context or its values; each caller
 // waits on its own ctx, and onProgress hears the load's progress only while
-// its caller waits.
+// its caller waits: Load does not return while onProgress runs, so only an
+// onProgress that honours ctx lets a cancelled caller leave promptly.
 func (c *ChatsCache) Load(ctx context.Context, onProgress ProgressFunc, refresh bool) (*ChatsSnapshot, error) {
 	f, snap, err := c.join(ctx, refresh)
 	if f == nil {
 		return snap, err
 	}
-	defer f.watch(ctx, onProgress)()
+	defer f.watch(onProgress)()
 	return f.wait(ctx)
 }
 
@@ -170,7 +174,7 @@ func (c *ChatsCache) newest() *ChatsSnapshot {
 // startLocked starts a new load. c.mu must be held.
 func (c *ChatsCache) startLocked() *chatsFlight {
 	c.started++
-	f := &chatsFlight{seq: c.started, done: make(chan struct{}), watchers: make(map[int]progressWatcher)}
+	f := &chatsFlight{seq: c.started, done: make(chan struct{})}
 	c.flight = f
 	go c.run(f)
 	return f
@@ -213,36 +217,46 @@ func (c *ChatsCache) retainLocked(snap *ChatsSnapshot) {
 }
 
 // watch subscribes onProgress to f's progress until the returned func is
-// called or ctx ends. A nil onProgress hears nothing.
-func (f *chatsFlight) watch(ctx context.Context, onProgress ProgressFunc) func() {
+// called; once it returns, onProgress is not called again. A nil onProgress
+// hears nothing.
+func (f *chatsFlight) watch(onProgress ProgressFunc) func() {
 	if onProgress == nil {
 		return func() {}
 	}
+	w := &progressWatcher{onProgress: onProgress}
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	id := f.nextID
-	f.nextID++
-	f.watchers[id] = progressWatcher{ctx: ctx, onProgress: onProgress}
+	f.watchers = append(f.watchers, w)
+	f.mu.Unlock()
 	return func() {
 		f.mu.Lock()
-		defer f.mu.Unlock()
-		delete(f.watchers, id)
+		f.watchers = slices.DeleteFunc(f.watchers, func(o *progressWatcher) bool { return o == w })
+		f.mu.Unlock()
+		w.mu.Lock()
+		w.left = true
+		w.mu.Unlock()
 	}
 }
 
 // progress relays the load's progress to the callers waiting on it. The
 // callbacks write to the network, so they run outside f.mu: holding it would
 // stall every caller joining or leaving the load behind one slow write. A
-// caller may leave between the snapshot and its callback; its ended ctx keeps
-// that late callback from reaching it.
+// caller that leaves after the watchers are copied is skipped by its left
+// flag.
 func (f *chatsFlight) progress(current int, message string) {
 	f.mu.Lock()
-	watchers := slices.Collect(maps.Values(f.watchers))
+	watchers := slices.Clone(f.watchers)
 	f.mu.Unlock()
 	for _, w := range watchers {
-		if w.ctx.Err() == nil {
-			w.onProgress(current, message)
-		}
+		w.relay(current, message)
+	}
+}
+
+// relay calls w's onProgress unless its caller has left.
+func (w *progressWatcher) relay(current int, message string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.left {
+		w.onProgress(current, message)
 	}
 }
 
