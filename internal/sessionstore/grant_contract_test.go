@@ -16,23 +16,26 @@ import (
 
 const testGrantFamily = "fedcba9876543210fedcba9876543210"
 
-func TestGCSGrantCorruptionFailsWithoutOverwrite(t *testing.T) {
-	store := NewTestGCS(t)
-	ctx := t.Context()
-	object := store.bucket.Object(grantObjectName(testGrantFamily))
-	w := object.NewWriter(ctx)
-	_, err := io.WriteString(w, "not-json")
-	require.NoError(t, err)
-	require.NoError(t, w.Close())
+// TestUndecodableGrantIsDead pins that a grant record that does not decode
+// means what an absent one means: RotateGrant reports GrantMissing and
+// RevokeGrant succeeds, rather than failing as a retryable error until the
+// sweep deletes the record. The record is left for the sweep, not rewritten.
+func TestUndecodableGrantIsDead(t *testing.T) {
+	for name, b := range backends(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			writeRawGrant(t, b, testGrantFamily, "not-json")
+			store := Encrypted(b, newCipher(t, testIssuer, newKey(t)))
 
-	_, err = Encrypted(store, newCipher(t, testIssuer, newKey(t))).RotateGrant(ctx, testGrantFamily, 0, time.Now())
-	require.ErrorIs(t, err, errUndecodableGrant)
-	r, err := object.NewReader(ctx)
-	require.NoError(t, err)
-	data, err := io.ReadAll(r)
-	require.NoError(t, err)
-	require.NoError(t, r.Close())
-	assert.Equal(t, "not-json", string(data), "a failed read must not rewrite authorization state")
+			rotation, err := store.RotateGrant(ctx, testGrantFamily, 0, time.Now())
+			require.NoError(t, err)
+			assert.Equal(t, GrantMissing, rotation)
+			require.NoError(t, store.RevokeGrant(ctx, testGrantFamily))
+
+			_, _, err = b.LoadGrant(ctx, testGrantFamily)
+			require.ErrorIs(t, err, errUndecodableGrant, "the record must be left for the sweep, not rewritten")
+		})
+	}
 }
 
 // TestGrantLoadsPersistedRecord pins the persisted grant JSON: a record written

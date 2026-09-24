@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -106,7 +107,8 @@ type SessionRef struct {
 type GrantRotation int
 
 const (
-	// GrantMissing means the family does not exist or has expired.
+	// GrantMissing means the family does not exist, has expired, or its
+	// record does not decode.
 	GrantMissing GrantRotation = iota
 	// GrantReplay means a stale generation (or a revoked family) was presented;
 	// the whole family is now revoked.
@@ -170,12 +172,13 @@ type Store interface {
 	// and returns GrantReplay.
 	RotateGrant(ctx context.Context, family string, expected int64, now time.Time) (GrantRotation, error)
 	// RevokeGrant marks family revoked so none of its refresh tokens rotate
-	// again. A missing family is already dead.
+	// again. A missing family, or one whose record does not decode, is already
+	// dead.
 	RevokeGrant(ctx context.Context, family string) error
 	// SweepAuthState deletes grant records that are expired at now, and ones
-	// that cannot be decoded: those can never rotate or be revoked, so they
-	// would otherwise fail every sweep forever. It returns the families of the
-	// undecodable records it deleted, whose refresh tokens are now dead. A
+	// that cannot be decoded, which RotateGrant and RevokeGrant already treat
+	// as absent. It returns the families of the undecodable records it
+	// deleted. A
 	// record it cannot read or delete is skipped, so one bad record cannot
 	// stall the sweep of every other; the failures are joined into the
 	// returned error. When ctx ends it stops and returns only ctx's error.
@@ -330,9 +333,18 @@ var errGrantAbsent = errors.New("sessionstore: grant not found")
 // there first, in which case it retries on the fresh record. change reports
 // whether anything should be written; its last call is the one whose record
 // was stored.
+//
+// A record that does not decode is dead, exactly like an absent one: nothing
+// can read its generation, so none of its refresh tokens can ever rotate, and
+// retrying cannot change that. It yields errGrantAbsent and is left as it is
+// for SweepAuthState to delete.
 func updateGrant(ctx context.Context, b backend, family string, change func(GrantRecord) (GrantRecord, bool)) error {
 	for range grantCASAttempts {
 		grant, version, err := b.LoadGrant(ctx, family)
+		if errors.Is(err, errUndecodableGrant) {
+			slog.Warn("grant record does not decode; treating its family as dead", "family", family, "err", err)
+			return errGrantAbsent
+		}
 		if err != nil {
 			return fmt.Errorf("loading grant: %w", err)
 		}

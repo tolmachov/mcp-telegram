@@ -223,7 +223,7 @@ func TestGrantSweepReportsUndecodableRecords(t *testing.T) {
 	})
 	a.runSweep(t.Context())
 	assert.Contains(t, logs.String(),
-		`level=WARN msg="oauth state sweep: deleted an undecodable grant record; its refresh tokens are dead" family=`+family)
+		`level=WARN msg="oauth state sweep: deleted an undecodable grant record" family=`+family)
 	assert.Contains(t, logs.String(), `level=ERROR msg="oauth state sweep failed" err=boom`)
 }
 

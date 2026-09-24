@@ -75,7 +75,7 @@ func (a *AuthServer) runSweep(ctx context.Context) {
 	a.runIsolated("grant sweep", func() {
 		undecodable, err := a.store.SweepAuthState(ctx, a.now())
 		for _, family := range undecodable {
-			a.logger.Warn("oauth state sweep: deleted an undecodable grant record; its refresh tokens are dead",
+			a.logger.Warn("oauth state sweep: deleted an undecodable grant record",
 				"family", family)
 		}
 		if err != nil && ctx.Err() == nil {
