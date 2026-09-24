@@ -151,6 +151,12 @@ type userPool struct {
 	// the header RequireBearerToken sends on token failures.
 	wwwAuthenticate string
 	wake            chan struct{}
+	// closing tracks the assemblies being closed off the request path; Close
+	// waits for them. closed (under mu) makes closeAssembly close in place
+	// once Close has started, so no close is added to closing after Close
+	// began waiting.
+	closing sync.WaitGroup
+	closed  bool
 }
 
 func newUserPool(baseCtx context.Context, build userHandlerBuilder, dropSession sessionDropper, wwwAuthenticate string, logger *slog.Logger) *userPool {
@@ -449,7 +455,7 @@ func (p *userPool) countForUserLocked(id tgid.UserID) int {
 // connection is freed after a revoke. It is best-effort
 // cleanup, NOT the correctness mechanism: revocation is guaranteed by the
 // durable tombstone (the refresh gate checks Revoked). It removes the entry
-// from the map immediately. Idle entries close synchronously; busy entries
+// from the map immediately. Idle entries start closing at once; busy entries
 // drain until their last release or the centralised janitor reaches userPoolEvictGrace.
 func (p *userPool) EvictSession(userID tgid.UserID, sid string) {
 	key := poolKey{id: userID, sid: sid}
@@ -514,8 +520,8 @@ func (p *userPool) nextSweepDelay() time.Duration {
 // evictIdle removes every evictable entry that has been idle past
 // userPoolIdleTTL. In-flight requests (including hanging SSE streams) hold
 // inflight > 0 and are never evicted. Teardown (disconnecting the Telegram
-// client) runs after the pool lock is released so a slow close cannot stall
-// other requests.
+// client) runs in the background, so a slow close cannot stall the janitor
+// or other requests.
 func (p *userPool) evictIdle() {
 	type victim struct {
 		key    poolKey
@@ -583,22 +589,44 @@ func (p *userPool) finalizeLocked(e *userEntry) io.Closer {
 	return e.asm
 }
 
+// closeAssembly closes an evicted assembly in the background: disconnecting
+// its Telegram client can take a while, and the request that evicted it must
+// not wait for that. Close waits for every close started here. Once Close has
+// begun, a straggler (a build that finished after it) closes in place.
 func (p *userPool) closeAssembly(key poolKey, closer io.Closer) {
 	if closer == nil {
 		return
 	}
+	p.mu.Lock()
+	closed := p.closed
+	if !closed {
+		p.closing.Add(1)
+	}
+	p.mu.Unlock()
+	if closed {
+		p.closeLogged(key, closer)
+		return
+	}
+	go func() {
+		defer p.closing.Done()
+		p.closeLogged(key, closer)
+	}()
+}
+
+func (p *userPool) closeLogged(key poolKey, closer io.Closer) {
 	if err := closer.Close(); err != nil {
 		p.logger.Warn("closing evicted user assembly failed", "user", key.id, "session", key.sid, "err", err)
 	}
 }
 
-// Close tears down every pooled assembly. Called after the HTTP server's
-// graceful drain; the drain is bounded (see serveHTTP), so requests that
-// outlive it — hanging SSE streams at shutdown — are force-closed first and
-// may observe a disconnected Telegram client. That is the accepted shutdown
-// trade-off.
+// Close tears down every pooled assembly and waits for the evicted ones still
+// closing. Called after the HTTP server's graceful drain; the drain is bounded
+// (see serveHTTP), so requests that outlive it — hanging SSE streams at
+// shutdown — are force-closed first and may observe a disconnected Telegram
+// client. That is the accepted shutdown trade-off.
 func (p *userPool) Close() error {
 	p.mu.Lock()
+	p.closed = true
 	all := make(map[*userEntry]struct{}, len(p.entries)+len(p.retired))
 	for _, e := range p.entries {
 		all[e] = struct{}{}
@@ -621,5 +649,6 @@ func (p *userPool) Close() error {
 			errs = append(errs, err)
 		}
 	}
+	p.closing.Wait()
 	return errors.Join(errs...)
 }

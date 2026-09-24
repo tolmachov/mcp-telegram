@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -65,7 +64,7 @@ func TestUserPoolServeHTTPRejectsMissingIdentity(t *testing.T) {
 	pool := newUserPool(t.Context(), func(context.Context, *authsrv.UserIdentity) (pooledAssembly, error) {
 		t.Fatal("builder must not run for an unauthenticated request")
 		return nil, nil
-	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, slog.New(slog.DiscardHandler))
 	recorder := httptest.NewRecorder()
 	pool.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/", nil))
 	if recorder.Code != http.StatusUnauthorized {
@@ -76,7 +75,7 @@ func TestUserPoolServeHTTPRejectsMissingIdentity(t *testing.T) {
 func TestUserPoolLimitsSessionlessInitializePerUser(t *testing.T) {
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		return okAssembly(), nil
-	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, slog.New(slog.DiscardHandler))
 	for i := range initializeBurst + 1 {
 		req := httptest.NewRequest(http.MethodPost, "/", nil)
 		rec := httptest.NewRecorder()
@@ -115,8 +114,6 @@ func countClose(n *atomic.Int64) func() { return func() { n.Add(1) } }
 // okAssembly is a healthy build with a no-op close.
 func okAssembly() *fakeAssembly { return newFakeAssembly(func() {}, healthy) }
 
-func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
-
 // healthy is the probe of an assembly whose client never stops.
 func healthy() error { return nil }
 
@@ -152,7 +149,7 @@ func TestUserPoolBuildsOncePerUser(t *testing.T) {
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		builds.Add(1)
 		return okAssembly(), nil
-	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, slog.New(slog.DiscardHandler))
 
 	for range 3 {
 		if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
@@ -177,7 +174,7 @@ func TestUserPoolIndependentSessionsPerUser(t *testing.T) {
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		builds.Add(1)
 		return okAssembly(), nil
-	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, slog.New(slog.DiscardHandler))
 
 	if rec := poolRequestSID(t, pool, 1, "aaaa"); rec.Code != http.StatusOK {
 		t.Fatalf("session A status = %d, want 200", rec.Code)
@@ -205,12 +202,13 @@ func TestUserPoolEvictSession(t *testing.T) {
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		builds.Add(1)
 		return newFakeAssembly(countClose(&closes), healthy), nil
-	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, slog.New(slog.DiscardHandler))
 
 	if rec := poolRequestSID(t, pool, 1, "aaaa"); rec.Code != http.StatusOK {
 		t.Fatalf("build status = %d, want 200", rec.Code)
 	}
 	pool.EvictSession(1, "aaaa")
+	pool.closing.Wait()
 	if got := closes.Load(); got != 1 {
 		t.Errorf("evicted session closed %d times, want 1", got)
 	}
@@ -233,7 +231,7 @@ func TestUserPoolEvictSessionDefersBusyClose(t *testing.T) {
 	var closes atomic.Int64
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		return newFakeAssembly(countClose(&closes), healthy), nil
-	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, slog.New(slog.DiscardHandler))
 
 	if rec := poolRequestSID(t, pool, 1, "aaaa"); rec.Code != http.StatusOK {
 		t.Fatalf("build status = %d, want 200", rec.Code)
@@ -245,6 +243,7 @@ func TestUserPoolEvictSessionDefersBusyClose(t *testing.T) {
 	pool.mu.Unlock()
 
 	pool.EvictSession(1, "aaaa")
+	pool.closing.Wait()
 	if got := closes.Load(); got != 0 {
 		t.Errorf("busy entry closed %d times during evict; want 0 (deferred)", got)
 	}
@@ -253,6 +252,7 @@ func TestUserPoolEvictSessionDefersBusyClose(t *testing.T) {
 	}
 	// The last in-flight request releasing closes it exactly once.
 	pool.release(e)
+	pool.closing.Wait()
 	if got := closes.Load(); got != 1 {
 		t.Errorf("entry closed %d times after release; want 1", got)
 	}
@@ -264,7 +264,7 @@ func TestUserPoolEvictSessionDefersBusyClose(t *testing.T) {
 func TestUserPoolPerUserCap(t *testing.T) {
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		return okAssembly(), nil
-	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, slog.New(slog.DiscardHandler))
 
 	// Another user's assembly must survive the churn below.
 	if rec := poolRequestSID(t, pool, 2, "bbbb"); rec.Code != http.StatusOK {
@@ -300,7 +300,7 @@ func TestUserPoolRefusedAtBuildDeletesSessionAnd401s(t *testing.T) {
 	drops := &dropRecorder{}
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		return nil, fmt.Errorf("connecting: %w", tgclient.ErrSessionUnauthorized)
-	}, drops.drop, testWWWAuthenticate, discardLogger())
+	}, drops.drop, testWWWAuthenticate, slog.New(slog.DiscardHandler))
 
 	rec := poolRequestSID(t, pool, 7, "dead")
 	if rec.Code != http.StatusUnauthorized {
@@ -325,7 +325,7 @@ func TestUserPoolBoundsTheRefusedSessionDelete(t *testing.T) {
 		deadline, ok := ctx.Deadline()
 		bounded = ok && time.Until(deadline) <= sessionDropTimeout
 		return errors.New("bucket unavailable")
-	}, testWWWAuthenticate, discardLogger())
+	}, testWWWAuthenticate, slog.New(slog.DiscardHandler))
 
 	if rec := poolRequestSID(t, pool, 7, "dead"); rec.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", rec.Code)
@@ -342,7 +342,7 @@ func TestUserPoolBuildFailureNotCached(t *testing.T) {
 			return nil, errors.New("transient failure")
 		}
 		return okAssembly(), nil
-	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, slog.New(slog.DiscardHandler))
 
 	if rec := poolRequest(t, pool, 5); rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("first request status = %d, want 503", rec.Code)
@@ -355,7 +355,7 @@ func TestUserPoolBuildFailureNotCached(t *testing.T) {
 func TestUserPoolFullRejectsWith503(t *testing.T) {
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		return okAssembly(), nil
-	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, slog.New(slog.DiscardHandler))
 
 	for id := tgid.UserID(1); id <= userPoolMaxUsers; id++ {
 		if rec := poolRequest(t, pool, id); rec.Code != http.StatusOK {
@@ -385,7 +385,7 @@ func TestUserPoolRebuildsDeadAssembly(t *testing.T) {
 			}
 			return nil
 		}), nil
-	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, slog.New(slog.DiscardHandler))
 
 	if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
 		t.Fatalf("first request status = %d, want 200", rec.Code)
@@ -396,30 +396,13 @@ func TestUserPoolRebuildsDeadAssembly(t *testing.T) {
 	if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
 		t.Fatalf("request after client death status = %d, want 200 (rebuild)", rec.Code)
 	}
+	pool.closing.Wait()
 	if got := builds.Load(); got != 2 {
 		t.Errorf("builder ran %d times, want 2", got)
 	}
 	if got := closes.Load(); got != 1 {
 		t.Errorf("dead assembly closed %d times, want 1", got)
 	}
-}
-
-// stoppable is an assembly probe whose client can be stopped with a reason.
-type stoppable struct {
-	mu     sync.Mutex
-	reason error
-}
-
-func (c *stoppable) stop(reason error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.reason = reason
-}
-
-func (c *stoppable) health() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.reason
 }
 
 // TestUserPoolRefusedMidRunDeletesSessionAnd401s pins the running half of a
@@ -430,12 +413,12 @@ func (c *stoppable) health() error {
 func TestUserPoolRefusedMidRunDeletesSessionAnd401s(t *testing.T) {
 	for _, busy := range []bool{false, true} {
 		var builds, closes atomic.Int64
-		client := &stoppable{}
+		client := newFakeClient()
 		drops := &dropRecorder{}
 		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 			builds.Add(1)
-			return newFakeAssembly(countClose(&closes), client.health), nil
-		}, drops.drop, testWWWAuthenticate, discardLogger())
+			return newFakeAssembly(countClose(&closes), client.Err), nil
+		}, drops.drop, testWWWAuthenticate, slog.New(slog.DiscardHandler))
 
 		if rec := poolRequestSID(t, pool, 1, "s"); rec.Code != http.StatusOK {
 			t.Fatalf("first request status = %d, want 200", rec.Code)
@@ -450,6 +433,7 @@ func TestUserPoolRefusedMidRunDeletesSessionAnd401s(t *testing.T) {
 		client.stop(fmt.Errorf("%w: %w", tgclient.ErrSessionUnauthorized, tgerr.New(401, "SESSION_REVOKED")))
 
 		rec := poolRequestSID(t, pool, 1, "s")
+		pool.closing.Wait()
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("busy=%v: status = %d, want 401", busy, rec.Code)
 		}
@@ -470,6 +454,7 @@ func TestUserPoolRefusedMidRunDeletesSessionAnd401s(t *testing.T) {
 				t.Errorf("assembly closed %d times while still held; want 0 (deferred to release)", got)
 			}
 			pool.release(e)
+			pool.closing.Wait()
 		}
 		if got := closes.Load(); got != 1 {
 			t.Errorf("busy=%v: assembly closed %d times, want 1", busy, got)
@@ -485,13 +470,13 @@ func TestUserPoolRefusedMidRunDeletesSessionAnd401s(t *testing.T) {
 func TestUserPoolStoppedClientIsRebuiltNotReauthenticated(t *testing.T) {
 	for _, busy := range []bool{false, true} {
 		var builds, closes atomic.Int64
-		var clients []*stoppable
+		var clients []*fakeClient
 		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 			builds.Add(1)
-			client := &stoppable{}
+			client := newFakeClient()
 			clients = append(clients, client)
-			return newFakeAssembly(countClose(&closes), client.health), nil
-		}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
+			return newFakeAssembly(countClose(&closes), client.Err), nil
+		}, unexpectedDrop(t), testWWWAuthenticate, slog.New(slog.DiscardHandler))
 
 		if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
 			t.Fatalf("first request status = %d, want 200", rec.Code)
@@ -507,6 +492,7 @@ func TestUserPoolStoppedClientIsRebuiltNotReauthenticated(t *testing.T) {
 		if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
 			t.Errorf("busy=%v: status = %d, want 200 (rebuilt)", busy, rec.Code)
 		}
+		pool.closing.Wait()
 		if got := builds.Load(); got != 2 {
 			t.Errorf("busy=%v: builder ran %d times, want 2", busy, got)
 		}
@@ -515,6 +501,7 @@ func TestUserPoolStoppedClientIsRebuiltNotReauthenticated(t *testing.T) {
 				t.Errorf("stopped assembly closed %d times while still held; want 0 (deferred to release)", got)
 			}
 			pool.release(e)
+			pool.closing.Wait()
 		}
 		if got := closes.Load(); got != 1 {
 			t.Errorf("busy=%v: stopped assembly closed %d times, want 1", busy, got)
@@ -531,7 +518,7 @@ func TestUserPoolEvictReleaseTransitionIsAtomic(t *testing.T) {
 		var closes atomic.Int64
 		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 			return nil, errors.New("unused")
-		}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
+		}, unexpectedDrop(t), testWWWAuthenticate, slog.New(slog.DiscardHandler))
 		key := poolKey{id: 1}
 		e := &userEntry{
 			key: key, ready: make(chan struct{}), state: entryActive,
@@ -550,6 +537,7 @@ func TestUserPoolEvictReleaseTransitionIsAtomic(t *testing.T) {
 		close(start)
 		<-done
 		<-done
+		pool.closing.Wait()
 		if got := closes.Load(); got != 1 {
 			t.Fatalf("close count = %d, want exactly 1", got)
 		}
@@ -571,7 +559,7 @@ func TestUserPoolBuilderPanic(t *testing.T) {
 			panic("simulated builder panic")
 		}
 		return okAssembly(), nil
-	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, slog.New(slog.DiscardHandler))
 
 	codes := make(chan int, 2)
 	go func() { codes <- poolRequest(t, pool, 1).Code }()
@@ -621,7 +609,7 @@ func TestUserPoolCloseDuringBuild(t *testing.T) {
 		close(entered)
 		<-release
 		return newFakeAssembly(countClose(&closes), healthy), nil
-	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, slog.New(slog.DiscardHandler))
 
 	done := make(chan int, 1)
 	go func() { done <- poolRequest(t, pool, 1).Code }()
@@ -652,7 +640,7 @@ func TestUserPoolEvictSessionGraceForceClose(t *testing.T) {
 		var closes atomic.Int64
 		pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 			return newFakeAssembly(countClose(&closes), healthy), nil
-		}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
+		}, unexpectedDrop(t), testWWWAuthenticate, slog.New(slog.DiscardHandler))
 		var skew atomic.Int64
 		pool.now = func() time.Time { return time.Now().Add(time.Duration(skew.Load())) }
 		janitorCtx, cancelJanitor := context.WithCancel(t.Context())
@@ -668,8 +656,9 @@ func TestUserPoolEvictSessionGraceForceClose(t *testing.T) {
 		pool.mu.Unlock()
 
 		pool.EvictSession(1, "")
+		pool.closing.Wait()
 		if got := closes.Load(); got != 0 {
-			t.Fatalf("busy entry closed synchronously (%d); the close must wait for release or the grace timer", got)
+			t.Fatalf("busy entry closed before its release (%d); the close must wait for release or the grace timer", got)
 		}
 		skew.Store(int64(2 * userPoolEvictGrace))
 		pool.signalJanitor()
@@ -695,7 +684,7 @@ func TestUserPoolEvictSessionGraceForceClose(t *testing.T) {
 			close(entered)
 			<-release
 			return newFakeAssembly(countClose(&closes), healthy), nil
-		}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
+		}, unexpectedDrop(t), testWWWAuthenticate, slog.New(slog.DiscardHandler))
 		var skew atomic.Int64
 		pool.now = func() time.Time { return time.Now().Add(time.Duration(skew.Load())) }
 
@@ -709,6 +698,7 @@ func TestUserPoolEvictSessionGraceForceClose(t *testing.T) {
 		skew.Store(int64(2 * userPoolEvictGrace))
 		close(release)
 		<-done
+		pool.closing.Wait()
 		if got := closes.Load(); got != 1 {
 			t.Errorf("creator's release must close the evicted build exactly once; closes = %d, want 1", got)
 		}
@@ -720,7 +710,7 @@ func TestUserPoolEvictIdleClosesAssembly(t *testing.T) {
 	now := time.Now()
 	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
 		return newFakeAssembly(func() { closed.Store(true) }, healthy), nil
-	}, unexpectedDrop(t), testWWWAuthenticate, discardLogger())
+	}, unexpectedDrop(t), testWWWAuthenticate, slog.New(slog.DiscardHandler))
 	pool.now = func() time.Time { return now }
 
 	if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
@@ -728,10 +718,43 @@ func TestUserPoolEvictIdleClosesAssembly(t *testing.T) {
 	}
 	now = now.Add(userPoolIdleTTL + time.Minute)
 	pool.evictIdle()
+	pool.closing.Wait()
 	if !closed.Load() {
 		t.Error("idle assembly was not closed by evictIdle")
 	}
 	if pool.size() != 0 {
 		t.Errorf("pool size after eviction = %d, want 0", pool.size())
+	}
+}
+
+// TestUserPoolClosesEvictedAssemblyOffTheRequestPath pins that closing an
+// evicted assembly — disconnecting its Telegram client, which can take a
+// while — never holds up the request that evicted it, and that the pool's
+// Close waits for such a close to finish.
+func TestUserPoolClosesEvictedAssemblyOffTheRequestPath(t *testing.T) {
+	unblock := make(chan struct{})
+	var closes atomic.Int64
+	pool := newUserPool(t.Context(), func(_ context.Context, _ *authsrv.UserIdentity) (pooledAssembly, error) {
+		return newFakeAssembly(func() { <-unblock; closes.Add(1) }, healthy), nil
+	}, unexpectedDrop(t), testWWWAuthenticate, slog.New(slog.DiscardHandler))
+
+	if rec := poolRequest(t, pool, 1); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	pool.EvictSession(1, "") // returns while the close is still blocked
+
+	closed := make(chan error, 1)
+	go func() { closed <- pool.Close() }()
+	select {
+	case <-closed:
+		t.Fatal("Close returned before the evicted assembly finished closing")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(unblock)
+	if err := <-closed; err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := closes.Load(); got != 1 {
+		t.Errorf("evicted assembly closed %d times, want 1", got)
 	}
 }
