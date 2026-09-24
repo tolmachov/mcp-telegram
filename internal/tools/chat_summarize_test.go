@@ -67,7 +67,7 @@ func TestChatSummarizeBuildResult(t *testing.T) {
 		_, out, err := h.buildResult(in, since, end, summarize.Result{Summary: "   "}, errors.New("batch 1/20: boom"))
 		require.Nil(t, out)
 		require.Error(t, err)
-		assert.Equal(t, "Failed to summarize chat 7: batch 1/20: boom.", failureText("SummarizeChat", err))
+		assert.Equal(t, "Failed to summarise chat 7: batch 1/20: boom.", failureText("SummarizeChat", err))
 	})
 }
 

@@ -59,6 +59,6 @@ type LoginFlow interface {
 
 // StartLoginFunc launches a fresh Telegram QR login. The context carries
 // values and gates only startup; the returned flow detaches and runs until it
-// completes, its registry TTL expires, or Abort is called — canceling ctx
+// completes, its registry TTL expires, or Abort is called — cancelling ctx
 // afterwards does NOT stop it.
 type StartLoginFunc func(ctx context.Context) (LoginFlow, error)

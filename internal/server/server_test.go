@@ -501,7 +501,7 @@ func TestSummarizeMisconfigurationDisablesOnlySummarizeChat(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, res.IsError)
 	text := res.Content[0].(*mcp.TextContent).Text
-	assert.Contains(t, text, "Failed to summarize chat 1: summarisation is not available")
+	assert.Contains(t, text, "Failed to summarise chat 1: summarisation is not available")
 	assert.Contains(t, text, "the gemini API key is not set")
 	assert.Contains(t, text, "MCP_SUMMARIZE_GEMINI_API_KEY")
 	assert.Contains(t, text, "Reconnect")

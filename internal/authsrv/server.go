@@ -28,7 +28,7 @@ type AuthServer struct {
 	closed      bool
 
 	// loginCtx carries values to login flows and signals shutdown to the
-	// janitor and the orphan-session sweeper; canceling it (via Close) stops
+	// janitor and the orphan-session sweeper; cancelling it (via Close) stops
 	// both. It does NOT abort in-flight QR flows — those detach from any
 	// context (see StartLoginFunc) and are stopped explicitly by Close
 	// draining the pending registry and calling Abort on each flow.

@@ -25,7 +25,7 @@ func RegisterResources(s *mcp.Server, handlers []ResourceHandler) {
 func jsonResource(uri string, v any) (*mcp.ReadResourceResult, error) {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("marshaling %s: %w", uri, err)
+		return nil, fmt.Errorf("marshalling %s: %w", uri, err)
 	}
 	return &mcp.ReadResourceResult{
 		Contents: []*mcp.ResourceContents{{

@@ -137,7 +137,7 @@ func SummarizeProviderFlag() *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:    SummarizeProvider,
 		Value:   string(summarize.ProviderSampling),
-		Usage:   "Provider for summarization: 'sampling', 'ollama', 'gemini', or 'anthropic'",
+		Usage:   "Provider for summarisation: 'sampling', 'ollama', 'gemini', or 'anthropic'",
 		Sources: cli.EnvVars("MCP_SUMMARIZE_PROVIDER"),
 	}
 }
@@ -145,7 +145,7 @@ func SummarizeProviderFlag() *cli.StringFlag {
 func SummarizeModelFlag() *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:    SummarizeModel,
-		Usage:   "Model for summarization (provider-specific)",
+		Usage:   "Model for summarisation (provider-specific)",
 		Sources: cli.EnvVars("MCP_SUMMARIZE_MODEL"),
 	}
 }
@@ -179,7 +179,7 @@ func SummarizeBatchTokensFlag() *cli.IntFlag {
 	return &cli.IntFlag{
 		Name:    SummarizeBatchTokens,
 		Value:   DefaultSummarizeBatchTokens,
-		Usage:   "Approximate number of tokens per batch for summarization",
+		Usage:   "Approximate number of tokens per batch for summarisation",
 		Sources: cli.EnvVars("MCP_SUMMARIZE_BATCH_TOKENS"),
 	}
 }

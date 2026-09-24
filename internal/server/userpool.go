@@ -141,7 +141,7 @@ type userPool struct {
 	build             userHandlerBuilder
 	// dropSession deletes a stored session Telegram has refused.
 	dropSession sessionDropper
-	// baseCtx is the server-lifetime context builds run on, so canceling one
+	// baseCtx is the server-lifetime context builds run on, so cancelling one
 	// request cannot poison a build other requests will share.
 	baseCtx context.Context
 	now     func() time.Time
@@ -222,7 +222,7 @@ func (p *userPool) serveUser(w http.ResponseWriter, r *http.Request, user *auths
 		return
 	case err != nil:
 		p.logger.Error("building user assembly failed", "user", user.ID, "err", err)
-		http.Error(w, "failed to initialize Telegram client", http.StatusServiceUnavailable)
+		http.Error(w, "failed to initialise Telegram client", http.StatusServiceUnavailable)
 		return
 	}
 	entry.asm.ServeHTTP(w, r)
@@ -231,7 +231,7 @@ func (p *userPool) serveUser(w http.ResponseWriter, r *http.Request, user *auths
 // entryFor returns the caller's entry with inflight already incremented (the
 // caller must release a non-nil entry), building the assembly on first use.
 // Waiting on a concurrent build is bounded by ctx (the request context): a
-// canceled caller stops waiting, while the build itself continues on the
+// cancelled caller stops waiting, while the build itself continues on the
 // pool's base context for the next request to reuse.
 func (p *userPool) entryFor(ctx context.Context, user *authsrv.UserIdentity) (*userEntry, error) {
 	key := poolKeyFor(user)

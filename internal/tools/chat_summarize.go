@@ -31,9 +31,9 @@ func NewChatSummarizeHandler(msgProvider *messages.Provider, summarizer *summari
 
 // SummarizeChatInput is the input for the SummarizeChat tool.
 type SummarizeChatInput struct {
-	MaxMessages int    `json:"max_messages,omitempty" jsonschema:"Maximum messages sent to the summarizer (default 2000, hard maximum 10000)."`
+	MaxMessages int    `json:"max_messages,omitempty" jsonschema:"Maximum messages sent to the summariser (default 2000, hard maximum 10000)."`
 	ChatID      int64  `json:"chat_id" jsonschema:"The chat ID to summarize"`
-	Goal        string `json:"goal" jsonschema:"What you want from the summary. Examples: 'key points and decisions'\\, 'extract all action items and deadlines'\\, 'analyze sentiment and mood'\\, 'identify top 5 discussed topics'\\, 'create meeting minutes'"`
+	Goal        string `json:"goal" jsonschema:"What you want from the summary. Examples: 'key points and decisions'\\, 'extract all action items and deadlines'\\, 'analyse sentiment and mood'\\, 'identify top 5 discussed topics'\\, 'create meeting minutes'"`
 	Period      string `json:"period,omitempty" jsonschema:"Time period to look back over (default: 'month')"`
 	Since       string `json:"since,omitempty" jsonschema:"Date to start from (alternative to period): YYYY-MM-DD or YYYY-MM-DD HH:MM:SS in UTC\\, or RFC3339\\, e.g. '2024-01-15'"`
 }
@@ -56,7 +56,7 @@ type SummarizeChatResult struct {
 	Summary           string `json:"summary"`
 	MessagesProcessed int    `json:"messages_processed"`
 	Truncated         bool   `json:"truncated"`
-	// Partial is true when summarization stopped early (e.g. a provider error
+	// Partial is true when summarisation stopped early (e.g. a provider error
 	// on a later batch) and Summary holds only the batches completed so far.
 	Partial bool   `json:"partial,omitempty"`
 	Warning string `json:"warning,omitempty"`
@@ -73,7 +73,7 @@ const MetaWarning = "mcp-telegram/warning"
 func (h *ChatSummarizeHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "SummarizeChat",
-		Description: "Use this whenever the user asks to summarize, digest, recap, or 'catch up on' a Telegram chat. Prefer it over fetching messages with GetMessages and summarizing them yourself: it performs rolling/incremental summarization server-side, so it handles long histories (weeks/months, hundreds of messages) without loading every message into the conversation context. Specify a goal (e.g. 'key decisions', 'action items', 'what did I miss') and a time period (day/week/month) or a since date.",
+		Description: "Use this whenever the user asks to summarise, digest, recap, or 'catch up on' a Telegram chat. Prefer it over fetching messages with GetMessages and summarising them yourself: it performs rolling/incremental summarisation server-side, so it handles long histories (weeks/months, hundreds of messages) without loading every message into the conversation context. Specify a goal (e.g. 'key decisions', 'action items', 'what did I miss') and a time period (day/week/month) or a since date.",
 		InputSchema: inputSchemaWithEnums[SummarizeChatInput](map[string][]string{
 			"period": summarize.PeriodNames(),
 		}),
@@ -159,7 +159,7 @@ func (h *ChatSummarizeHandler) buildResult(in SummarizeChatInput, since, periodE
 		out.Warning = strings.TrimSpace(result.Warning + " " + fmt.Sprintf("Summarisation stopped early: %v.", err))
 		return &mcp.CallToolResult{Meta: mcp.Meta{MetaWarning: out.Warning}}, out, nil
 	}
-	return nil, nil, failed(fmt.Sprintf("summarize chat %d", in.ChatID), err)
+	return nil, nil, failed(fmt.Sprintf("summarise chat %d", in.ChatID), err)
 }
 
 func (h *ChatSummarizeHandler) parseSinceTime(in SummarizeChatInput) (time.Time, error) {

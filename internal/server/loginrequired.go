@@ -124,7 +124,7 @@ func (s *Server) runLoginRequired(ctx context.Context, reason string) error {
 	})
 	tools.AddTool(srv, &mcp.Tool{
 		Name: loginRequiredTool,
-		Description: "mcp-telegram is NOT connected to Telegram — every Telegram tool (sending, reading, searching, summarizing) is missing from this server for that reason. " +
+		Description: "mcp-telegram is NOT connected to Telegram — every Telegram tool (sending, reading, searching, summarising) is missing from this server for that reason. " +
 			"Reason: " + reason + " " +
 			"Call this to re-check the live authorization state; it reports whether a login performed elsewhere has taken effect.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
@@ -140,7 +140,7 @@ func (s *Server) runLoginRequired(ctx context.Context, reason string) error {
 		if errors.Is(err, context.Canceled) {
 			// Host shutdown, not a failure. Returning it would exit non-zero
 			// and read as a crash to whatever supervises the process.
-			s.logger.Info("login-required server stopped", "reason", "context canceled")
+			s.logger.Info("login-required server stopped", "reason", "context cancelled")
 			return nil
 		}
 		return fmt.Errorf("running login-required server: %w", err)

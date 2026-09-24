@@ -25,7 +25,7 @@ func (f providerFunc) Summarize(ctx context.Context, req Request) (string, error
 	return f(ctx, req)
 }
 
-// fixedSummarizer summarizes through llm with the given batch budget.
+// fixedSummarizer summarises through llm with the given batch budget.
 func fixedSummarizer(llm Provider, batchTokens int) *Summarizer {
 	return &Summarizer{name: ProviderSampling, providerFor: fixedProvider(llm), batchTokens: batchTokens}
 }
@@ -60,8 +60,8 @@ func TestNewValidatesConfig(t *testing.T) {
 		{"ollama missing url", Config{Provider: ProviderOllama, BatchTokens: 1}, "OLLAMA_URL is required"},
 		{"anthropic", Config{Provider: ProviderAnthropic, BatchTokens: 1, AnthropicAPIKey: key("test-key"), GeminiAPIKey: unread(t)}, ""},
 		{"anthropic missing key", Config{Provider: ProviderAnthropic, BatchTokens: 1, AnthropicAPIKey: key("")}, "the anthropic API key is not set: --summarize-provider=anthropic needs MCP_SUMMARIZE_ANTHROPIC_API_KEY"},
-		{"empty", Config{BatchTokens: 1}, "invalid summarization provider"},
-		{"unknown", Config{Provider: "openai", BatchTokens: 1}, "invalid summarization provider"},
+		{"empty", Config{BatchTokens: 1}, "invalid summarisation provider"},
+		{"unknown", Config{Provider: "openai", BatchTokens: 1}, "invalid summarisation provider"},
 		{"zero batch tokens", Config{Provider: ProviderSampling}, "batch-tokens must be positive"},
 		{"negative batch tokens", Config{Provider: ProviderSampling, BatchTokens: -5}, "batch-tokens must be positive"},
 	}

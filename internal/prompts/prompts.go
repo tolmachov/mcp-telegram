@@ -17,7 +17,7 @@ import (
 func Register(s *mcp.Server) {
 	s.AddPrompt(&mcp.Prompt{
 		Name:        "daily-digest",
-		Description: "Summarize what happened across all chats over a recent period (default: today). Walks unread/active chats and produces a per-chat digest.",
+		Description: "Summarise what happened across all chats over a recent period (default: today). Walks unread/active chats and produces a per-chat digest.",
 		Arguments: []*mcp.PromptArgument{
 			{Name: "period", Description: "Time period: 'day' (default), 'week', or 'month'"},
 		},

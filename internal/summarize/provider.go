@@ -41,12 +41,12 @@ func (r Request) userContent() (string, error) {
 	}{r.Goal, r.PreviousSummary, r.Messages}
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("marshaling provider input: %w", err)
+		return "", fmt.Errorf("marshalling provider input: %w", err)
 	}
 	return string(raw), nil
 }
 
-// ProviderName represents a valid summarization provider name.
+// ProviderName represents a valid summarisation provider name.
 type ProviderName string
 
 const (
@@ -56,7 +56,7 @@ const (
 	ProviderAnthropic ProviderName = "anthropic"
 )
 
-// Config holds configuration for summarization providers.
+// Config holds configuration for summarisation providers.
 type Config struct {
 	Provider  ProviderName // "sampling", "ollama", "gemini", or "anthropic"
 	Model     string       // provider-specific model name
@@ -67,7 +67,7 @@ type Config struct {
 	// A nil reader is a key that is not set.
 	GeminiAPIKey    func() (string, error)
 	AnthropicAPIKey func() (string, error)
-	BatchTokens     int // approximate number of tokens per batch for summarization
+	BatchTokens     int // approximate number of tokens per batch for summarisation
 }
 
 // providerFor builds the provider cfg names, reading the one setting that
@@ -94,7 +94,7 @@ func (c Config) providerFor() (func(*mcp.ServerSession) Provider, error) {
 		}
 		return fixedProvider(NewAnthropicProvider(key, c.Model)), nil
 	default:
-		return nil, fmt.Errorf("invalid summarization provider %q (must be 'sampling', 'ollama', 'gemini', or 'anthropic')", c.Provider)
+		return nil, fmt.Errorf("invalid summarisation provider %q (must be 'sampling', 'ollama', 'gemini', or 'anthropic')", c.Provider)
 	}
 }
 
@@ -153,7 +153,7 @@ const httpMaxResponseBytes = 10 << 20
 func postJSON(ctx context.Context, client *http.Client, providerName, url string, headers map[string]string, reqBody, respBody any) error {
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return fmt.Errorf("marshaling request: %w", err)
+		return fmt.Errorf("marshalling request: %w", err)
 	}
 
 	for attempt := 1; attempt <= 3; attempt++ {
@@ -180,7 +180,7 @@ func postJSON(ctx context.Context, client *http.Client, providerName, url string
 
 		if resp.StatusCode == http.StatusOK {
 			if err := json.Unmarshal(raw, respBody); err != nil {
-				return fmt.Errorf("unmarshaling response: %w", err)
+				return fmt.Errorf("unmarshalling response: %w", err)
 			}
 			return nil
 		}

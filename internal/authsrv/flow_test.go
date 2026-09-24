@@ -1230,7 +1230,7 @@ func TestRevokeInvalidatesLiveSession(t *testing.T) {
 		"revoke must invalidate the session's live assembly")
 }
 
-// TestRefreshRejectsMalformedSid pins the storage-boundary defense: a token
+// TestRefreshRejectsMalformedSid pins the storage-boundary defence: a token
 // carrying a non-hex sid is rejected before the sid can reach the store.
 func TestRefreshRejectsMalformedSid(t *testing.T) {
 	store := sessionstoretest.New(t)

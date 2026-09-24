@@ -80,7 +80,7 @@ func (s *Server) serveHTTP(ctx context.Context, handler http.Handler, addr strin
 		select {
 		case <-ctx.Done():
 			// Shutdown deliberately starts from a fresh Background context: ctx
-			// is already canceled here, so reusing it would abort the graceful
+			// is already cancelled here, so reusing it would abort the graceful
 			// drain immediately.
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()

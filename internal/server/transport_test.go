@@ -84,7 +84,7 @@ func waitForServer(t *testing.T, url string) *http.Response {
 }
 
 // TestServeHTTPServesAndShutsDown drives the production HTTP scaffolding:
-// requests reach the wrapped handler, and canceling the context shuts the
+// requests reach the wrapped handler, and cancelling the context shuts the
 // server down cleanly.
 func TestServeHTTPServesAndShutsDown(t *testing.T) {
 	s := testServer(t)
@@ -115,7 +115,7 @@ func TestServeHTTPServesAndShutsDown(t *testing.T) {
 	}
 }
 
-// TestServeHTTPCrossOriginProtection verifies the DNS-rebinding defense: a
+// TestServeHTTPCrossOriginProtection verifies the DNS-rebinding defence: a
 // state-changing request marked cross-site by Sec-Fetch-Site is rejected
 // before reaching the handler, while same-origin requests pass.
 func TestServeHTTPCrossOriginProtection(t *testing.T) {

@@ -110,7 +110,7 @@ func TestRequestLogDegradedSuccessWarns(t *testing.T) {
 	// partial summary after a late provider failure — must escalate to Warn,
 	// not be buried at Info. This is the motivating bug's surviving edge.
 	res := &mcp.CallToolResult{
-		Meta:    mcp.Meta{tools.MetaWarning: "summarization stopped early: gemini: 503"},
+		Meta:    mcp.Meta{tools.MetaWarning: "summarisation stopped early: gemini: 503"},
 		Content: []mcp.Content{&mcp.TextContent{Text: "partial summary"}},
 	}
 	out := runMiddleware(t, slog.LevelInfo, 42, methodCallTool,

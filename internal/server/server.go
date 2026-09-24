@@ -48,7 +48,7 @@ func (s *Server) stdioTransport() *mcp.IOTransport {
 	}
 }
 
-const happyInstructions = "Use SearchChats or GetChats to find chat IDs before calling other tools. Chat IDs are numeric. If you only have a username, use ResolveUsername to get the chat ID. When the user asks to message someone, always confirm the recipient before sending. When the user asks to summarize, digest, or recap a chat, call SummarizeChat rather than fetching messages with GetMessages and summarizing them yourself — it summarizes long histories server-side without loading every message into context."
+const happyInstructions = "Use SearchChats or GetChats to find chat IDs before calling other tools. Chat IDs are numeric. If you only have a username, use ResolveUsername to get the chat ID. When the user asks to message someone, always confirm the recipient before sending. When the user asks to summarise, digest, or recap a chat, call SummarizeChat rather than fetching messages with GetMessages and summarising them yourself — it summarises long histories server-side without loading every message into context."
 
 // The blocked-startup messages. Over stdio they become the login-required
 // server's instructions and tool description (so the model reads them) and

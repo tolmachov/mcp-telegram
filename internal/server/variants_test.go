@@ -242,7 +242,7 @@ func TestValidVariant(t *testing.T) {
 // be first (priority 0, what non-negotiating clients silently receive), IDs
 // must be unique (WithVariant panics otherwise, but we'd rather fail here), and
 // each row's mode must match its ID. A reorder or typo here is a silent
-// behavior change everywhere else, so pin it.
+// behaviour change everywhere else, so pin it.
 func TestVariantDefsTableInvariants(t *testing.T) {
 	require.NotEmpty(t, variantDefs)
 	assert.Equal(t, variantFull, variantDefs[0].meta.ID, "full must be at index 0 (priority 0, default for non-negotiating clients)")
@@ -263,7 +263,7 @@ func TestVariantDefsTableInvariants(t *testing.T) {
 	}
 }
 
-// TestServeModeFlags documents the mode → behavior mapping that newInner and
+// TestServeModeFlags documents the mode → behaviour mapping that newInner and
 // buildVariantsServer branch on.
 func TestServeModeFlags(t *testing.T) {
 	assert.False(t, modeFull.compacts())

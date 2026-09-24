@@ -26,7 +26,7 @@ const (
 )
 
 // Public prefixes of the artifacts the server issues. They make token kinds
-// recognizable in logs and bug reports without decryption.
+// recognisable in logs and bug reports without decryption.
 const (
 	prefixCode     = "mcp_ac_"
 	prefixAccess   = "mcp_at_"

@@ -9,7 +9,7 @@ import (
 const defaultHTTPAddr = "127.0.0.1:8080"
 
 // ResolveHTTPAddr keeps the safe loopback default for ordinary hosts while
-// honoring Cloud Run's container contract. Cloud Run does not expand variable
+// honouring Cloud Run's container contract. Cloud Run does not expand variable
 // references inside another environment variable, so MCP_HTTP_ADDR=$PORT would
 // be incorrect; the application must consume PORT itself.
 func ResolveHTTPAddr(configured string, explicitlySet bool, lookupEnv func(string) (string, bool)) (string, error) {

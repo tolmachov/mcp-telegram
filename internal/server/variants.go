@@ -85,7 +85,7 @@ var variantDefs = []variantDef{
 	{
 		meta: variants.ServerVariant{
 			ID:          variantResearch,
-			Description: "Telegram research subset with no Telegram or filesystem mutations. Summarization may send selected message text to the configured external LLM provider.",
+			Description: "Telegram research subset with no Telegram or filesystem mutations. Summarisation may send selected message text to the configured external LLM provider.",
 			Hints:       map[string]string{variants.HintUseCase: "autonomous-agent", variants.HintContextSize: "compact"},
 			Status:      variants.Experimental,
 		},

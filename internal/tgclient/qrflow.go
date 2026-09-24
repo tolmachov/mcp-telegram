@@ -131,7 +131,7 @@ func (f *QRFlow) run(ctx context.Context, client *telegram.Client, dispatcher tg
 
 // passwordLoop services the 2FA branch: surface PasswordNeeded, then try
 // submitted passwords until one works, the attempt budget is exhausted, or
-// the flow is canceled.
+// the flow is cancelled.
 func (f *QRFlow) passwordLoop(ctx context.Context, client *telegram.Client) (*tg.AuthAuthorization, error) {
 	for range qrPasswordAttempts {
 		f.setState(QRPasswordNeeded)

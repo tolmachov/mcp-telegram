@@ -79,7 +79,7 @@ func (a *AuthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	// The login flow outlives this request and detaches from any context; we
 	// pass loginCtx only to carry values, not for cancellation (Close stops
-	// flows by aborting them via the registry, not by canceling this ctx).
+	// flows by aborting them via the registry, not by cancelling this ctx).
 	// Passing r.Context() would be wrong regardless — the flow must not die
 	// when this request returns.
 	flow, err := a.startLogin(loginCtx)

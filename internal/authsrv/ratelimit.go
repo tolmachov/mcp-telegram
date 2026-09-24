@@ -12,7 +12,7 @@ import (
 
 // Per-IP budget for auth endpoints. Generous for interactive use, tight
 // enough to blunt token-grinding: sealed blobs are 256-bit AEAD, so this is
-// defense in depth, not the security boundary. Cloud Armor is the answer to
+// defence in depth, not the security boundary. Cloud Armor is the answer to
 // volumetric abuse.
 const (
 	rateLimitPerSecond = 5

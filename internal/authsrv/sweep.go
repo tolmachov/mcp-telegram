@@ -23,7 +23,7 @@ const (
 
 // sessionSweeper periodically deletes unreachable session blobs. Same
 // lifecycle as the pending-login janitor: runs until ctx (loginCtx) is
-// canceled; Close waits on sweepDone.
+// cancelled; Close waits on sweepDone.
 func (a *AuthServer) sessionSweeper(ctx context.Context) {
 	defer close(a.sweepDone)
 	t := time.NewTimer(sweepInitialDelay)

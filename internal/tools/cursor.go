@@ -27,7 +27,7 @@ import (
 func encodeCursor[T any](env T) string {
 	payload, err := json.Marshal(env)
 	if err != nil {
-		panic(fmt.Sprintf("marshaling cursor envelope: %v", err))
+		panic(fmt.Sprintf("marshalling cursor envelope: %v", err))
 	}
 	return base64.RawURLEncoding.EncodeToString(payload)
 }

@@ -211,7 +211,7 @@ func (a *AuthServer) sweepExpiredPending() {
 	a.abortLogins(stale...)
 }
 
-// janitor periodically sweeps expired pending logins until ctx is canceled.
+// janitor periodically sweeps expired pending logins until ctx is cancelled.
 func (a *AuthServer) janitor(ctx context.Context) {
 	defer close(a.janitorDone)
 	t := time.NewTicker(time.Minute)
@@ -335,7 +335,7 @@ func (a *AuthServer) finalizeLogin(ctx context.Context, w http.ResponseWriter, p
 
 	sc, err := openBlob(a.sealer, stateBlob, p.request, a.now())
 	if err != nil {
-		// Defense in depth: the registry TTL (5m) is stricter than the state
+		// Defence in depth: the registry TTL (5m) is stricter than the state
 		// TTL (10m), so this fires only on clock jumps or memory corruption.
 		a.logger.Warn("pending login carried an invalid authorization request", "reason", err)
 		fail("The authorization request expired. Start over from your MCP client.")
@@ -429,7 +429,7 @@ func buildCodeRedirect(redirectURI, code, state string) (string, error) {
 // malformed form is a 400 and an unknown/expired login id is a 404, but a
 // valid submission always gets 204 regardless of whether the password was
 // right — correctness surfaces only in the next poll, keeping this endpoint
-// free of oracle behavior beyond what the login flow itself reveals.
+// free of oracle behaviour beyond what the login flow itself reveals.
 func (a *AuthServer) handleLoginPassword(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxFormBody)
 	if err := r.ParseForm(); err != nil {

@@ -56,7 +56,7 @@ func PeriodNames() []string {
 // ProgressCallback is called with the current batch number, total batches, and a message.
 type ProgressCallback func(current, total int, message string)
 
-// Summarizer runs rolling chat summarization through one configured provider.
+// Summarizer runs rolling chat summarisation through one configured provider.
 // It holds no per-chat or per-session state, so one instance serves every
 // assembly. One built by Unavailable fails every call instead.
 type Summarizer struct {
@@ -104,9 +104,9 @@ type Result struct {
 }
 
 // Summarize fetches at most maxMessages of chatID through msgProvider and
-// summarizes them for goal, preserving usable work when a later Telegram page
+// summarises them for goal, preserving usable work when a later Telegram page
 // or batch fails. session is the MCP session of the tool call (sampling
-// summarizes through it).
+// summarises through it).
 func (s *Summarizer) Summarize(ctx context.Context, session *mcp.ServerSession, msgProvider *messages.Provider, chatID int64, goal string, since time.Time, maxMessages int, onProgress ProgressCallback) (Result, error) {
 	if s.unavailable != nil {
 		return Result{}, s.unavailable
@@ -173,7 +173,7 @@ func (s *Summarizer) Summarize(ctx context.Context, session *mcp.ServerSession, 
 			// in the first 18. runningSummary is "" only if batch 1 failed.
 			out.Summary = runningSummary
 			out.Partial = true
-			return out, fmt.Errorf("summarizing batch %d/%d: %w", i+1, totalBatches, err)
+			return out, fmt.Errorf("summarising batch %d/%d: %w", i+1, totalBatches, err)
 		}
 
 		runningSummary = strings.TrimSpace(summary)
@@ -248,7 +248,7 @@ func summarizeWithProgress(ctx context.Context, provider Provider, req Request, 
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				resultCh <- result{err: fmt.Errorf("summarize provider panicked: %v", r)}
+				resultCh <- result{err: fmt.Errorf("summarisation provider panicked: %v", r)}
 			}
 		}()
 		summary, err := provider.Summarize(ctx, req)
@@ -269,7 +269,7 @@ func summarizeWithProgress(ctx context.Context, provider Provider, req Request, 
 				onProgress(currentBatch, totalBatches, fmt.Sprintf("Processing batch %d/%d (%ds elapsed)", currentBatch, totalBatches, elapsed))
 			}
 		case <-ctx.Done():
-			return "", fmt.Errorf("summarization canceled: %w", ctx.Err())
+			return "", fmt.Errorf("summarisation cancelled: %w", ctx.Err())
 		}
 	}
 }
