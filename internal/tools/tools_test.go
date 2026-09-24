@@ -38,10 +38,10 @@ func TestFailureText(t *testing.T) {
 		assert.True(t, strings.HasPrefix(txt, `Failed to join "@x": Telegram rate-limited this JoinChat call: wait 4m25s (265 seconds)`), txt)
 	})
 
-	// The waiter wraps the original error when the wait exceeds its max
-	// ("flood wait argument is too big (... > ...)"), so detection must unwrap.
-	t.Run("wrapped by the waiter (too big)", func(t *testing.T) {
-		wrapped := fmt.Errorf("flood wait argument is too big (4m25s > 1m0s): %w", flood)
+	// The client's flood-wait middleware wraps the original error when the
+	// wait exceeds its max, so detection must unwrap.
+	t.Run("wrapped by the flood-wait middleware (too long)", func(t *testing.T) {
+		wrapped := fmt.Errorf("flood wait of 4m25s exceeds the 1m0s the client waits out: %w", flood)
 		assert.Contains(t, failureText("JoinChat", failed("join", wrapped)), "265 seconds")
 	})
 

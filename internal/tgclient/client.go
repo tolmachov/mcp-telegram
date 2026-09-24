@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gotd/contrib/middleware/floodwait"
 	"github.com/gotd/log"
 	"github.com/gotd/log/logslog"
 	"github.com/gotd/td/session"
@@ -28,7 +27,7 @@ type Config struct {
 	// FloodWaitMaxWait caps how long the flood-wait middleware will sleep on a
 	// single FLOOD_WAIT before giving up and returning the error; the default
 	// lives on --flood-wait-max-seconds. Raising it lets the client wait out
-	// longer account-level limits at the cost of blocking the in-flight call;
+	// longer account-level limits at the cost of holding the call that waits;
 	// lowering it fails faster.
 	FloodWaitMaxWait time.Duration
 }
@@ -99,33 +98,13 @@ func (a userAuthenticator) SignUp(_ context.Context) (auth.UserInfo, error) {
 	return auth.UserInfo{}, fmt.Errorf("sign up is not supported")
 }
 
-// FloodWaitCallback is invoked when the floodwait middleware throttles a
-// request. The duration is how long the middleware will sleep before retrying.
-// Use this to surface throttling to the MCP client (via mcpLog at warning
-// level) so users understand why a tool is slow.
-type FloodWaitCallback func(ctx context.Context, duration time.Duration)
-
 // newClient builds a gotd client over storage from opts, with the flood-wait
-// middleware in front of opts.Middlewares. The returned run drives the client
-// and must wrap every use of it: the middleware only waits out a FLOOD_WAIT
-// inside it. If onFloodWait is non-nil, it is invoked each time the middleware
-// sleeps for a flood wait.
-func newClient(cfg *Config, storage session.Storage, onFloodWait FloodWaitCallback, opts telegram.Options) (*telegram.Client, func(context.Context, func(context.Context) error) error) {
-	waiter := floodwait.NewWaiter().WithMaxWait(cfg.FloodWaitMaxWait)
-	if onFloodWait != nil {
-		waiter = waiter.WithCallback(func(ctx context.Context, wait floodwait.FloodWait) {
-			onFloodWait(ctx, wait.Duration)
-		})
-	}
+// middleware (floodWait) in front of opts.Middlewares. If onFloodWait is
+// non-nil, it is told of every flood wait a call takes.
+func newClient(cfg *Config, storage session.Storage, onFloodWait FloodWaitCallback, opts telegram.Options) *telegram.Client {
 	opts.SessionStorage = storage
-	opts.Middlewares = append([]telegram.Middleware{waiter}, opts.Middlewares...)
-	client := telegram.NewClient(cfg.APIID, cfg.APIHash, opts)
-	run := func(ctx context.Context, f func(context.Context) error) error {
-		return waiter.Run(ctx, func(ctx context.Context) error {
-			return client.Run(ctx, f)
-		})
-	}
-	return client, run
+	opts.Middlewares = append([]telegram.Middleware{floodWait(cfg.FloodWaitMaxWait, onFloodWait)}, opts.Middlewares...)
+	return telegram.NewClient(cfg.APIID, cfg.APIHash, opts)
 }
 
 // Login performs interactive sign-in to Telegram
@@ -134,9 +113,9 @@ func Login(ctx context.Context, cfg *Config, phone string, in io.Reader, out io.
 	if err != nil {
 		return fmt.Errorf("opening session storage: %w", err)
 	}
-	client, run := newClient(cfg, storage, nil, telegram.Options{})
+	client := newClient(cfg, storage, nil, telegram.Options{})
 
-	err = run(ctx, func(ctx context.Context) error {
+	err = client.Run(ctx, func(ctx context.Context) error {
 		status, err := client.Auth().Status(ctx)
 		if err != nil {
 			return fmt.Errorf("checking auth status: %w", err)
@@ -178,9 +157,9 @@ func Logout(ctx context.Context, cfg *Config, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("opening session storage: %w", err)
 	}
-	client, run := newClient(cfg, storage, nil, telegram.Options{})
+	client := newClient(cfg, storage, nil, telegram.Options{})
 
-	remoteErr := run(ctx, func(ctx context.Context) error {
+	remoteErr := client.Run(ctx, func(ctx context.Context) error {
 		if _, err := client.API().AuthLogOut(ctx); err != nil {
 			return fmt.Errorf("calling auth logout: %w", err)
 		}

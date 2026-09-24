@@ -427,8 +427,8 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 	// The message provider owns the rate limiter its fetches wait on. The
 	// RPS ceiling is configurable (--tg-rate-limit-rps) so operators can
 	// loosen it when fetches bottleneck on it. Raising it too high will trip
-	// Telegram's FLOOD_WAIT, which the tgclient waiter wrapper reports via
-	// onFloodWait.
+	// Telegram's FLOOD_WAIT, which the tgclient flood-wait middleware reports
+	// via onFloodWait.
 	msgProvider := messages.NewProvider(peers, s.opts.TGRateLimitRPS)
 
 	fullHandlers, researchHandlers := s.buildHandlers(api, peers, msgProvider, chatsCache)

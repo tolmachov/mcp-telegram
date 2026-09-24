@@ -90,13 +90,13 @@ func startClient(ctx context.Context, cfg *Config, storage session.Storage, logg
 	base.Logger = gotdLogger(logger)
 	base.OnDead = r.connDead
 	base.Middlewares = []telegram.Middleware{r.refusalWatch()}
-	client, run := newClient(cfg, storage, onFloodWait, base)
+	client := newClient(cfg, storage, onFloodWait, base)
 	r.api = client.API()
 
 	ready := make(chan error, 1)
 	go func() {
 		defer close(r.done)
-		err := run(runCtx, func(ctx context.Context) error {
+		err := client.Run(runCtx, func(ctx context.Context) error {
 			self, err := client.Self(ctx)
 			if err != nil {
 				err = fmt.Errorf("checking the session: %w", err)
@@ -172,8 +172,9 @@ func (r *Running) connDead(err error) {
 
 // refusalWatch is the one place a client learns that Telegram refused its
 // session: every call's reply passes through it, whichever tool, resource or
-// background poller made the call. It sits inside the flood waiter, which
-// sends every call from one goroutine, so it never waits on anything itself.
+// background poller made the call. It sits inside the flood-wait middleware
+// (floodWait), so it sees the reply to every try of a call, and it never waits
+// on anything itself: a refused call returns at once.
 //
 // Which DC answered decides what a refusal (isSessionRefusal) means. gotd
 // sends a call anywhere but the home DC only when the home DC answers it with
@@ -228,10 +229,9 @@ func answeredAway(input bin.Encoder) bool {
 // refusalWatch), whether it still accepts the session a secondary DC just
 // refused, unless a check already runs, and reports whether one now runs:
 // none does once the client has stopped. The check runs on a goroutine of its
-// own, bounded by homeCheckTimeout and the client's lifetime, and bypasses the
-// flood waiter: the waiter sends calls one at a time, so a check through it
-// would hold every other call up for as long as the home DC takes to answer.
-// The home DC refusing the session is the verdict.
+// own, bounded by homeCheckTimeout and the client's lifetime, and goes beneath
+// the flood-wait middleware: a check Telegram tells to wait fails like any
+// other that gets no answer. The home DC refusing the session is the verdict.
 //
 // The home DC accepting the session means the secondary DC never took the
 // authorisation gotd exported to it. gotd keeps that DC's connection for the

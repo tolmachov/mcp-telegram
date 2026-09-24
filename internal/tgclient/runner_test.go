@@ -220,9 +220,8 @@ func TestRefusalWatchTakesAHomeRefusalAsTheVerdict(t *testing.T) {
 }
 
 // TestRefusalWatchChecksASecondaryRefusalInTheBackground pins the secondary-DC
-// case. A refused download returns at once, without waiting for the home DC:
-// the watch sits inside the flood waiter, whose one goroutine sends every
-// call. Downloads refused while the check runs return at once too and start
+// case. A refused download returns at once, without waiting for the home DC.
+// Downloads refused while the check runs return at once too and start
 // no other check. The check's answer then decides: the home DC refusing the
 // session is the verdict, the home DC accepting it stops the client so that
 // reconnecting restores the refused calls, and a check that fails keeps the
@@ -406,34 +405,36 @@ func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Disca
 // answer is how a scripted DC answers one request.
 type answer = func(*tgtest.Server, *tgtest.Request) error
 
+// homeDC is the DC a client with an empty session starts on.
+const homeDC = 2
+
+// scripted answers the n-th call with the n-th of answers, and any call past
+// them with an error.
+func scripted(answers ...answer) answer {
+	var mu sync.Mutex
+	return func(server *tgtest.Server, req *tgtest.Request) error {
+		mu.Lock()
+		if len(answers) == 0 {
+			mu.Unlock()
+			return server.SendErr(req, tgerr.New(500, "UNSCRIPTED_CALL"))
+		}
+		next := answers[0]
+		answers = answers[1:]
+		mu.Unlock()
+		return next(server, req)
+	}
+}
+
 // startOnCluster starts a client through startClient against an in-process
-// Telegram cluster whose home DC answers users.getUsers with getUsers and
-// upload.getFile with getFile, the n-th call of each getting its n-th answer.
+// Telegram cluster whose DCs route sets up; the client's home DC is homeDC.
 // Every wait of the test is bounded by clusterTimeout.
-func startOnCluster(t *testing.T, onFloodWait FloodWaitCallback, getUsers, getFile []answer) (*Running, error) {
+func startOnCluster(t *testing.T, onFloodWait FloodWaitCallback, route func(*cluster.Cluster)) (*Running, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), clusterTimeout)
 	t.Cleanup(cancel)
 
 	c := cluster.NewCluster(cluster.Options{})
-	scripted := func(answers []answer) answer {
-		var mu sync.Mutex
-		return func(server *tgtest.Server, req *tgtest.Request) error {
-			mu.Lock()
-			if len(answers) == 0 {
-				mu.Unlock()
-				return server.SendErr(req, tgerr.New(500, "UNSCRIPTED_CALL"))
-			}
-			next := answers[0]
-			answers = answers[1:]
-			mu.Unlock()
-			return next(server, req)
-		}
-	}
-	// A client with an empty session starts on DC 2.
-	c.Dispatch(2, "home").
-		HandleFunc(tg.UsersGetUsersRequestTypeID, scripted(getUsers)).
-		HandleFunc(tg.UploadGetFileRequestTypeID, scripted(getFile))
+	route(c)
 	up := make(chan error, 1)
 	go func() { up <- c.Up(ctx) }()
 	t.Cleanup(func() {
@@ -448,7 +449,8 @@ func startOnCluster(t *testing.T, onFloodWait FloodWaitCallback, getUsers, getFi
 		t.Fatalf("cluster did not come up: %v", ctx.Err())
 	}
 
-	r, err := startClient(ctx, &Config{APIID: 1, APIHash: "hash"}, &session.StorageMemory{}, discardLogger(), onFloodWait, telegram.Options{
+	cfg := &Config{APIID: 1, APIHash: "hash", FloodWaitMaxWait: time.Minute}
+	r, err := startClient(ctx, cfg, &session.StorageMemory{}, discardLogger(), onFloodWait, telegram.Options{
 		PublicKeys: c.Keys(),
 		Resolver:   c.Resolver(),
 		DCList:     c.List(),
@@ -491,23 +493,24 @@ func answerFile(server *tgtest.Server, req *tgtest.Request) error {
 	return server.SendResult(req, &tg.UploadFile{Type: &tg.StorageFileJpeg{}, Bytes: []byte("jpeg")}) //nolint:wrapcheck // the fake server hands the send error to tgtest as is.
 }
 
-// TestStartClientWatchesRefusalsInsideTheFloodWaiter pins the real client's
-// wiring. A download goes through the flood waiter, and the refusal its
-// retry gets goes through refusalWatch, which returns it at once and has the
-// home DC checked. While the home DC holds the check, the waiter still sends
-// the next download: the check does not run on the waiter's goroutine. The
-// home DC then refuses the session, which stops the client with the verdict.
-func TestStartClientWatchesRefusalsInsideTheFloodWaiter(t *testing.T) {
+// TestStartClientWatchesRefusalsInsideFloodWait pins the real client's
+// wiring. A download waits out its flood wait, and the refusal its retry gets
+// goes through refusalWatch, which returns it at once and has the home DC
+// checked. While the home DC holds the check, the next download is served:
+// the check holds up no call. The home DC then refuses the session, which
+// stops the client with the verdict.
+func TestStartClientWatchesRefusalsInsideFloodWait(t *testing.T) {
 	t.Parallel()
 	var waits atomic.Int32
 	asked, release := make(chan struct{}, 1), make(chan struct{})
 	// gotd resends a request the DC has not answered within a few seconds,
 	// so every copy of the check is held the same way.
 	held := answerErrOnRelease(tgerr.New(401, "SESSION_REVOKED"), asked, release)
-	r, err := startOnCluster(t, func(context.Context, time.Duration) { waits.Add(1) },
-		[]answer{answerSelf, held, held, held, held},
-		[]answer{answerErr(tgerr.New(420, "FLOOD_WAIT_0")), answerErr(tgerr.New(401, "AUTH_KEY_UNREGISTERED")), answerFile},
-	)
+	r, err := startOnCluster(t, func(context.Context, time.Duration) { waits.Add(1) }, func(c *cluster.Cluster) {
+		c.Dispatch(homeDC, "home").
+			HandleFunc(tg.UsersGetUsersRequestTypeID, scripted(answerSelf, held, held, held, held)).
+			HandleFunc(tg.UploadGetFileRequestTypeID, scripted(answerErr(tgerr.New(420, "FLOOD_WAIT_0")), answerErr(tgerr.New(401, "AUTH_KEY_UNREGISTERED")), answerFile))
+	})
 	require.NoError(t, err)
 	assert.Equal(t, int64(7), r.Self().ID)
 
@@ -520,18 +523,18 @@ func TestStartClientWatchesRefusalsInsideTheFloodWaiter(t *testing.T) {
 	err = download(ctx)
 	require.ErrorIs(t, err, ErrSecondaryRefusal, "the refusal is returned before the home DC answers the check")
 	assert.NotErrorIs(t, err, ErrSessionUnauthorized)
-	assert.Equal(t, int32(1), waits.Load(), "the flood waiter retried the call first")
+	assert.Equal(t, int32(1), waits.Load(), "the flood-wait middleware retried the call first")
 
 	select {
 	case <-asked:
 	case <-ctx.Done():
 		t.Fatal("the home DC was never asked about the session")
 	}
-	// A check sent through the waiter would hold this download until the
+	// A check that held up calls would hold this download until the
 	// check timed out; sent beside it, the download takes a local round trip.
 	sendCtx, sendCancel := context.WithTimeout(ctx, 3*time.Second)
 	defer sendCancel()
-	require.NoError(t, download(sendCtx), "the waiter sends calls while the check waits on the home DC")
+	require.NoError(t, download(sendCtx), "calls are served while the check waits on the home DC")
 	require.NoError(t, r.Err())
 
 	close(release)
@@ -544,6 +547,42 @@ func TestStartClientWatchesRefusalsInsideTheFloodWaiter(t *testing.T) {
 	assert.True(t, tgerr.Is(r.Err(), "SESSION_REVOKED"), "the verdict keeps the home DC's code: %v", r.Err())
 }
 
+// TestStartClientDownloadsFromAnotherDC pins that a download the home DC
+// redirects with FILE_MIGRATE completes on the DC it names. gotd first moves
+// the session's authorisation there, with a call of its own that passes
+// through the client's middlewares while the download is still inside them:
+// a middleware that sends one call only once the one before it has returned
+// holds the download until its deadline.
+func TestStartClientDownloadsFromAnotherDC(t *testing.T) {
+	t.Parallel()
+	const fileDC = 4
+	always := func(result bin.Encoder) answer {
+		return func(server *tgtest.Server, req *tgtest.Request) error {
+			return server.SendResult(req, result) //nolint:wrapcheck // the fake server hands the send error to tgtest as is.
+		}
+	}
+	r, err := startOnCluster(t, nil, func(c *cluster.Cluster) {
+		c.Dispatch(homeDC, "home").
+			HandleFunc(tg.UsersGetUsersRequestTypeID, scripted(answerSelf)).
+			HandleFunc(tg.UploadGetFileRequestTypeID, scripted(answerErr(tgerr.New(303, fmt.Sprintf("FILE_MIGRATE_%d", fileDC))))).
+			HandleFunc(tg.AuthExportAuthorizationRequestTypeID, always(&tg.AuthExportedAuthorization{ID: 7, Bytes: []byte("auth")}))
+		c.Dispatch(fileDC, "files").
+			HandleFunc(tg.AuthImportAuthorizationRequestTypeID, always(&tg.AuthAuthorization{User: &tg.User{ID: 7}})).
+			HandleFunc(tg.UploadGetFileRequestTypeID, scripted(answerFile))
+	})
+	require.NoError(t, err)
+
+	// Every answer is a local round trip, so a download that takes seconds
+	// is held, not slow.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	file, err := r.API().UploadGetFile(ctx, &tg.UploadGetFileRequest{Location: &tg.InputDocumentFileLocation{}, Limit: 1024})
+	require.NoError(t, err, "the download completes on DC %d", fileDC)
+	require.IsType(t, &tg.UploadFile{}, file)
+	assert.Equal(t, []byte("jpeg"), file.(*tg.UploadFile).Bytes)
+	require.NoError(t, r.Err())
+}
+
 // TestStartClientKeepsTheHomeDCsRefusal pins that a readiness check the home
 // DC refuses — a session refusal or any other 401 — is the verdict and keeps
 // Telegram's own code.
@@ -552,7 +591,9 @@ func TestStartClientKeepsTheHomeDCsRefusal(t *testing.T) {
 	for _, code := range []string{"AUTH_KEY_UNREGISTERED", "SESSION_PASSWORD_NEEDED"} {
 		t.Run(code, func(t *testing.T) {
 			t.Parallel()
-			_, err := startOnCluster(t, nil, []answer{answerErr(tgerr.New(401, code))}, nil)
+			_, err := startOnCluster(t, nil, func(c *cluster.Cluster) {
+				c.Dispatch(homeDC, "home").HandleFunc(tg.UsersGetUsersRequestTypeID, scripted(answerErr(tgerr.New(401, code))))
+			})
 			require.ErrorIs(t, err, ErrSessionUnauthorized)
 			assert.True(t, tgerr.Is(err, code), "the verdict keeps the home DC's code: %v", err)
 		})

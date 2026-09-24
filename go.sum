@@ -135,8 +135,6 @@ github.com/gorilla/handlers v1.5.2 h1:cLTUSsNkgcwhgRqvCNmdbRWG0A3N4F+M2nWKdScwyE
 github.com/gorilla/handlers v1.5.2/go.mod h1:dX+xVpaxdSw+q0Qek8SSsl3dfMk3jNddUkMzo0GtH0w=
 github.com/gorilla/mux v1.8.1 h1:TuBL49tXwgrFYWhqrNgrUNEY92u81SPhu7sTdzQEiWY=
 github.com/gorilla/mux v1.8.1/go.mod h1:AKf9I4AEqPTmMytcMc0KkNouC66V3BtZ4qD5fmWSiMQ=
-github.com/gotd/contrib v0.25.0 h1:92JYybbOI7nApz7uaLahEMfUfnZ0/ECdfFscAzg5k7c=
-github.com/gotd/contrib v0.25.0/go.mod h1:OoocKgWvcTIDKstQBkGJ8fZCMvwU9C2IVirPOo1rwvk=
 github.com/gotd/ige v0.3.0 h1:4f6LEHWsVDLBG0bT9wWG2/9TZb5aWm265G8ZlTXmRRU=
 github.com/gotd/ige v0.3.0/go.mod h1:FE9bTaQtvfArizAcZuI4sS6gXaEUBmixdUufVHoCKac=
 github.com/gotd/log v0.1.0 h1:4LJUEvafD1xtBwx2QkrlzFnRgbYXTlWqJPDi8BvrLbU=

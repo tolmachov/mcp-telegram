@@ -6,7 +6,6 @@ require (
 	cloud.google.com/go/storage v1.65.0
 	github.com/fsouza/fake-gcs-server v1.56.1
 	github.com/google/jsonschema-go v0.4.3
-	github.com/gotd/contrib v0.25.0
 	github.com/gotd/log v0.1.0
 	github.com/gotd/td v0.161.0
 	github.com/keybase/go-keychain v0.0.1
