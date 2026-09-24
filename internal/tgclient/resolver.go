@@ -137,50 +137,32 @@ func (r *Resolver) Invalidate(ids ...int64) {
 
 // WithPeer resolves id and runs op with its peer. When op fails with a stale
 // access hash (ShouldRefreshPeer) it drops the cached peer and runs op exactly
-// once more with a freshly resolved one.
+// once more with a freshly resolved one. An op that pages keeps each page to
+// its own WithPeer, so a stale hash re-resolves without losing the pages
+// already fetched.
 func WithPeer[T any](ctx context.Context, r *Resolver, id int64, op func(Peer) (T, error)) (T, error) {
-	return withPeers(ctx, r, []int64{id}, nil, func(peers []Peer) (T, error) { return op(peers[0]) })
+	return WithPeers(ctx, r, []int64{id}, func(peers []Peer) (T, error) { return op(peers[0]) })
 }
 
 // WithPeers is WithPeer for several chat IDs: op gets their peers in the same
 // order, and a stale access hash re-resolves all of them.
 func WithPeers[T any](ctx context.Context, r *Resolver, ids []int64, op func([]Peer) (T, error)) (T, error) {
-	return withPeers(ctx, r, ids, nil, op)
-}
-
-// WithPeerKeepingPartial is WithPeer for an op that can fail after making
-// progress: when partial reports that a failed attempt's result holds work a
-// retry would throw away, that result is returned with its error instead of
-// being retried.
-func WithPeerKeepingPartial[T any](ctx context.Context, r *Resolver, id int64, partial func(T) bool, op func(Peer) (T, error)) (T, error) {
-	return withPeers(ctx, r, []int64{id}, partial, func(peers []Peer) (T, error) { return op(peers[0]) })
+	return WithPeersFrom(r, func() ([]Peer, error) { return r.resolveAll(ctx, ids) }, op)
 }
 
 // WithPeersFrom is WithPeers for peers that do not all come from chat IDs,
 // such as a mix of @usernames and IDs: resolve produces them, and a stale
 // access hash drops every peer op was given from the cache and runs resolve
-// and op once more.
+// and op once more. It is the one stale-hash retry behind WithPeer and its
+// variants.
 func WithPeersFrom[T any](r *Resolver, resolve func() ([]Peer, error), op func([]Peer) (T, error)) (T, error) {
-	return retryStale(r, resolve, nil, op)
-}
-
-// withPeers resolves ids through r for retryStale; partial may be nil.
-func withPeers[T any](ctx context.Context, r *Resolver, ids []int64, partial func(T) bool, op func([]Peer) (T, error)) (T, error) {
-	return retryStale(r, func() ([]Peer, error) { return r.resolveAll(ctx, ids) }, partial, op)
-}
-
-// retryStale is the one stale-hash retry behind WithPeer and its variants:
-// when op fails with a stale access hash (and partial, if set, finds nothing
-// worth keeping in its result), the peers it was given leave the cache and
-// resolve and op run exactly once more.
-func retryStale[T any](r *Resolver, resolve func() ([]Peer, error), partial func(T) bool, op func([]Peer) (T, error)) (T, error) {
 	var zero T
 	peers, err := resolve()
 	if err != nil {
 		return zero, err
 	}
 	result, err := op(peers)
-	if err == nil || !ShouldRefreshPeer(err) || (partial != nil && partial(result)) {
+	if err == nil || !ShouldRefreshPeer(err) {
 		return result, err
 	}
 	for _, peer := range peers {

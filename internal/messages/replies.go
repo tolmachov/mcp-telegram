@@ -5,8 +5,6 @@ import (
 	"fmt"
 
 	"github.com/gotd/td/tg"
-
-	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // FetchReplies retrieves the messages of a reply thread via
@@ -29,14 +27,9 @@ func (p *Provider) FetchReplies(ctx context.Context, chatID int64, rootMsgID int
 		opts.Limit = 50
 	}
 
-	result, err := tgclient.WithPeer(ctx, p.peers, chatID, func(peer tgclient.Peer) (*FetchResult, error) {
-		return p.fetchRepliesWithPeer(ctx, peer.Input, rootMsgID, opts)
+	return p.forChat(ctx, chatID, func(peer tg.InputPeerClass) (*FetchResult, error) {
+		return p.fetchRepliesWithPeer(ctx, peer, rootMsgID, opts)
 	})
-	if err != nil {
-		return nil, err
-	}
-	result.ChatID = chatID
-	return result, nil
 }
 
 func (p *Provider) fetchRepliesWithPeer(ctx context.Context, peer tg.InputPeerClass, rootMsgID int, opts FetchOptions) (*FetchResult, error) {

@@ -115,9 +115,9 @@ func TestFetchAllContinuesServiceOnlyPageAndPreservesPartialResult(t *testing.T)
 	})
 }
 
-// TestFetchAllStalePeer pins FetchAll's stale-hash contract: with nothing
-// collected yet the peer is re-resolved and pagination restarts; once a batch
-// has been collected the stale error comes back with it instead.
+// TestFetchAllStalePeer pins FetchAll's stale-hash contract: every page is
+// its own WithPeer, so a stale hash on any page re-resolves the peer and
+// pagination carries on from that page.
 func TestFetchAllStalePeer(t *testing.T) {
 	const channelID = int64(80)
 	stale := func(hash int64) telegramfake.InvokeFunc {
@@ -155,21 +155,32 @@ func TestFetchAllStalePeer(t *testing.T) {
 		assert.Zero(t, inv.Remaining())
 	})
 
-	t.Run("partial result is returned, not retried", func(t *testing.T) {
+	t.Run("mid-pagination re-resolves and continues from the cursor", func(t *testing.T) {
 		inv := telegramfake.New(
 			notUserStep(t, channelID),
 			resolveMessageChannelStep(t, channelID, 100),
 			page(100, 9),
 			stale(100),
+			notUserStep(t, channelID),
+			resolveMessageChannelStep(t, channelID, 200),
+			telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
+				assert.Equal(t, int64(200), req.Peer.(*tg.InputPeerChannel).AccessHash)
+				assert.Equal(t, 9, req.OffsetID, "the retried page must start after the collected one")
+				out.Messages = &tg.MessagesMessagesSlice{Count: 2, Messages: []tg.MessageClass{&tg.Message{ID: 8, Date: 8, Message: "m"}}}
+				return nil
+			}),
+			telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
+				out.Messages = &tg.MessagesMessagesSlice{Count: 2}
+				return nil
+			}),
 		)
 		p := NewProvider(tgclient.NewResolver(t.Context(), tg.NewClient(inv)), 100_000)
 		got, err := p.FetchAll(t.Context(), channelID, FetchOptions{Limit: 1}, nil)
-		require.Error(t, err)
-		assert.True(t, tgclient.ShouldRefreshPeer(err))
-		require.NotNil(t, got)
-		require.Len(t, got.Messages, 1, "the collected batch must survive the stale error")
+		require.NoError(t, err)
+		require.Len(t, got.Messages, 2)
+		assert.Equal(t, []int{9, 8}, []int{got.Messages[0].ID, got.Messages[1].ID})
 		assert.Equal(t, channelID, got.ChatID)
-		assert.Zero(t, inv.Remaining(), "no re-resolve or restart once messages are collected")
+		assert.Zero(t, inv.Remaining())
 	})
 }
 

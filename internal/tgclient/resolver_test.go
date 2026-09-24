@@ -283,35 +283,6 @@ func TestWithPeerRetriesStaleHashOnce(t *testing.T) {
 	require.Error(t, err, "the second stale answer is returned, not retried again")
 }
 
-// TestWithPeerKeepingPartial verifies a failed attempt whose result holds
-// progress is returned instead of retried, and one without progress is
-// retried.
-func TestWithPeerKeepingPartial(t *testing.T) {
-	var calls atomic.Int32
-	r := NewResolver(t.Context(), channelClient(&calls, func() int64 { return 1 }))
-	attempts := 0
-	progressed := func(n int) bool { return n > 0 }
-	got, err := WithPeerKeepingPartial(t.Context(), r, 5, progressed, func(Peer) (int, error) {
-		attempts++
-		return 3, tgerr.New(400, "PEER_ID_INVALID")
-	})
-	require.Error(t, err)
-	assert.Equal(t, 3, got)
-	assert.Equal(t, 1, attempts)
-
-	attempts = 0
-	got, err = WithPeerKeepingPartial(t.Context(), r, 5, progressed, func(Peer) (int, error) {
-		attempts++
-		if attempts == 1 {
-			return 0, tgerr.New(400, "PEER_ID_INVALID")
-		}
-		return 4, nil
-	})
-	require.NoError(t, err)
-	assert.Equal(t, 4, got)
-	assert.Equal(t, 2, attempts)
-}
-
 // TestWithPeersRefreshesEveryPeer verifies a stale answer re-resolves all the
 // peers op was given.
 func TestWithPeersRefreshesEveryPeer(t *testing.T) {

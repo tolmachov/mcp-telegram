@@ -37,17 +37,25 @@ func (p *Provider) wait(ctx context.Context) error {
 	return nil
 }
 
-// Fetch retrieves messages from a chat with the given options.
-// It handles pagination internally and returns enriched messages with sender names.
-func (p *Provider) Fetch(ctx context.Context, chatID int64, opts FetchOptions) (*FetchResult, error) {
+// forChat runs fetch with the peer of chatID (tgclient.WithPeer, so a stale
+// access hash is re-resolved once) and stamps chatID on its result.
+func (p *Provider) forChat(ctx context.Context, chatID int64, fetch func(tg.InputPeerClass) (*FetchResult, error)) (*FetchResult, error) {
 	result, err := tgclient.WithPeer(ctx, p.peers, chatID, func(peer tgclient.Peer) (*FetchResult, error) {
-		return p.fetchWithPeer(ctx, peer.Input, opts)
+		return fetch(peer.Input)
 	})
 	if err != nil {
 		return nil, err
 	}
 	result.ChatID = chatID
 	return result, nil
+}
+
+// Fetch retrieves one page of messages from a chat with the given options,
+// enriched with sender names.
+func (p *Provider) Fetch(ctx context.Context, chatID int64, opts FetchOptions) (*FetchResult, error) {
+	return p.forChat(ctx, chatID, func(peer tg.InputPeerClass) (*FetchResult, error) {
+		return p.fetchWithPeer(ctx, peer, opts)
+	})
 }
 
 // fetchWithPeer retrieves messages using an already resolved peer.
@@ -182,14 +190,9 @@ func ceilUnix(t time.Time) int64 {
 // newer than a specific ID. When after > 0, the returned slice may be
 // shorter than requested if the anchor is near the end of the chat.
 func (p *Provider) FetchContext(ctx context.Context, chatID int64, anchorID, before, after int) (*FetchResult, error) {
-	result, err := tgclient.WithPeer(ctx, p.peers, chatID, func(peer tgclient.Peer) (*FetchResult, error) {
-		return p.fetchContextWithPeer(ctx, peer.Input, anchorID, before, after)
+	return p.forChat(ctx, chatID, func(peer tg.InputPeerClass) (*FetchResult, error) {
+		return p.fetchContextWithPeer(ctx, peer, anchorID, before, after)
 	})
-	if err != nil {
-		return nil, err
-	}
-	result.ChatID = chatID
-	return result, nil
 }
 
 func (p *Provider) fetchContextWithPeer(ctx context.Context, peer tg.InputPeerClass, anchorID, before, after int) (*FetchResult, error) {
@@ -267,14 +270,9 @@ func (p *Provider) fetchContextWithPeer(ctx context.Context, peer tg.InputPeerCl
 // scheduled messages, so callers can render "no pending" without branching
 // on error vs empty.
 func (p *Provider) FetchScheduled(ctx context.Context, chatID int64) (*FetchResult, error) {
-	result, err := tgclient.WithPeer(ctx, p.peers, chatID, func(peer tgclient.Peer) (*FetchResult, error) {
-		return p.fetchScheduledWithPeer(ctx, peer.Input)
+	return p.forChat(ctx, chatID, func(peer tg.InputPeerClass) (*FetchResult, error) {
+		return p.fetchScheduledWithPeer(ctx, peer)
 	})
-	if err != nil {
-		return nil, err
-	}
-	result.ChatID = chatID
-	return result, nil
 }
 
 func (p *Provider) fetchScheduledWithPeer(ctx context.Context, peer tg.InputPeerClass) (*FetchResult, error) {
@@ -300,59 +298,33 @@ func (p *Provider) fetchScheduledWithPeer(ctx context.Context, peer tg.InputPeer
 // automatically. The onBatch callback is called after each batch is fetched
 // (can be nil).
 //
+// Each page is its own Fetch, so a stale access hash met mid-pagination is
+// re-resolved and pagination carries on from where it was.
+//
 // Partial-result contract: once pagination has started, any error — a
 // cancelled context, a flood wait, a failed batch — comes back together with
 // the messages collected so far, so callers that persist work
-// (BackupMessages) can keep them. A stale peer is re-resolved and pagination
-// restarted only while nothing has been collected; after that the error is
-// returned with the partial result instead.
+// (BackupMessages) can keep them.
 func (p *Provider) FetchAll(ctx context.Context, chatID int64, opts FetchOptions, onBatch BatchCallback) (*FetchResult, error) {
-	collected := func(r *FetchResult) bool { return len(r.Messages) > 0 }
-	result, err := tgclient.WithPeerKeepingPartial(ctx, p.peers, chatID, collected, func(peer tgclient.Peer) (*FetchResult, error) {
-		return p.fetchAllWithPeer(ctx, peer.Input, opts, onBatch)
-	})
-	if result != nil {
-		result.ChatID = chatID
-	}
-	return result, err
-}
-
-// fetchAllWithPeer retrieves all messages using an already resolved peer.
-func (p *Provider) fetchAllWithPeer(ctx context.Context, peer tg.InputPeerClass, opts FetchOptions, onBatch BatchCallback) (*FetchResult, error) {
 	// Pre-allocate the messages slice when MaxCount bounds the result size
 	// so the append loop below doesn't re-grow the underlying array.
-	initialCap := max(opts.MaxCount, 0)
 	result := &FetchResult{
-		Messages: make([]Message, 0, initialCap),
+		ChatID:   chatID,
+		Messages: make([]Message, 0, max(opts.MaxCount, 0)),
 		Users:    make(map[int64]string),
 		Chats:    make(map[int64]string),
 	}
 
 	batchOpts := FetchOptions{
-		Limit: opts.Limit,
+		Limit:      opts.Limit,
+		OffsetDate: opts.MaxDate,
 	}
 	if batchOpts.Limit <= 0 {
 		batchOpts.Limit = 100
 	}
 
-	// Set the initial offset date if MaxDate is specified.
-	if !opts.MaxDate.IsZero() {
-		batchOpts.OffsetDate = opts.MaxDate
-	}
-
-	batchNum := 0
-
-	for {
-		select {
-		case <-ctx.Done():
-			result.Count = len(result.Messages)
-			return result, ctx.Err()
-		default:
-		}
-
-		batchNum++
-
-		batch, err := p.fetchWithPeer(ctx, peer, batchOpts)
+	for batchNum := 1; ; batchNum++ {
+		batch, err := p.Fetch(ctx, chatID, batchOpts)
 		if err != nil {
 			// Return whatever we've already collected alongside the error
 			// so callers (e.g. BackupMessages) can persist partial progress
