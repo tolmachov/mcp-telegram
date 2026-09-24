@@ -22,11 +22,12 @@ import (
 // entity Telegram itself designates as the resolution — so every caller agrees.
 
 // resolvePublicUsername normalises a public username (with or without a leading
-// @), rejects empty input, and calls contacts.resolveUsername.
+// @), rejects empty input as a reference that names no chat
+// (tgclient.ErrUnresolvablePeer), and calls contacts.resolveUsername.
 func resolvePublicUsername(ctx context.Context, client *tg.Client, username string) (*tg.ContactsResolvedPeer, error) {
 	username = strings.TrimPrefix(strings.TrimSpace(username), "@")
 	if username == "" {
-		return nil, fmt.Errorf("empty username")
+		return nil, fmt.Errorf("%w: empty username", tgclient.ErrUnresolvablePeer)
 	}
 	resolved, err := client.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{Username: username})
 	if err != nil {

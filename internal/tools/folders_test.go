@@ -317,5 +317,9 @@ func TestResolvePeerRefSkipsOnlyChatProblems(t *testing.T) {
 	_, reason, fatal = resolvePeerRef(t.Context(), peers, "-1001555091578")
 	require.NoError(t, fatal)
 	assert.Contains(t, reason, "positive ID")
+
+	_, reason, fatal = resolvePeerRef(t.Context(), peers, "@")
+	require.NoError(t, fatal, "a lone @ is a bad reference, not a reason to abort the batch")
+	assert.Contains(t, reason, "empty username")
 	assert.Zero(t, inv.Remaining())
 }
