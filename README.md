@@ -121,7 +121,7 @@ the tools below, the server is up but Telegram is not authorized — see
 | `GetChats` | List all chats, groups, and channels |
 | `SearchChats` | Search local/global chats by title, username, or numeric ID, ranked with one normalised distance score |
 | `GetChatInfo` | Get detailed information about a chat |
-| `GetMessages` | Get messages from a chat (set `include_scheduled=true` to also list pending scheduled messages in a separate field) |
+| `GetMessages` | Get messages from a chat (set `include_scheduled=true` to also list pending scheduled messages in a separate field; if they cannot be fetched, the history still comes back with a `warning`) |
 | `SearchMessages` | Search within one chat by substring, with optional date / sender / media / thread filters |
 | `SearchMessagesGlobal` | Search by substring across all chats with opaque cursor-based pagination |
 | `GetMessageContext` | Get messages around a specific anchor message in chronological order |
@@ -135,8 +135,8 @@ the tools below, the server is up but Telegram is not authorized — see
 | `JoinChat` | Join a channel/group/supergroup by @username, numeric ID, or invite link (`t.me/+hash`) |
 | `LeaveChat` | Leave a channel/group/supergroup by @username or numeric ID (requires `confirm: true`) |
 | `ResolveMessageLink` | Parse `t.me` / `tg://` message links into `chat_id`, `message_id`, and `topic_message_id` for forum links |
-| `MarkAsRead` | Mark up to 100 chats as read; reports `success_ids`, `nothing_to_read_ids` (channels with no unread badge to clear), per-chat `failures`, and `skipped_ids` when a flood wait or dead session stops the batch |
-| `BackupMessages` | Local stdio only: atomically export messages under a server-configured path. Never exposed over HTTP |
+| `MarkAsRead` | Mark up to 100 chats as read; reports `success_ids`, `nothing_to_read_ids` (channels with no unread badge to clear), per-chat `failures`, and `skipped_ids` when a flood wait, a dead session, a stopped client or a timeout stops the batch |
+| `BackupMessages` | Local stdio only: atomically export messages under a server-configured path; a fetch that stops early still saves what it got, marked `partial` with a `warning` giving the `to_date` that fetches the rest. Never exposed over HTTP |
 | `ResolveUsername` | Resolve @username to user/chat info |
 | `SetChatMute` | Mute or unmute chat notifications (`muted` bool + optional `duration_seconds`) |
 | `SummarizeChat` | AI-powered summarisation via sampling / Gemini / Ollama / Anthropic; processes at most `max_messages` (default 2000, hard maximum 10000) and reports truncation/partial status |
@@ -151,6 +151,11 @@ The folder edits (`CreateFolder`, `AddChatsToFolder`, `RemoveChatsFromFolder`)
 report chats that cannot be resolved in `skipped` and apply the rest; any other
 resolve failure, such as a flood wait or a network error, fails the whole call
 so it can be retried.
+
+A call that gets only part of its work done — a batch stopped early, a listing
+or summary that is incomplete, a backup that saved what it fetched — is not
+reported as a failure: its result carries a `warning` saying what is missing
+and why.
 
 ### Pagination, dates, and identifiers
 

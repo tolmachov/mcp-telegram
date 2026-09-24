@@ -44,12 +44,14 @@ context loading); admin and posting features are secondary. Two transports:
    wraps the RPC that uses the peer in `tgclient.WithPeer` (`WithPeers`,
    `WithPeersFrom` for several or for @usernames mixed with IDs): that is where
    a stale access hash is dropped from the cache and the call retried.
-4. Return `errResult` only for input validation. Return every other failure as
+4. Return `ErrResult` only for input validation. Return every other failure as
    the handler's Go error via `failed(op, err)` / `failedHint`: the registration
    helpers classify it (dead session, a stopped client, flood wait, a problem
    with the chat named — `tgclient.IsPeerSpecific`), render the text the model
    sees and log it under the tool's name. They also give the call its flood-wait
-   budget (`tgclient.WithWaitBudget`).
+   budget (`tgclient.WithWaitBudget`). A call that got part of its work done is
+   no failure: its output embeds `partialOutcome` and says what it lacks with
+   `warn` / `warnCause`, which `AddTool` flags for the request log.
 5. Add the handler to `buildHandlers` in `internal/server/server.go`: `research`
    for read-only tools, `mutating` for anything that changes state. The split
    drives the server variants (see README "Server Variants").
