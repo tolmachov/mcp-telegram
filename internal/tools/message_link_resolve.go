@@ -299,6 +299,3 @@ func validateUsername(s string) error {
 	}
 	return nil
 }
-
-// (username → chat id/title resolution now lives in resolvedPeerInfo, shared
-// across all tools via username_lookup.go.)
