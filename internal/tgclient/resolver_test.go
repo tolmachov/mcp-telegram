@@ -2,6 +2,7 @@ package tgclient
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -138,8 +139,9 @@ func (v valueSpy) Invoke(ctx context.Context, input bin.Encoder, output bin.Deco
 
 // TestResolverProbeRunsOnItsLifetime pins that a shared probe runs on the
 // resolver's lifetime, not on its first caller's context: it carries none of
-// that caller's values, and ending the lifetime (the assembly closing) cancels
-// it and fails every caller waiting on it.
+// that caller's values, and ending the lifetime (the assembly closing or its
+// client stopping) cancels it and fails every caller waiting on it with why
+// the lifetime ended.
 func TestResolverProbeRunsOnItsLifetime(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var calls atomic.Int32
@@ -151,7 +153,7 @@ func TestResolverProbeRunsOnItsLifetime(t *testing.T) {
 			},
 			sawCaller: make(chan bool, 16),
 		}
-		life, end := context.WithCancel(t.Context())
+		life, end := context.WithCancelCause(t.Context())
 		r := NewResolver(life, tg.NewClient(inv))
 
 		const waiters = 3
@@ -171,10 +173,11 @@ func TestResolverProbeRunsOnItsLifetime(t *testing.T) {
 		}
 		synctest.Wait() // every waiter joined the probe
 
-		end()
+		stopped := Stopped(errors.New("connection reset"))
+		end(stopped) // what the assembly's client stopping does
 		for range waiters {
 			err := <-errs
-			require.ErrorIs(t, err, context.Canceled, "ending the lifetime fails the waiters")
+			require.ErrorIs(t, err, stopped, "ending the lifetime fails the waiters with why it ended")
 			assert.False(t, IsPeerSpecific(err), "the lifetime ending says nothing about the chat")
 		}
 		_, ok := r.cached(5)

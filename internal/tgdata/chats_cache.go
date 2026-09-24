@@ -92,7 +92,8 @@ type progressWatcher struct {
 
 // NewChatsCache creates a cache that fills itself through load. life is the
 // lifetime of the cache's owner: every load runs on it, so ending it cancels
-// a load in progress and fails whoever waits on it.
+// a load in progress and fails whoever waits on it with why it ended (its
+// cause).
 func NewChatsCache(life context.Context, load ChatsLoader) *ChatsCache {
 	return &ChatsCache{life: life, load: load}
 }
@@ -202,6 +203,11 @@ func (c *ChatsCache) run(f *chatsFlight) {
 	ctx, cancel := context.WithTimeout(c.life, chatsLoadTimeout)
 	defer cancel()
 	result, err := c.load(ctx, f.progress)
+	// A load the owner's end cut short fails with why it ended (e.g. the
+	// client stopping), not a bare cancellation.
+	if cause := context.Cause(c.life); err != nil && cause != nil {
+		err = fmt.Errorf("loading chats: %w", cause)
+	}
 
 	c.mu.Lock()
 	if err != nil {

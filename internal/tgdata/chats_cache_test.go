@@ -11,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // countingLoader returns a fixed listing and counts how many times the network
@@ -231,7 +233,7 @@ func TestChatsCacheLoad(t *testing.T) {
 		type ctxKey struct{}
 		sawCaller := make(chan bool, 1)
 		l := newGatedLoader()
-		life, end := context.WithCancel(t.Context())
+		life, end := context.WithCancelCause(t.Context())
 		c := NewChatsCache(life, func(ctx context.Context, onProgress ProgressFunc) (*ChatsList, error) {
 			sawCaller <- ctx.Value(ctxKey{}) != nil
 			return l.load(ctx, onProgress)
@@ -254,9 +256,10 @@ func TestChatsCacheLoad(t *testing.T) {
 		}
 		require.Eventually(t, func() bool { return c.watchers() == waiters }, time.Second, time.Millisecond, "every caller joins the load")
 
-		end() // what closing the assembly does
+		stopped := tgclient.Stopped(errors.New("connection reset"))
+		end(stopped) // what the assembly's client stopping does
 		for range waiters {
-			require.ErrorIs(t, <-errs, context.Canceled, "ending the lifetime fails the waiters")
+			require.ErrorIs(t, <-errs, stopped, "ending the lifetime fails the waiters with why it ended")
 		}
 		assert.Nil(t, c.newest, "a cancelled load retains nothing")
 		assert.Equal(t, int64(1), l.calls.Load())

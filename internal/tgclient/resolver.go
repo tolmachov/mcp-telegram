@@ -50,7 +50,7 @@ type Resolver struct {
 
 // NewResolver creates a resolver over client. life is the lifetime of the
 // resolver's owner: every probe runs on it, so ending it cancels a probe in
-// progress and fails whoever waits on it.
+// progress and fails whoever waits on it with why it ended (its cause).
 func NewResolver(life context.Context, client *tg.Client) *Resolver {
 	return &Resolver{
 		life:   life,
@@ -85,6 +85,11 @@ func (r *Resolver) Resolve(ctx context.Context, id int64) (Peer, error) {
 		defer cancel()
 		peer, err := resolvePeer(probeCtx, r.client, id)
 		if err != nil {
+			// A probe the owner's end cut short fails with why it ended
+			// (e.g. the client stopping), not a bare cancellation.
+			if cause := context.Cause(r.life); cause != nil {
+				return nil, fmt.Errorf("resolving chat %d: %w", id, cause)
+			}
 			return nil, err
 		}
 		r.store(id, peer)

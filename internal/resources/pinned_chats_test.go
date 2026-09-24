@@ -302,6 +302,32 @@ func TestWatchInBackgroundInitialFailureLogsError(t *testing.T) {
 	assert.NotContains(t, logs, "level=WARN", "initial failure must be Error, not Warn")
 }
 
+// TestWatchInBackgroundStoppedClientLogsDebug pins that a refresh the
+// Telegram client's stop cut short is no failure of the refresh: the stop is
+// logged where it happens, so the watcher logs it at Debug like a
+// cancellation.
+func TestWatchInBackgroundStoppedClientLogsDebug(t *testing.T) {
+	var buf syncBuffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	inv := &pinnedInvoker{}
+	inv.setErr(tgclient.Stopped(errors.New("connection reset")))
+	p, _ := newTestProvider(t, inv, logger, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := p.WatchInBackground(ctx, time.Hour)
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(buf.String(), "initial refresh cancelled")
+	}, 2*time.Second, 10*time.Millisecond, "a stopped client's refresh must log at Debug")
+
+	cancel()
+	<-done
+
+	logs := buf.String()
+	assert.NotContains(t, logs, "level=ERROR")
+	assert.NotContains(t, logs, "level=WARN")
+}
+
 // TestWatchInBackgroundZeroIntervalDisables pins the documented "0 disables the
 // watcher" contract: it must return an already-closed channel, never call
 // Telegram, and never reach time.NewTicker (which panics on a non-positive

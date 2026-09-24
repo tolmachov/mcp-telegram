@@ -15,6 +15,7 @@ import (
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
 	"github.com/tolmachov/mcp-telegram/internal/presentation"
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
@@ -184,8 +185,9 @@ func (p *PinnedChatsProvider) doRefresh(ctx context.Context) error {
 // instead of a silently frozen resource set: the initial refresh failing is
 // logged at Error (startup is broken from the first tick), while subsequent
 // periodic failures are logged at Warn (they may be transient and the ticker
-// retries every interval). Context cancellation is logged at Debug in both
-// cases — it is not a real error, just shutdown.
+// retries every interval). A refresh the watcher's end or the Telegram
+// client's stop cut short (endedRefresh) is logged at Debug in both cases: it
+// is no failure of the refresh, and the stop is logged where it happens.
 func (p *PinnedChatsProvider) WatchInBackground(ctx context.Context, interval time.Duration) <-chan struct{} {
 	done := make(chan struct{})
 	// Split the two non-positive cases so a malformed config is loud while an
@@ -211,7 +213,7 @@ func (p *PinnedChatsProvider) WatchInBackground(ctx context.Context, interval ti
 		defer ticker.Stop()
 		if err := p.RefreshResources(ctx); err != nil {
 			switch {
-			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			case endedRefresh(err):
 				p.logger.Debug("pinned chats initial refresh cancelled", "err", err)
 			default:
 				p.logger.Error("pinned chats initial refresh failed", "err", err)
@@ -224,7 +226,7 @@ func (p *PinnedChatsProvider) WatchInBackground(ctx context.Context, interval ti
 			case <-ticker.C:
 				if err := p.RefreshResources(ctx); err != nil {
 					switch {
-					case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+					case endedRefresh(err):
 						p.logger.Debug("pinned chats refresh cancelled", "err", err)
 					default:
 						p.logger.Warn("pinned chats refresh failed", "err", err)
@@ -234,6 +236,13 @@ func (p *PinnedChatsProvider) WatchInBackground(ctx context.Context, interval ti
 		}
 	}()
 	return done
+}
+
+// endedRefresh reports whether err is a refresh cut short rather than one
+// that failed: the watcher's context ended, or the Telegram client stopped
+// under it (tgclient.ErrClientStopped).
+func endedRefresh(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, tgclient.ErrClientStopped)
 }
 
 // handlePinnedChat fetches the last 100 messages for a pinned chat.
