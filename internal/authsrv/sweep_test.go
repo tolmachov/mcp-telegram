@@ -1,8 +1,12 @@
 package authsrv
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
+	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -11,6 +15,7 @@ import (
 
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore"
 	"github.com/tolmachov/mcp-telegram/internal/sessionstore/sessionstoretest"
+	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
 // TestSweepOrphanSessions pins the reclamation rule: only sessions whose blob
@@ -184,4 +189,73 @@ func TestSweepIsolatesPanickingPart(t *testing.T) {
 	created, err = store.RedeemCode(ctx, family, base.Add(time.Hour))
 	require.NoError(t, err)
 	assert.True(t, created, "the grant sweep must run despite the session sweep panicking")
+}
+
+// sweepResultStore answers SweepAuthState with a fixed result.
+type sweepResultStore struct {
+	sessionstore.Store
+	undecodable []string
+	err         error
+}
+
+func (s sweepResultStore) SweepAuthState(context.Context, time.Time) ([]string, error) {
+	return s.undecodable, s.err
+}
+
+// newLoggingServer returns an AuthServer over store whose log goes to the
+// returned buffer.
+func newLoggingServer(t *testing.T, store sessionstore.Store) (*AuthServer, *bytes.Buffer) {
+	t.Helper()
+	var logs bytes.Buffer
+	a, err := New(testConfig(t), slog.New(slog.NewTextHandler(&logs, nil)), store, neverStartLogin, noInvalidate)
+	require.NoError(t, err)
+	t.Cleanup(a.Close)
+	return a, &logs
+}
+
+// TestGrantSweepReportsUndecodableRecords pins that every undecodable grant
+// record the store deleted is logged as a warning, alongside the failures of
+// the same sweep.
+func TestGrantSweepReportsUndecodableRecords(t *testing.T) {
+	const family = "fedcba9876543210fedcba9876543210"
+	a, logs := newLoggingServer(t, sweepResultStore{
+		Store: sessionstoretest.New(t), undecodable: []string{family}, err: errors.New("boom"),
+	})
+	a.runSweep(t.Context())
+	assert.Contains(t, logs.String(),
+		`level=WARN msg="oauth state sweep: deleted an undecodable grant record; its refresh tokens are dead" family=`+family)
+	assert.Contains(t, logs.String(), `level=ERROR msg="oauth state sweep failed" err=boom`)
+}
+
+// cancelOnDeleteStore stands in for shutdown arriving mid-sweep: its Delete
+// cancels the sweep's context and fails the way a cancelled request does, and
+// SweepAuthState reports the ended context.
+type cancelOnDeleteStore struct {
+	sessionstore.Store
+	cancel context.CancelFunc
+}
+
+func (s cancelOnDeleteStore) Delete(context.Context, tgid.UserID, string) error {
+	s.cancel()
+	return context.Canceled
+}
+
+func (s cancelOnDeleteStore) SweepAuthState(ctx context.Context, _ time.Time) ([]string, error) {
+	return nil, fmt.Errorf("encrypted store: %w", ctx.Err())
+}
+
+// TestSweepStopsQuietlyOnShutdown pins that a sweep cut short by shutdown
+// stops without logging the failures cancellation causes as errors.
+func TestSweepStopsQuietlyOnShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	inner := sessionstoretest.NewWithClock(t, func() time.Time { return base })
+	for _, sid := range []string{"0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210"} {
+		require.NoError(t, inner.Session(allowedUser, sid, sessionKey(t)).StoreSession(ctx, []byte("stale")))
+	}
+	a, logs := newLoggingServer(t, cancelOnDeleteStore{Store: inner, cancel: cancel})
+	a.now = func() time.Time { return base.Add(refreshTokenTTL + sweepMargin + time.Minute) }
+
+	a.runSweep(ctx)
+	assert.NotContains(t, logs.String(), "level=ERROR")
 }

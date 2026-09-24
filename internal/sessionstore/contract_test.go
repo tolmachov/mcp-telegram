@@ -157,7 +157,9 @@ func TestGrantStoreSweepContract(t *testing.T) {
 			created, err = store.RedeemCode(ctx, liveFamily, now.Add(time.Hour))
 			require.NoError(t, err)
 			require.True(t, created)
-			require.NoError(t, store.SweepAuthState(ctx, now))
+			undecodable, err := store.SweepAuthState(ctx, now)
+			require.NoError(t, err)
+			assert.Empty(t, undecodable)
 
 			// Redeeming again creates a record only where none is left.
 			created, err = store.RedeemCode(ctx, testGrantFamily, now.Add(time.Hour))

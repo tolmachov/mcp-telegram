@@ -210,7 +210,7 @@ func (g *GCS) LoadGrant(ctx context.Context, family string) (GrantRecord, int64,
 	}
 	var grant GrantRecord
 	if err := json.Unmarshal(data, &grant); err != nil {
-		return GrantRecord{}, 0, fmt.Errorf("sessionstore: parsing grant: %w", err)
+		return GrantRecord{}, 0, fmt.Errorf("%w: %w", errUndecodableGrant, err)
 	}
 	return grant, r.Attrs.Generation, nil
 }
@@ -240,42 +240,63 @@ func (g *GCS) StoreGrant(ctx context.Context, family string, grant GrantRecord, 
 	return nil
 }
 
-// SweepAuthState deletes the expired grant records. A record it cannot read
-// or delete is skipped, so one bad object cannot stall the sweep of every
-// other; the failures are joined into the returned error.
-func (g *GCS) SweepAuthState(ctx context.Context, now time.Time) error {
+// SweepAuthState implements Store.SweepAuthState.
+func (g *GCS) SweepAuthState(ctx context.Context, now time.Time) ([]string, error) {
+	var undecodable []string
 	var errs []error
 	it := g.bucket.Objects(ctx, &storage.Query{Prefix: grantPrefix})
 	for {
+		if err := ctx.Err(); err != nil {
+			return undecodable, err
+		}
 		attrs, err := it.Next()
 		if errors.Is(err, iterator.Done) {
-			return errors.Join(errs...)
+			return undecodable, errors.Join(errs...)
 		}
 		if err != nil {
-			return errors.Join(append(errs, fmt.Errorf("sessionstore: listing grants: %w", err))...)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return undecodable, ctxErr
+			}
+			return undecodable, errors.Join(append(errs, fmt.Errorf("sessionstore: listing grants: %w", err))...)
 		}
 		family := strings.TrimSuffix(strings.TrimPrefix(attrs.Name, grantPrefix), ".json")
 		if !ValidSID(family) {
 			continue
 		}
-		if err := g.sweepGrant(ctx, family, now); err != nil {
+		deletedUndecodable, err := g.sweepGrant(ctx, family, attrs.Generation, now)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("sessionstore: sweeping grant %s: %w", family, err))
+		}
+		if deletedUndecodable {
+			undecodable = append(undecodable, family)
 		}
 	}
 }
 
-// sweepGrant deletes family's grant record if it is expired at now, unless it
-// changed after it was read.
-func (g *GCS) sweepGrant(ctx context.Context, family string, now time.Time) error {
+// sweepGrant deletes family's grant record if it is expired at now or cannot
+// be decoded, unless it changed after it was read, and reports whether it
+// deleted an undecodable one. LoadGrant yields no generation for an
+// undecodable record, so that delete is conditioned on listed, the generation
+// the listing saw: a record rewritten since then is left to the next sweep.
+func (g *GCS) sweepGrant(ctx context.Context, family string, listed int64, now time.Time) (bool, error) {
 	grant, generation, err := g.LoadGrant(ctx, family)
-	if err != nil || generation == 0 || !grant.Expired(now) {
-		return err
+	undecodable := errors.Is(err, errUndecodableGrant)
+	switch {
+	case undecodable:
+		generation = listed
+	case err != nil:
+		return false, err
+	case generation == 0 || !grant.Expired(now):
+		return false, nil
 	}
 	err = g.bucket.Object(grantObjectName(family)).If(storage.Conditions{GenerationMatch: generation}).Delete(ctx)
-	if err != nil && !isPreconditionFailed(err) && !errors.Is(err, storage.ErrObjectNotExist) {
-		return fmt.Errorf("deleting expired grant: %w", err)
+	if isPreconditionFailed(err) || errors.Is(err, storage.ErrObjectNotExist) {
+		return false, nil
 	}
-	return nil
+	if err != nil {
+		return false, fmt.Errorf("deleting grant: %w", err)
+	}
+	return undecodable, nil
 }
 
 type gcsSession struct {

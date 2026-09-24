@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,7 +26,7 @@ func TestGCSGrantCorruptionFailsWithoutOverwrite(t *testing.T) {
 	require.NoError(t, w.Close())
 
 	_, err = Encrypted(store, newCipher(t, testIssuer, newKey(t))).RotateGrant(ctx, testGrantFamily, 0, time.Now())
-	require.ErrorContains(t, err, "parsing grant")
+	require.ErrorIs(t, err, errUndecodableGrant)
 	r, err := object.NewReader(ctx)
 	require.NoError(t, err)
 	data, err := io.ReadAll(r)
@@ -112,37 +114,166 @@ func TestGrantWritesStampRecord(t *testing.T) {
 	}
 }
 
-// TestGrantSweepSkipsBadRecord pins that one unreadable grant record does not
-// stall the sweep: the expired records after it are still deleted, and the
-// sweep reports the bad one.
-func TestGrantSweepSkipsBadRecord(t *testing.T) {
-	const badFamily = "00000000000000000000000000000000" // lists first
+// badFamily is a grant family that lists before testGrantFamily.
+const badFamily = "00000000000000000000000000000000"
+
+// writeRawGrant stores data as family's grant record, bypassing encoding.
+func writeRawGrant(t *testing.T, b backend, family, data string) {
+	t.Helper()
+	switch b := b.(type) {
+	case *FS:
+		require.NoError(t, os.WriteFile(b.grantPath(family), []byte(data), 0o600))
+	case *GCS:
+		w := b.bucket.Object(grantObjectName(family)).NewWriter(t.Context())
+		_, err := io.WriteString(w, data)
+		require.NoError(t, err)
+		require.NoError(t, w.Close())
+	default:
+		t.Fatalf("unknown backend %T", b)
+	}
+}
+
+// redeemExpired creates family's grant record already expired at now.
+func redeemExpired(t *testing.T, store Store, family string, now time.Time) {
+	t.Helper()
+	created, err := store.RedeemCode(t.Context(), family, now.Add(-time.Minute))
+	require.NoError(t, err)
+	require.True(t, created)
+}
+
+// failGrantReads answers every read of family's grant object with a 403, an
+// error the GCS client does not retry.
+func failGrantReads(family string) func(http.RoundTripper) http.RoundTripper {
+	return func(rt http.RoundTripper) http.RoundTripper {
+		return roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method == http.MethodGet && strings.Contains(req.URL.Path, family) {
+				return forbidden(req), nil
+			}
+			return rt.RoundTrip(req)
+		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// forbidden is a 403 JSON API error response to req.
+func forbidden(req *http.Request) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusForbidden,
+		Header:     http.Header{"Content-Type": {"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"error":{"code":403,"message":"injected"}}`)),
+		Request:    req,
+	}
+}
+
+// TestGrantSweepDeletesUndecodableRecord pins that a grant record that cannot
+// be decoded, and so can never rotate, is deleted and reported once instead
+// of failing every sweep, and that the expired records after it are still
+// swept.
+func TestGrantSweepDeletesUndecodableRecord(t *testing.T) {
 	for name, b := range backends(t) {
 		t.Run(name, func(t *testing.T) {
 			ctx := t.Context()
 			now := time.Now()
-			switch b := b.(type) {
-			case *FS:
-				require.NoError(t, os.WriteFile(b.grantPath(badFamily), []byte("not-json"), 0o600))
-			case *GCS:
-				w := b.bucket.Object(grantObjectName(badFamily)).NewWriter(ctx)
-				_, err := io.WriteString(w, "not-json")
-				require.NoError(t, err)
-				require.NoError(t, w.Close())
-			}
+			writeRawGrant(t, b, badFamily, "not-json")
 			store := Encrypted(b, newCipher(t, testIssuer, newKey(t)))
-			created, err := store.RedeemCode(ctx, testGrantFamily, now.Add(-time.Minute))
-			require.NoError(t, err)
-			require.True(t, created)
+			redeemExpired(t, store, testGrantFamily, now)
 
-			err = store.SweepAuthState(ctx, now)
-			require.ErrorContains(t, err, badFamily)
-			require.ErrorContains(t, err, "parsing grant")
-			_, version, err := b.LoadGrant(ctx, testGrantFamily)
+			undecodable, err := store.SweepAuthState(ctx, now)
 			require.NoError(t, err)
-			assert.Zero(t, version, "the expired grant after the bad one must still be swept")
+			assert.Equal(t, []string{badFamily}, undecodable)
+			for _, family := range []string{badFamily, testGrantFamily} {
+				_, version, err := b.LoadGrant(ctx, family)
+				require.NoError(t, err)
+				assert.Zero(t, version, "grant %s must be swept", family)
+			}
+
+			undecodable, err = store.SweepAuthState(ctx, now)
+			require.NoError(t, err)
+			assert.Empty(t, undecodable, "a deleted record is reported once")
 		})
 	}
+}
+
+// TestGrantSweepSkipsUnreadableRecord pins that a grant record that fails to
+// read is left for the next sweep and reported in the error, without stalling
+// the sweep of the expired records after it.
+func TestGrantSweepSkipsUnreadableRecord(t *testing.T) {
+	for name, b := range map[string]backend{"fs": newTestFS(t), "gcs": newTestGCSWithTransport(t, failGrantReads(badFamily))} {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			now := time.Now()
+			store := Encrypted(b, newCipher(t, testIssuer, newKey(t)))
+			redeemExpired(t, store, badFamily, now)
+			redeemExpired(t, store, testGrantFamily, now)
+			if fs, ok := b.(*FS); ok {
+				require.NoError(t, os.Chmod(fs.grantPath(badFamily), 0))
+				t.Cleanup(func() { _ = os.Chmod(fs.grantPath(badFamily), 0o600) })
+			}
+
+			undecodable, err := store.SweepAuthState(ctx, now)
+			require.ErrorContains(t, err, "sweeping grant "+badFamily)
+			assert.NotErrorIs(t, err, errUndecodableGrant)
+			assert.Empty(t, undecodable)
+			_, version, err := b.LoadGrant(ctx, testGrantFamily)
+			require.NoError(t, err)
+			assert.Zero(t, version, "the expired grant after the unreadable one must still be swept")
+
+			if fs, ok := b.(*FS); ok {
+				require.NoError(t, os.Chmod(fs.grantPath(badFamily), 0o600))
+				_, version, err := b.LoadGrant(ctx, badFamily)
+				require.NoError(t, err)
+				assert.NotZero(t, version, "an unreadable record must be kept for the next sweep")
+			}
+		})
+	}
+}
+
+// TestGrantSweepStopsWhenContextEnds pins that a sweep whose context has ended
+// deletes nothing more and returns the context's error alone.
+func TestGrantSweepStopsWhenContextEnds(t *testing.T) {
+	for name, b := range backends(t) {
+		t.Run(name, func(t *testing.T) {
+			now := time.Now()
+			redeemExpired(t, Encrypted(b, newCipher(t, testIssuer, newKey(t))), testGrantFamily, now)
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+
+			_, err := b.SweepAuthState(ctx, now)
+			require.Equal(t, context.Canceled, err) //nolint:errorlint // the context's error must come back alone
+			_, version, err := b.LoadGrant(t.Context(), testGrantFamily)
+			require.NoError(t, err)
+			assert.NotZero(t, version)
+		})
+	}
+}
+
+// TestGCSGrantSweepStopsMidListing pins that a context ending part-way
+// through a GCS sweep drops the failures it caused: the read it cut short is
+// not reported, only the context's error.
+func TestGCSGrantSweepStopsMidListing(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	b := newTestGCSWithTransport(t, func(rt http.RoundTripper) http.RoundTripper {
+		return roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method == http.MethodGet && strings.Contains(req.URL.Path, badFamily) {
+				cancel()
+				return nil, context.Canceled
+			}
+			return rt.RoundTrip(req)
+		})
+	})
+	now := time.Now()
+	store := Encrypted(b, newCipher(t, testIssuer, newKey(t)))
+	redeemExpired(t, store, badFamily, now)
+	redeemExpired(t, store, testGrantFamily, now)
+
+	_, err := b.SweepAuthState(ctx, now)
+	require.Equal(t, context.Canceled, err) //nolint:errorlint // the context's error must come back alone
+	_, version, err := b.LoadGrant(t.Context(), testGrantFamily)
+	require.NoError(t, err)
+	assert.NotZero(t, version, "the sweep must stop at the cancellation")
 }
 
 // TestGrantRotationZeroIsRefusal pins that an outcome nobody set cannot pass

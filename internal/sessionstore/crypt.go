@@ -236,11 +236,12 @@ func (s *encryptedStore) DeleteRevoked(ctx context.Context, userID tgid.UserID, 
 // Grant records carry no secret either (counters and an expiry), so the grant
 // rules (store.go) work on the backend's records directly.
 
-func (s *encryptedStore) SweepAuthState(ctx context.Context, now time.Time) error {
-	if err := s.inner.SweepAuthState(ctx, now); err != nil {
-		return fmt.Errorf("encrypted store: %w", err)
+func (s *encryptedStore) SweepAuthState(ctx context.Context, now time.Time) ([]string, error) {
+	undecodable, err := s.inner.SweepAuthState(ctx, now)
+	if err != nil {
+		return undecodable, fmt.Errorf("encrypted store: %w", err)
 	}
-	return nil
+	return undecodable, nil
 }
 
 type encryptedSession struct {

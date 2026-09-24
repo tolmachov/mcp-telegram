@@ -172,8 +172,14 @@ type Store interface {
 	// RevokeGrant marks family revoked so none of its refresh tokens rotate
 	// again. A missing family is already dead.
 	RevokeGrant(ctx context.Context, family string) error
-	// SweepAuthState deletes grant records that are expired at now.
-	SweepAuthState(ctx context.Context, now time.Time) error
+	// SweepAuthState deletes grant records that are expired at now, and ones
+	// that cannot be decoded: those can never rotate or be revoked, so they
+	// would otherwise fail every sweep forever. It returns the families of the
+	// undecodable records it deleted, whose refresh tokens are now dead. A
+	// record it cannot read or delete is skipped, so one bad record cannot
+	// stall the sweep of every other; the failures are joined into the
+	// returned error. When ctx ends it stops and returns only ctx's error.
+	SweepAuthState(ctx context.Context, now time.Time) (undecodable []string, err error)
 
 	// encrypted restricts implementations to the store Encrypted returns (and
 	// wrappers embedding it), so no Store can skip identity validation.
@@ -199,7 +205,7 @@ type backend interface {
 	DeleteRevoked(ctx context.Context, userID tgid.UserID, sid string) error
 	LoadGrant(ctx context.Context, family string) (grant GrantRecord, version int64, err error)
 	StoreGrant(ctx context.Context, family string, grant GrantRecord, version int64) error
-	SweepAuthState(ctx context.Context, now time.Time) error
+	SweepAuthState(ctx context.Context, now time.Time) (undecodable []string, err error)
 }
 
 // parseSessionBase reverses sessionBase. Listings skip anything that does not
@@ -255,6 +261,10 @@ func (g GrantRecord) rotate(expected int64) (GrantRecord, GrantRotation) {
 	g.Generation++
 	return g, GrantRotated
 }
+
+// errUndecodableGrant is the error a backend's LoadGrant wraps when a stored
+// grant record does not decode.
+var errUndecodableGrant = errors.New("sessionstore: parsing grant")
 
 // ErrGrantConflict is returned by a backend's StoreGrant when the record
 // changed since it was loaded (or already exists, for a create).

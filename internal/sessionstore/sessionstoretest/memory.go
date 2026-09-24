@@ -170,7 +170,9 @@ func (m *memory) StoreGrant(_ context.Context, family string, grant sessionstore
 	return nil
 }
 
-func (m *memory) SweepAuthState(_ context.Context, now time.Time) error {
+// SweepAuthState deletes the expired grants. Memory records always decode,
+// so it never reports an undecodable one.
+func (m *memory) SweepAuthState(_ context.Context, now time.Time) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for family, grant := range m.grants {
@@ -178,7 +180,7 @@ func (m *memory) SweepAuthState(_ context.Context, now time.Time) error {
 			delete(m.grants, family)
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 type memorySession struct {

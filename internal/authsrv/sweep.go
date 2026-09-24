@@ -73,7 +73,12 @@ func (a *AuthServer) runSweep(ctx context.Context) {
 	a.runIsolated("session sweep", func() { a.sweepRefs(ctx, "sessions", a.store.List, a.store.Delete) })
 	a.runIsolated("tombstone sweep", func() { a.sweepRefs(ctx, "tombstones", a.store.ListRevoked, a.store.DeleteRevoked) })
 	a.runIsolated("grant sweep", func() {
-		if err := a.store.SweepAuthState(ctx, a.now()); err != nil {
+		undecodable, err := a.store.SweepAuthState(ctx, a.now())
+		for _, family := range undecodable {
+			a.logger.Warn("oauth state sweep: deleted an undecodable grant record; its refresh tokens are dead",
+				"family", family)
+		}
+		if err != nil && ctx.Err() == nil {
 			a.logger.Error("oauth state sweep failed", "err", err)
 		}
 	})
@@ -81,7 +86,8 @@ func (a *AuthServer) runSweep(ctx context.Context) {
 
 // sweepRefs deletes every entry list returns whose UpdatedAt is older than
 // the refresh-token TTL plus sweepMargin. Individual failures are logged and
-// skipped — the next sweep retries.
+// skipped — the next sweep retries. Shutdown (ctx ending) stops it without
+// logging the failures that cancellation causes.
 func (a *AuthServer) sweepRefs(
 	ctx context.Context,
 	label string,
@@ -89,6 +95,9 @@ func (a *AuthServer) sweepRefs(
 	del func(context.Context, tgid.UserID, string) error,
 ) {
 	refs, err := list(ctx)
+	if ctx.Err() != nil {
+		return
+	}
 	if err != nil {
 		a.logger.Error("auth sweep: listing failed", "sweep", label, "err", err)
 		return
@@ -100,7 +109,11 @@ func (a *AuthServer) sweepRefs(
 		if age <= cutoff {
 			continue
 		}
-		if err := del(ctx, ref.UserID, ref.SID); err != nil {
+		err := del(ctx, ref.UserID, ref.SID)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
 			a.logger.Error("auth sweep: delete failed",
 				"sweep", label, "user_id", ref.UserID, "session", ref.SID, "err", err)
 			continue

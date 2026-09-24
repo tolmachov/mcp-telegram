@@ -74,7 +74,7 @@ func (f *FS) LoadGrant(_ context.Context, family string) (GrantRecord, int64, er
 	}
 	var grant GrantRecord
 	if err := json.Unmarshal(data, &grant); err != nil {
-		return GrantRecord{}, 0, fmt.Errorf("sessionstore: parsing grant: %w", err)
+		return GrantRecord{}, 0, fmt.Errorf("%w: %w", errUndecodableGrant, err)
 	}
 	h := fnv.New64a()
 	_, _ = h.Write(data)
@@ -217,30 +217,55 @@ func (f *FS) DeleteRevoked(_ context.Context, userID tgid.UserID, sid string) er
 	return nil
 }
 
-// SweepAuthState deletes the expired grant records. A record it cannot read
-// or delete is skipped, so one bad file cannot stall the sweep of every other;
-// the failures are joined into the returned error.
-func (f *FS) SweepAuthState(ctx context.Context, now time.Time) error {
+// SweepAuthState implements Store.SweepAuthState.
+func (f *FS) SweepAuthState(ctx context.Context, now time.Time) ([]string, error) {
 	entries, err := os.ReadDir(f.grantsDir())
 	if err != nil {
-		return fmt.Errorf("sessionstore: listing grants: %w", err)
+		return nil, fmt.Errorf("sessionstore: listing grants: %w", err)
 	}
+	var undecodable []string
 	var errs []error
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return undecodable, err
+		}
 		family, ok := strings.CutSuffix(entry.Name(), ".json")
 		if entry.IsDir() || !ok || !ValidSID(family) {
 			continue
 		}
-		lock := f.grantLock(family)
-		lock.Lock()
-		grant, version, err := f.LoadGrant(ctx, family)
-		if err == nil && version != 0 && grant.Expired(now) {
-			err = os.Remove(f.grantPath(family))
-		}
-		lock.Unlock()
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
+		deletedUndecodable, err := f.sweepGrant(ctx, family, now)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("sessionstore: sweeping grant %s: %w", family, err))
 		}
+		if deletedUndecodable {
+			undecodable = append(undecodable, family)
+		}
 	}
-	return errors.Join(errs...)
+	return undecodable, errors.Join(errs...)
+}
+
+// sweepGrant deletes family's grant record if it is expired at now or cannot
+// be decoded, and reports whether it deleted an undecodable one. Holding
+// family's lock stripe keeps a concurrent write from landing between the read
+// and the removal.
+func (f *FS) sweepGrant(ctx context.Context, family string, now time.Time) (bool, error) {
+	lock := f.grantLock(family)
+	lock.Lock()
+	defer lock.Unlock()
+	grant, version, err := f.LoadGrant(ctx, family)
+	undecodable := errors.Is(err, errUndecodableGrant)
+	switch {
+	case undecodable:
+	case err != nil:
+		return false, err
+	case version == 0 || !grant.Expired(now):
+		return false, nil
+	}
+	if err := os.Remove(f.grantPath(family)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("removing grant: %w", err)
+	}
+	return undecodable, nil
 }
