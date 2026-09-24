@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -51,6 +52,31 @@ func TestClientDownMiddlewarePassesOtherMethods(t *testing.T) {
 	assert.Same(t, read, res, "what a read got before the stop is still true")
 }
 
+// callThroughClientDown registers handler on a server behind the
+// clientDownMiddleware of tgClient and calls its tool name with args,
+// returning the text blocks of the result.
+func callThroughClientDown(t *testing.T, srv *Server, tgClient telegramClient, handler tools.Handler, name string, args map[string]any) (texts []string, isError bool) {
+	t.Helper()
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
+	server.AddReceivingMiddleware(srv.clientDownMiddleware(tgClient))
+	handler.Register(server)
+
+	serverT, clientT := mcp.NewInMemoryTransports()
+	ss, err := server.Connect(t.Context(), serverT, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ss.Close() })
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil).Connect(t.Context(), clientT, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: name, Arguments: args})
+	require.NoError(t, err)
+	for _, c := range res.Content {
+		texts = append(texts, c.(*mcp.TextContent).Text)
+	}
+	return texts, res.IsError
+}
+
 // TestClientDownExplainsADeadSessionOnce pins who explains a dead session: a
 // real tool whose call the home DC refused renders only its failure, and the
 // server appends the transport's explanation — so the model reads it once.
@@ -66,25 +92,83 @@ func TestClientDownExplainsADeadSessionOnce(t *testing.T) {
 				tgClient.stop(dead)
 				return dead
 			})))
-			server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
-			server.AddReceivingMiddleware(srv.clientDownMiddleware(tgClient))
-			tools.NewMeGetHandler(api).Register(server)
 
-			serverT, clientT := mcp.NewInMemoryTransports()
-			ss, err := server.Connect(t.Context(), serverT, nil)
-			require.NoError(t, err)
-			t.Cleanup(func() { _ = ss.Close() })
-			cs, err := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil).Connect(t.Context(), clientT, nil)
-			require.NoError(t, err)
-			t.Cleanup(func() { _ = cs.Close() })
-
-			res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "GetMe", Arguments: map[string]any{}})
-			require.NoError(t, err)
-			require.True(t, res.IsError)
-			require.Len(t, res.Content, 2)
+			texts, isError := callThroughClientDown(t, srv, tgClient, tools.NewMeGetHandler(api), "GetMe", map[string]any{})
+			require.True(t, isError)
+			require.Len(t, texts, 2)
 			assert.Equal(t, "Failed to get current user: getting current user: telegram session is not authorized: rpc error code 401: SESSION_REVOKED.",
-				res.Content[0].(*mcp.TextContent).Text, "the tool renders only its failure")
-			assert.Equal(t, srv.clientDownText(dead, false), res.Content[1].(*mcp.TextContent).Text, "the server explains the dead session")
+				texts[0], "the tool renders only its failure")
+			assert.Equal(t, srv.clientDownText(dead, true), texts[1], "the server explains the dead session")
 		})
 	}
+}
+
+// TestClientDownAgreesWithASecondaryRefusal pins that a call a secondary DC
+// refused, answered after the home DC confirmed the session and the client
+// stopped for a reconnect, is told one thing: the session is valid and
+// reconnecting restores the refused calls — never to log out or sign in.
+func TestClientDownAgreesWithASecondaryRefusal(t *testing.T) {
+	refusal := tgerr.New(401, "AUTH_KEY_UNREGISTERED")
+	inFlight := fmt.Errorf("%w (%w); the server is asking the home DC whether the session still stands", tgclient.ErrSecondaryRefusal, refusal)
+	stopped := fmt.Errorf("%w (%w) while the home DC still accepts it; reconnecting restores the calls it serves", tgclient.ErrSecondaryRefusal, refusal)
+	for _, transport := range []string{TransportStdio, TransportHTTP} {
+		t.Run(transport, func(t *testing.T) {
+			srv := &Server{opts: Options{Transport: transport}}
+			tgClient := newFakeClient()
+			api := tg.NewClient(telegramfake.New(telegramfake.Typed(func(context.Context, *tg.UsersGetFullUserRequest, *tg.UsersUserFull) error {
+				tgClient.stop(stopped)
+				return inFlight
+			})))
+
+			texts, isError := callThroughClientDown(t, srv, tgClient, tools.NewMeGetHandler(api), "GetMe", map[string]any{})
+			require.True(t, isError)
+			require.Len(t, texts, 2)
+			assert.Contains(t, texts[0], "Do not ask the user to sign in again", "the tool's own hint")
+			assert.Equal(t, srv.clientDownText(stopped, true), texts[1])
+			for _, text := range texts {
+				assert.NotContains(t, text, "mcp-telegram logout")
+				assert.NotContains(t, text, "mcp-telegram login")
+				assert.NotContains(t, text, "QR login")
+			}
+		})
+	}
+}
+
+// TestClientDownDefersToACutShortBatch pins what a batch the client stopped
+// under reads over HTTP: MarkAsRead reports the chat it marked, the one the
+// stop failed and the one it skipped, and the appended answer keeps the
+// marked chat from being repeated while leaving the others to be retried
+// once the next request has reconnected — it does not claim the call
+// completed.
+func TestClientDownDefersToACutShortBatch(t *testing.T) {
+	srv := &Server{opts: Options{Transport: TransportHTTP}}
+	stop := errors.New("telegram client stopped: connection reset")
+	tgClient := newFakeClient()
+	resolve := func(id int64) telegramfake.InvokeFunc {
+		return telegramfake.Typed(func(_ context.Context, _ *tg.UsersGetUsersRequest, out *tg.UserClassVector) error {
+			out.Elems = []tg.UserClass{&tg.User{ID: id, AccessHash: id}}
+			return nil
+		})
+	}
+	api := tg.NewClient(telegramfake.New(
+		resolve(1), resolve(2), resolve(3),
+		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesReadHistoryRequest, out *tg.MessagesAffectedMessages) error {
+			return nil
+		}),
+		// gotd fails the calls in flight when the client's Run loop ends.
+		telegramfake.Typed(func(context.Context, *tg.MessagesReadHistoryRequest, *tg.MessagesAffectedMessages) error {
+			tgClient.stop(stop)
+			return context.Canceled
+		}),
+	))
+
+	texts, isError := callThroughClientDown(t, srv, tgClient, tools.NewMessageReadHandler(tgclient.NewResolver(t.Context(), api)), "MarkAsRead",
+		map[string]any{"chat_ids": []int64{1, 2, 3}})
+	require.False(t, isError, "a batch that returned what it managed stays a success")
+	require.Len(t, texts, 2)
+	assert.Contains(t, texts[0], `"success_ids":[1]`)
+	assert.Contains(t, texts[0], `"skipped_ids":[3]`)
+	assert.Equal(t, "The Telegram connection stopped while this call ran: what its result reports as done stands, so do not repeat that; "+
+		"what it reports as failed, skipped or not done can be retried once the connection is restored. "+
+		"The Telegram connection for this account stopped (telegram client stopped: connection reset). The next request reconnects it.", texts[1])
 }
