@@ -62,8 +62,7 @@ const notLoggedInMessage = "mcp-telegram is not logged in to Telegram — the st
 
 // Options configures New: the resolved CLI settings, the process's standard
 // streams and, for the http transport, the session store the caller builds.
-// New validates the combination and builds the summariser; a summarisation
-// misconfiguration only disables SummarizeChat (see Summarize).
+// New validates the combination and builds the summariser.
 type Options struct {
 	Config       *tgclient.Config
 	Version      string
@@ -193,12 +192,13 @@ func summarizeUnavailable(transport string, err error) error {
 }
 
 // Run starts the MCP server on the configured transport (stdio, or streamable
-// HTTP behind the embedded OAuth server). When the server cannot serve at
-// all — missing credentials, an unusable session store, a connect-phase failure, a failed auth check, or a
-// session that is simply not authorized — the stdio path comes up in
-// login-required mode instead of failing: a server exposing one loudly-named
-// tool that reports the problem, plus instructions that say the same thing to
-// the model. See runLoginRequired for why that beats failing the connection.
+// HTTP behind the embedded OAuth server). When the server cannot serve at all
+// — missing credentials, an unusable session store, a connect-phase failure,
+// a failed auth check, or a session that is simply not authorized — the stdio
+// path comes up in login-required mode instead of failing: a server exposing
+// one loudly-named tool that reports the problem, plus instructions that say
+// the same thing to the model. See runLoginRequired for why that beats
+// failing the connection.
 //
 // Over HTTP only the configuration conditions can arise, because the per-user
 // clients are connected lazily by the pool; with no MCP peer to tell, they
@@ -579,11 +579,11 @@ const pinnedWatchExitTimeout = 5 * time.Second
 // the variants proxy and, last, disconnects the Telegram client, so nothing
 // of the assembly still runs on it. It waits for the watcher to exit so its
 // goroutine cannot race with server teardown while mid-way through
-// AddResource/RemoveResources. The cancel stops it deterministically; the timeout only guards against a genuinely
-// wedged provider (e.g. blocked in a Telegram call) holding up shutdown
-// indefinitely. If it ever fires we are abandoning a live goroutine that will
-// then touch a torn-down server — a real correctness hazard, so it logs at
-// Error, not Warn.
+// AddResource/RemoveResources. The cancel stops it deterministically; the
+// timeout only guards against a genuinely wedged provider (e.g. blocked in a
+// Telegram call) holding up shutdown indefinitely. If it ever fires we are
+// abandoning a live goroutine that will then touch a torn-down server — a
+// real correctness hazard, so it logs at Error, not Warn.
 func (a *assembly) Close() error {
 	a.end()
 	select {
@@ -605,11 +605,9 @@ func (a *assembly) Close() error {
 // the read-only research subset. The same handler instances are shared: they
 // carry no per-server state, so registering one on several inner servers is
 // safe. research holds tools that do not mutate Telegram or the local
-// filesystem; the remaining tools mutate Telegram state. BackupMessages is
-// local-stdio-only and is exposed solely by the full variant.
-// The remaining 13 mutate state (send, edit, delete, forward, react,
-// mark-as-read, join/leave, mute, and the four folder edits) and are excluded
-// from the research variant.
+// filesystem; mutating ones (send, edit, delete, forward, react, mark-as-read,
+// join/leave, mute, and the four folder edits) are left out of it.
+// BackupMessages is local-stdio-only and is exposed solely by the full variant.
 func (s *Server) buildHandlers(api *tg.Client, peers *tgclient.Resolver, msgProvider *messages.Provider, chatsCache *tgdata.ChatsCache) (full, research []tools.Handler) {
 	research = []tools.Handler{
 		tools.NewMeGetHandler(api),

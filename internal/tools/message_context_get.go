@@ -78,7 +78,8 @@ func (h *MessageContextGetHandler) handle(ctx context.Context, req *mcp.CallTool
 	return nil, out, nil
 }
 
-// clampWindow normalises a before/after parameter: negative → 0, unset → default, > max → max.
+// clampWindow normalises a before/after parameter: negative → 0, unset →
+// default, > max → max.
 func clampWindow(n int) int {
 	switch {
 	case n < 0:

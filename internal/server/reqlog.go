@@ -55,14 +55,15 @@ var safeParamFields = map[string]struct{}{
 // requestLogMiddleware records every JSON-RPC method call server-side — which
 // the SDK does not do on its own. It answers three operational questions the
 // bare "POST 200" access log cannot: who called (the user_id and username a
-// per-user assembly's logger carries, see userLogger), what they called (method + tool + redacted params), and whether an error was returned
-// to them (and which). Content methods log at Info (with redacted params for
+// per-user assembly's logger carries, see userLogger), what they called
+// (method + tool + redacted params), and whether an error was returned to
+// them (and which). Content methods log at Info (with redacted params for
 // tools/call); lifecycle/list methods at Debug. A Go error escalates to Error
 // (and, via the GCP handler, to Error Reporting); an IsError tool result — a
-// handled failure delivered to the client inside a 200 — logs at Warn with the
-// error detail; and a degraded success that set a tools.MetaWarning marker (a
-// usable 200 that still hides a failure, e.g. a partial summary) also logs at
-// Warn, so it is not buried in an Info line.
+// handled failure delivered to the client inside a 200 — logs at Warn with
+// the error detail; and a degraded success that set a tools.MetaWarning
+// marker (a usable 200 that still hides a failure, e.g. a partial summary)
+// also logs at Warn, so it is not buried in an Info line.
 //
 // Sensitive parameters are never logged verbatim (see safeParamFields): with
 // open access the params would otherwise carry arbitrary users' Telegram

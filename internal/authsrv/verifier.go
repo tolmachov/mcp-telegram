@@ -60,12 +60,12 @@ type UserIdentity struct {
 	// Username is the Telegram @username captured at login (may be empty:
 	// usernames are optional and can change; ID is the stable key).
 	Username string
-	// SessionID is this authorization's session-object suffix. Together with ID it keys the client pool,
-	// so multiple independent authorizations of one account each get their own
-	// assembly.
+	// SessionID is this authorization's session-object suffix. Together with
+	// ID it keys the client pool, so multiple independent authorizations of
+	// one account each get their own assembly.
 	SessionID string
 	// SessionKey is this authorization's per-session encryption key from the
-	// token. It is passed to the session store to decrypt this session's blob
+	// token. It is passed to the session store to decrypt this session's blob.
 	// Treat as secret: never log it.
 	SessionKey []byte
 }

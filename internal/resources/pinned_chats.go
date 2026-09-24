@@ -167,8 +167,8 @@ func (p *PinnedChatsProvider) doRefresh(ctx context.Context) error {
 	// reaches the client directly, so listChanged-capable clients re-list and
 	// pick up the new set. In multi-variant mode the variants proxy drops these
 	// async notifications (they fire on a background context with no front
-	// session — see server.serveAssembly and the README), so those clients instead pick up
-	// the change on their next client-initiated resources/list.
+	// session — see server's assembly.run and the README), so those clients
+	// instead pick up the change on their next client-initiated resources/list.
 	return nil
 }
 

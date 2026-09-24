@@ -24,8 +24,8 @@ func refusedByHome(err error) bool {
 }
 
 // sessionError turns a refusal by the home DC — the error that ended the
-// client's Run loop or failed its readiness check — into the
-// ErrSessionUnauthorized verdict, keeping its cause.
+// client's Run loop, failed its readiness check or answered the check of a
+// refused call — into the ErrSessionUnauthorized verdict, keeping its cause.
 func sessionError(err error) error {
 	if refusedByHome(err) && !errors.Is(err, ErrSessionUnauthorized) {
 		return fmt.Errorf("%w: %w", ErrSessionUnauthorized, err)

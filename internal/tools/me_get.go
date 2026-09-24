@@ -22,7 +22,7 @@ func NewMeGetHandler(client *tg.Client) *MeGetHandler {
 // GetMeInput is the (empty) input for the GetMe tool.
 type GetMeInput struct{}
 
-// Register adds the tool to the MCP server using the typed mcp.AddTool helper.
+// Register adds the tool to the MCP server through AddTool.
 // The SDK serialises the tgdata.UserInfo return value as both text and
 // structured output automatically.
 func (h *MeGetHandler) Register(s *mcp.Server) {

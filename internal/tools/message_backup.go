@@ -25,7 +25,8 @@ const (
 	progressStateStopped
 )
 
-// telegramLaunchDate is the date when Telegram was launched (used as fallback for date range calculations).
+// telegramLaunchDate is the date when Telegram was launched (used as fallback
+// for date range calculations).
 var telegramLaunchDate = time.Date(2013, 8, 14, 0, 0, 0, 0, time.UTC)
 
 // (Path-sandbox helpers — DefaultBackupDir, sanitizeFilename, isPathAllowed,
@@ -322,8 +323,9 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 		return errResult(err.Error()), nil, nil
 	}
 
-	// Initialise the progress tracker. Token may be nil if the client did not request progress;
-	// in that case backupProgress.Send becomes a no-op via sendProgressWithToken.
+	// Initialise the progress tracker. Token may be nil if the client did not
+	// request progress; in that case backupProgress.Send becomes a no-op via
+	// sendProgressWithToken.
 	progress := newBackupProgress(
 		ctx,
 		req.Session,

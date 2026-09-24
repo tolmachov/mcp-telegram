@@ -1,16 +1,17 @@
 // Package sessionstore persists per-authorization Telegram (MTProto) sessions
-// for the multi-user HTTP mode. Each authorization gets its own opaque session blob,
-// keyed by the numeric Telegram user ID plus a random per-authorization
-// session id (sid), so one account may hold several independent sessions at
-// once (one per logged-in client) instead of fighting over a single object.
+// for the multi-user HTTP mode. Each authorization gets its own opaque
+// session blob, keyed by the numeric Telegram user ID plus a random
+// per-authorization session id (sid), so one account may hold several
+// independent sessions at once (one per logged-in client) instead of fighting
+// over a single object.
 //
 // Encrypted is the only way to obtain a Store: it validates every session id
 // and grant family before a backend sees it, and backends (FS, GCS) hold AEAD
 // ciphertext only. The v3 key is derived from BOTH the MCP_AUTH_TOKEN_KEYS
-// master keys AND a random per-session key that lives only inside the client's
-// OAuth token (never persisted here), so a leaked bucket + secret manager,
-// without a live token, cannot decrypt a session. Earlier formats and empty session ids are
-// intentionally unreadable.
+// master keys AND a random per-session key that lives only inside the
+// client's OAuth token (never persisted here), so a leaked bucket + secret
+// manager, without a live token, cannot decrypt a session. Earlier formats
+// and empty session ids are intentionally unreadable.
 //
 // The single-account stdio mode does NOT use this package — it keeps its
 // existing Keychain/state-file storage (internal/tgclient).

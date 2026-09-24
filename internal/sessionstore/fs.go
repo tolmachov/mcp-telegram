@@ -82,7 +82,8 @@ func (f *FS) LoadGrant(_ context.Context, family string) (GrantRecord, int64, er
 }
 
 // StoreGrant atomically replaces family's grant record if its version still
-// matches. The family lock makes the compare and the write one step.
+// matches. Holding family's lock stripe makes the compare and the write one
+// step.
 func (f *FS) StoreGrant(ctx context.Context, family string, grant GrantRecord, version int64) error {
 	lock := f.grantLock(family)
 	lock.Lock()
@@ -104,6 +105,7 @@ func (f *FS) StoreGrant(ctx context.Context, family string, grant GrantRecord, v
 	return nil
 }
 
+// grantLock returns the lock stripe family hashes onto.
 func (f *FS) grantLock(family string) *sync.Mutex {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(family))

@@ -8,13 +8,13 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/secret"
 )
 
+// storeName names the store in errors.
+const storeName = "Keychain"
+
 // keychainStore is a thin adapter over the shared macOS Keychain vault. The
 // vault is what actually reads/writes independent generic-password items; this
 // type exists to satisfy the Store interface and translate secret.ErrNotFound
 // into config.ErrNotFound.
-// storeName names the store in errors.
-const storeName = "Keychain"
-
 type keychainStore struct {
 	vault *secret.Vault
 }

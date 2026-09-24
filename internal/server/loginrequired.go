@@ -202,8 +202,8 @@ func (s *Server) fillProbedStatus(ctx context.Context, status *LoginRequiredStat
 		// already up. Loading the Telegram tools means building the assembly
 		// inside a live client.Run scope and swapping it into the running
 		// session; the variants proxy could not forward the resulting change
-		// notifications anyway (see serveAssembly), so ask for the reconnect that
-		// rebuilds cleanly.
+		// notifications anyway (see assembly.run), so ask for the reconnect
+		// that rebuilds cleanly.
 		status.State = StateAuthorizedPendingReconnect
 		status.Account = account
 		status.Detail = "Telegram is authorized now" + accountSuffix(account) + ", but this server process started without it — " + reconnectHint
@@ -234,11 +234,11 @@ func accountSuffix(account string) string {
 // It is serialised by probeMu. The login-required server holds no Telegram
 // connection of its own, but the *session* is shared: the SDK dispatches tool
 // calls concurrently, and each probe is a fresh client on the stored auth key.
-// Two live clients on one key is the AUTH_KEY_DUPLICATED hazard the user pool
-// goes to some length to avoid (see userPoolEvictGrace), and this tool
-// actively invites a concurrent `mcp-telegram login` in another terminal — so
-// at least keep our own probes from stacking. The authProbeTimeout ceiling on
-// each one bounds how long a caller can queue behind another.
+// Two live clients on one key is the AUTH_KEY_DUPLICATED hazard, and this
+// tool actively invites a concurrent `mcp-telegram login` in another
+// terminal — so at least keep our own probes from stacking. The
+// authProbeTimeout ceiling on each one bounds how long a caller can queue
+// behind another.
 func (s *Server) authProbe(ctx context.Context) (account string, authorized bool, err error) {
 	s.probeMu.Lock()
 	defer s.probeMu.Unlock()
