@@ -37,8 +37,8 @@ var ErrCorruptSession = errors.New("sessionstore: cannot decrypt session blob")
 
 // Cipher encrypts session blobs with the ring's first key and decrypts with
 // any. Every blob is prefixed with the sealing key's ID (see keyring.Key) so
-// decryption can pick the right key during rotation. AEADs are derived per
-// (master, userKey) on demand.
+// decryption can pick the right key during rotation. The AEADs depend on the
+// per-session key too, so forSession derives them once per session.
 type Cipher struct {
 	ring   *keyring.Ring
 	issuer string
@@ -50,62 +50,66 @@ func NewCipher(ring *keyring.Ring, issuer string) *Cipher {
 	return &Cipher{ring: ring, issuer: issuer}
 }
 
-// aeadFor returns the AEAD derived from both the master and per-session key.
-// The Encrypted store has already checked userKey (ValidSessionKey).
-func (c *Cipher) aeadFor(k keyring.Key, userKey []byte) (cipher.AEAD, error) {
-	aeadKey, err := hkdf.Key(sha256.New, k.Master, userKey, hkdfInfoSession, 32)
-	if err != nil {
-		return nil, fmt.Errorf("deriving v3 AEAD key: %w", err)
-	}
-	aead, err := keyring.NewGCM(aeadKey)
-	if err != nil {
-		return nil, fmt.Errorf("session AEAD: %w", err)
-	}
-	return aead, nil
+// sessionCipher seals and opens one user's session under one per-session key:
+// an AEAD per ring key, derived from both that master and the per-session
+// key, plus the AAD binding a blob to this deployment, format, and user.
+type sessionCipher struct {
+	primary byte
+	aeads   map[byte]cipher.AEAD
+	aad     []byte
 }
 
-// aad binds a blob to this deployment, format, and user.
-func (c *Cipher) aad(userID tgid.UserID) []byte {
-	return []byte(c.issuer + "|session|v3|" + userID.String())
+// forSession derives the session's AEADs for every key in the ring. The
+// Encrypted store has already checked userKey (ValidSessionKey).
+func (c *Cipher) forSession(userID tgid.UserID, userKey []byte) (*sessionCipher, error) {
+	sc := &sessionCipher{
+		primary: c.ring.Primary().ID,
+		aeads:   map[byte]cipher.AEAD{},
+		aad:     []byte(c.issuer + "|session|v3|" + userID.String()),
+	}
+	for _, k := range c.ring.Keys() {
+		aeadKey, err := hkdf.Key(sha256.New, k.Master, userKey, hkdfInfoSession, 32)
+		if err != nil {
+			return nil, fmt.Errorf("deriving v3 AEAD key: %w", err)
+		}
+		aead, err := keyring.NewGCM(aeadKey)
+		if err != nil {
+			return nil, fmt.Errorf("session AEAD: %w", err)
+		}
+		sc.aeads[k.ID] = aead
+	}
+	return sc, nil
 }
 
 // seal returns version || keyID || nonce || AEAD ciphertext.
-func (c *Cipher) seal(userID tgid.UserID, userKey, plaintext []byte) ([]byte, error) {
-	k := c.ring.Primary()
-	aead, err := c.aeadFor(k, userKey)
-	if err != nil {
-		return nil, err
-	}
+func (sc *sessionCipher) seal(plaintext []byte) ([]byte, error) {
+	aead := sc.aeads[sc.primary]
 	nonce := make([]byte, aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("generating nonce: %w", err)
 	}
 	buf := make([]byte, 0, 2+len(nonce)+len(plaintext)+aead.Overhead())
 	buf = append(buf, sessionBlobVersion)
-	buf = append(buf, k.ID)
+	buf = append(buf, sc.primary)
 	buf = append(buf, nonce...)
-	return aead.Seal(buf, nonce, plaintext, c.aad(userID)), nil
+	return aead.Seal(buf, nonce, plaintext, sc.aad), nil
 }
 
 // open reverses seal. Unsupported formats are rejected without migration.
-func (c *Cipher) open(userID tgid.UserID, userKey, blob []byte) ([]byte, error) {
+func (sc *sessionCipher) open(blob []byte) ([]byte, error) {
 	if len(blob) < 2 || blob[0] != sessionBlobVersion {
 		return nil, fmt.Errorf("%w: unsupported session blob version", ErrCorruptSession)
 	}
-	key, ok := c.ring.ByID(blob[1])
+	aead, ok := sc.aeads[blob[1]]
 	if !ok {
 		return nil, fmt.Errorf("%w: sealed with a key not in the ring", ErrCorruptSession)
-	}
-	aead, err := c.aeadFor(key, userKey)
-	if err != nil {
-		return nil, err
 	}
 	headerLen := 2 + aead.NonceSize()
 	if len(blob) < headerLen {
 		return nil, ErrCorruptSession
 	}
 	nonce := blob[2:headerLen]
-	plaintext, err := aead.Open(nil, nonce, blob[headerLen:], c.aad(userID))
+	plaintext, err := aead.Open(nil, nonce, blob[headerLen:], sc.aad)
 	if err != nil {
 		return nil, ErrCorruptSession
 	}
@@ -138,8 +142,8 @@ var ErrInvalidSID = errors.New("sessionstore: invalid session id")
 // the master keys.
 var ErrInvalidSessionKey = errors.New("sessionstore: invalid session key")
 
-// brokenSession is returned by Session for an invalid sid or session key;
-// every operation fails with the same error so the mismatch surfaces
+// brokenSession is returned by Session for an invalid sid or session key, or
+// when the session's cipher cannot be derived; every operation fails with the same error so the mismatch surfaces
 // immediately instead of building a path from unvalidated input or deriving a
 // weakened key.
 type brokenSession struct{ err error }
@@ -154,12 +158,11 @@ func (s *encryptedStore) Session(userID tgid.UserID, sid string, userKey []byte)
 	if !ValidSessionKey(userKey) {
 		return brokenSession{err: ErrInvalidSessionKey}
 	}
-	return &encryptedSession{
-		inner:   s.inner.Session(userID, sid),
-		cipher:  s.cipher,
-		userID:  userID,
-		userKey: userKey,
+	sc, err := s.cipher.forSession(userID, userKey)
+	if err != nil {
+		return brokenSession{err: err}
 	}
+	return &encryptedSession{inner: s.inner.Session(userID, sid), cipher: sc}
 }
 
 func (s *encryptedStore) Exists(ctx context.Context, userID tgid.UserID, sid string) (bool, error) {
@@ -245,10 +248,8 @@ func (s *encryptedStore) SweepAuthState(ctx context.Context, now time.Time) ([]s
 }
 
 type encryptedSession struct {
-	inner   session.Storage
-	cipher  *Cipher
-	userID  tgid.UserID
-	userKey []byte
+	inner  session.Storage
+	cipher *sessionCipher
 }
 
 func (s *encryptedSession) LoadSession(ctx context.Context) ([]byte, error) {
@@ -258,7 +259,7 @@ func (s *encryptedSession) LoadSession(ctx context.Context) ([]byte, error) {
 		// it to distinguish "fresh login" from a storage failure.
 		return nil, fmt.Errorf("encrypted store: %w", err)
 	}
-	plaintext, err := s.cipher.open(s.userID, s.userKey, blob)
+	plaintext, err := s.cipher.open(blob)
 	if err != nil {
 		// A present-but-unreadable blob (rotated-away key, issuer/AAD
 		// mismatch, truncation, tampering) is NOT mapped to ErrNotFound: that
@@ -272,7 +273,7 @@ func (s *encryptedSession) LoadSession(ctx context.Context) ([]byte, error) {
 
 // StoreSession seals data first, so nothing is written unencrypted.
 func (s *encryptedSession) StoreSession(ctx context.Context, data []byte) error {
-	blob, err := s.cipher.seal(s.userID, s.userKey, data)
+	blob, err := s.cipher.seal(data)
 	if err != nil {
 		return err
 	}

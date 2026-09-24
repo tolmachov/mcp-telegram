@@ -46,17 +46,27 @@ func newCipher(t *testing.T, issuer string, encoded ...string) *Cipher {
 	return NewCipher(ring, issuer)
 }
 
+// sessionCipherFor derives c's cipher for one user's session.
+func sessionCipherFor(t *testing.T, c *Cipher, userID tgid.UserID, userKey []byte) *sessionCipher {
+	t.Helper()
+	sc, err := c.forSession(userID, userKey)
+	if err != nil {
+		t.Fatalf("forSession: %v", err)
+	}
+	return sc
+}
+
 func TestCipherRoundTrip(t *testing.T) {
 	c := newCipher(t, testIssuer, newKey(t))
 	const user = tgid.UserID(42)
 	uk := userKeyForTest(t)
 	plaintext := []byte(`{"session":"data"}`)
 
-	blob, err := c.seal(user, uk, plaintext)
+	blob, err := sessionCipherFor(t, c, user, uk).seal(plaintext)
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
-	got, err := c.open(user, uk, blob)
+	got, err := sessionCipherFor(t, c, user, uk).open(blob)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -75,7 +85,7 @@ func TestCipherOpensGoldenBlob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decoding golden blob: %v", err)
 	}
-	got, err := c.open(42, bytes.Repeat([]byte{0x33}, 32), blob)
+	got, err := sessionCipherFor(t, c, 42, bytes.Repeat([]byte{0x33}, 32)).open(blob)
 	if err != nil {
 		t.Fatalf("open golden blob: %v", err)
 	}
@@ -90,22 +100,22 @@ func TestCipherRejectsWrongUserAndKey(t *testing.T) {
 	key1, key2 := rotationKeys()
 	c1 := newCipher(t, testIssuer, key1)
 	uk := userKeyForTest(t)
-	blob, err := c1.seal(1, uk, []byte("secret"))
+	blob, err := sessionCipherFor(t, c1, 1, uk).seal([]byte("secret"))
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 
-	if _, err := c1.open(2, uk, blob); err == nil {
+	if _, err := sessionCipherFor(t, c1, 2, uk).open(blob); err == nil {
 		t.Error("open with another user id succeeded; AAD binding is broken")
 	}
 
 	c2 := newCipher(t, testIssuer, key2)
-	if _, err := c2.open(1, uk, blob); err == nil {
+	if _, err := sessionCipherFor(t, c2, 1, uk).open(blob); err == nil {
 		t.Error("open with a foreign key ring succeeded")
 	}
 
 	cOther := newCipher(t, "https://other.example.com", key1)
-	if _, err := cOther.open(1, uk, blob); err == nil {
+	if _, err := sessionCipherFor(t, cOther, 1, uk).open(blob); err == nil {
 		t.Error("open under another issuer succeeded; AAD binding is broken")
 	}
 }
@@ -114,14 +124,14 @@ func TestCipherRotation(t *testing.T) {
 	oldKey, newKeyStr := rotationKeys()
 	cOld := newCipher(t, testIssuer, oldKey)
 	uk := userKeyForTest(t)
-	blob, err := cOld.seal(7, uk, []byte("session"))
+	blob, err := sessionCipherFor(t, cOld, 7, uk).seal([]byte("session"))
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 
 	// New deployments list the new key first but keep the old one for reads.
 	cRotated := newCipher(t, testIssuer, newKeyStr, oldKey)
-	got, err := cRotated.open(7, uk, blob)
+	got, err := sessionCipherFor(t, cRotated, 7, uk).open(blob)
 	if err != nil {
 		t.Fatalf("open after rotation: %v", err)
 	}
@@ -533,7 +543,7 @@ func TestCipherV3SplitKey(t *testing.T) {
 	uk := userKeyForTest(t)
 	plaintext := []byte("mtproto-session")
 
-	blob, err := c.seal(user, uk, plaintext)
+	blob, err := sessionCipherFor(t, c, user, uk).seal(plaintext)
 	if err != nil {
 		t.Fatalf("seal v3: %v", err)
 	}
@@ -541,17 +551,17 @@ func TestCipherV3SplitKey(t *testing.T) {
 		t.Fatalf("v3 blob must start with the version byte %#x, got %#v", sessionBlobVersion, blob[:1])
 	}
 
-	got, err := c.open(user, uk, blob)
+	got, err := sessionCipherFor(t, c, user, uk).open(blob)
 	if err != nil || string(got) != string(plaintext) {
 		t.Fatalf("open v3 = (%q, %v), want (%q, nil)", got, err, plaintext)
 	}
 
 	// Wrong per-session key: the master alone is not enough.
-	if _, err := c.open(user, userKeyForTest(t), blob); !errors.Is(err, ErrCorruptSession) {
+	if _, err := sessionCipherFor(t, c, user, userKeyForTest(t)).open(blob); !errors.Is(err, ErrCorruptSession) {
 		t.Errorf("open v3 with wrong user key: err = %v, want ErrCorruptSession", err)
 	}
 	// A missing split-key share must never decrypt a v3 blob.
-	if _, err := c.open(user, nil, blob); !errors.Is(err, ErrCorruptSession) {
+	if _, err := sessionCipherFor(t, c, user, nil).open(blob); !errors.Is(err, ErrCorruptSession) {
 		t.Errorf("open v3 with empty key: err = %v, want ErrCorruptSession", err)
 	}
 }
@@ -564,11 +574,11 @@ func TestCipherV3SplitKey(t *testing.T) {
 func TestCipherV3WrongUserRejected(t *testing.T) {
 	c := newCipher(t, testIssuer, newKey(t))
 	uk := userKeyForTest(t)
-	blob, err := c.seal(tgid.UserID(42), uk, []byte("mtproto-session"))
+	blob, err := sessionCipherFor(t, c, tgid.UserID(42), uk).seal([]byte("mtproto-session"))
 	if err != nil {
 		t.Fatalf("seal v3: %v", err)
 	}
-	if _, err := c.open(tgid.UserID(43), uk, blob); !errors.Is(err, ErrCorruptSession) {
+	if _, err := sessionCipherFor(t, c, tgid.UserID(43), uk).open(blob); !errors.Is(err, ErrCorruptSession) {
 		t.Errorf("open user 42's v3 blob as user 43 with the same key: err = %v, want ErrCorruptSession", err)
 	}
 }
@@ -576,7 +586,7 @@ func TestCipherV3WrongUserRejected(t *testing.T) {
 func TestCipherOldBlobRejected(t *testing.T) {
 	c := newCipher(t, testIssuer, newKey(t))
 	oldBlob := append([]byte{c.ring.Primary().ID}, make([]byte, 64)...)
-	if _, err := c.open(tgid.UserID(9), userKeyForTest(t), oldBlob); !errors.Is(err, ErrCorruptSession) {
+	if _, err := sessionCipherFor(t, c, tgid.UserID(9), userKeyForTest(t)).open(oldBlob); !errors.Is(err, ErrCorruptSession) {
 		t.Errorf("open old blob: err = %v, want ErrCorruptSession", err)
 	}
 }
@@ -588,12 +598,12 @@ func TestCipherV3Rotation(t *testing.T) {
 	cOld := newCipher(t, testIssuer, oldKey)
 	const user = tgid.UserID(7)
 	uk := userKeyForTest(t)
-	blob, err := cOld.seal(user, uk, []byte("v3-current"))
+	blob, err := sessionCipherFor(t, cOld, user, uk).seal([]byte("v3-current"))
 	if err != nil {
 		t.Fatalf("seal v3: %v", err)
 	}
 	cRotated := newCipher(t, testIssuer, newKeyStr, oldKey)
-	got, err := cRotated.open(user, uk, blob)
+	got, err := sessionCipherFor(t, cRotated, user, uk).open(blob)
 	if err != nil || string(got) != "v3-current" {
 		t.Fatalf("open v3 after rotation = (%q, %v), want (%q, nil)", got, err, "v3-current")
 	}
