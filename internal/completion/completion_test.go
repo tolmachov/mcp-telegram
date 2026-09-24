@@ -3,6 +3,7 @@ package completion
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -12,17 +13,19 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
-func newTestCompleter(chats []tgdata.ChatInfo, listErr error) (*completer, *int) {
-	calls := 0
-	return &completer{
-		load: func(context.Context) (*tgdata.ChatsSnapshot, error) {
-			calls++
-			if listErr != nil {
-				return nil, listErr
-			}
-			return &tgdata.ChatsSnapshot{ID: 1, Chats: chats}, nil
-		},
-	}, &calls
+// newTestCompleter returns a completer over a real chat cache whose loader
+// serves chats (or fails with listErr), and the count of its loads.
+func newTestCompleter(t *testing.T, chats []tgdata.ChatInfo, listErr error) (*completer, *atomic.Int64) {
+	t.Helper()
+	var calls atomic.Int64
+	cache := tgdata.NewChatsCache(t.Context(), func(context.Context, tgdata.ProgressFunc) (*tgdata.ChatsList, error) {
+		calls.Add(1)
+		if listErr != nil {
+			return nil, listErr
+		}
+		return &tgdata.ChatsList{Chats: chats, Count: len(chats)}, nil
+	})
+	return &completer{chats: cache}, &calls
 }
 
 func complete(t *testing.T, c *completer, name, value string) []string {
@@ -40,7 +43,7 @@ func complete(t *testing.T, c *completer, name, value string) []string {
 }
 
 func TestPeriodCompletion(t *testing.T) {
-	c, _ := newTestCompleter(nil, nil)
+	c, _ := newTestCompleter(t, nil, nil)
 
 	assert.Equal(t, []string{"day", "week", "month"}, complete(t, c, "period", ""))
 	assert.Equal(t, []string{"week"}, complete(t, c, "period", "w"))
@@ -53,7 +56,7 @@ func TestChatCompletionByName(t *testing.T) {
 		{ID: 2, Name: "Work Team"},
 		{ID: 3, Name: "Bob"},
 	}
-	c, _ := newTestCompleter(chats, nil)
+	c, _ := newTestCompleter(t, chats, nil)
 
 	// Empty query offers everything, username preferred over title.
 	assert.Equal(t, []string{"@alice_tg", "Work Team", "Bob"}, complete(t, c, "chat", ""))
@@ -70,7 +73,7 @@ func TestChatIDCompletionReturnsNumericIDs(t *testing.T) {
 		{ID: 111, Name: "Alice", Username: "alice_tg"},
 		{ID: 222, Name: "Work Team"},
 	}
-	c, _ := newTestCompleter(chats, nil)
+	c, _ := newTestCompleter(t, chats, nil)
 
 	// Resource-template variable resolves to a numeric id.
 	assert.Equal(t, []string{"222"}, complete(t, c, "chat_id", "work"))
@@ -80,26 +83,31 @@ func TestChatIDCompletionReturnsNumericIDs(t *testing.T) {
 }
 
 func TestChatCompletionSwallowsListError(t *testing.T) {
-	c, _ := newTestCompleter(nil, errors.New("flood wait"))
+	c, _ := newTestCompleter(t, nil, errors.New("flood wait"))
 	assert.Empty(t, complete(t, c, "chat", "x"))
 }
 
 func TestUnknownArgumentReturnsEmpty(t *testing.T) {
-	c, calls := newTestCompleter([]tgdata.ChatInfo{{ID: 1, Name: "Alice"}}, nil)
+	c, calls := newTestCompleter(t, []tgdata.ChatInfo{{ID: 1, Name: "Alice"}}, nil)
 	assert.Empty(t, complete(t, c, "something_else", "a"))
-	assert.Zero(t, *calls, "unknown argument must not fetch chats")
+	assert.Zero(t, calls.Load(), "unknown argument must not fetch chats")
 }
 
 func TestCandidatesAreBuiltOncePerSnapshot(t *testing.T) {
-	snap := &tgdata.ChatsSnapshot{ID: 1, Chats: []tgdata.ChatInfo{{ID: 1, Name: "Alice"}}}
-	c := &completer{load: func(context.Context) (*tgdata.ChatsSnapshot, error) { return snap, nil }}
+	chats := []tgdata.ChatInfo{{ID: 1, Name: "Alice"}}
+	cache := tgdata.NewChatsCache(t.Context(), func(context.Context, tgdata.ProgressFunc) (*tgdata.ChatsList, error) {
+		return &tgdata.ChatsList{Chats: chats}, nil
+	})
+	c := &completer{chats: cache}
 
 	assert.Equal(t, []string{"Alice"}, complete(t, c, "chat", "a"))
 	built := c.cands.Load()
 	complete(t, c, "chat", "al")
 	assert.Same(t, built, c.cands.Load(), "the same snapshot must reuse its candidates")
 
-	snap = &tgdata.ChatsSnapshot{ID: 2, Chats: []tgdata.ChatInfo{{ID: 2, Name: "Bob"}}}
+	chats = []tgdata.ChatInfo{{ID: 2, Name: "Bob"}}
+	_, err := cache.Load(t.Context(), nil, true)
+	require.NoError(t, err)
 	assert.Equal(t, []string{"Bob"}, complete(t, c, "chat", "b"))
 	assert.NotSame(t, built, c.cands.Load(), "a new snapshot must rebuild the candidates")
 }

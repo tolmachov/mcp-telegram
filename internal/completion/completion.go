@@ -26,12 +26,8 @@ import (
 // returning at most 100 completion values per request.
 const maxCompletionValues = 100
 
-// snapshotLoader returns the current chat snapshot. It is abstracted so tests
-// can exercise the completer without a live Telegram client.
-type snapshotLoader func(ctx context.Context) (*tgdata.ChatsSnapshot, error)
-
 type completer struct {
-	load snapshotLoader
+	chats *tgdata.ChatsCache
 	// cands holds the candidates derived from the latest snapshot seen, so
 	// they are built once per snapshot rather than on every keystroke.
 	cands atomic.Pointer[candidateSet]
@@ -56,11 +52,7 @@ type candidateSet struct {
 // Completion fires on every keystroke; the cache keeps that from hitting the
 // Telegram API each time.
 func Handler(chats *tgdata.ChatsCache) func(context.Context, *mcp.CompleteRequest) (*mcp.CompleteResult, error) {
-	c := &completer{
-		load: func(ctx context.Context) (*tgdata.ChatsSnapshot, error) {
-			return chats.Load(ctx, nil, false)
-		},
-	}
+	c := &completer{chats: chats}
 	return c.handle
 }
 
@@ -119,7 +111,7 @@ func (c *completer) completeChats(ctx context.Context, value string, asID bool) 
 // only when the snapshot has changed. Concurrent rebuilds for the same
 // snapshot produce identical sets, so the last store winning is harmless.
 func (c *completer) candidates(ctx context.Context) (*candidateSet, error) {
-	snap, err := c.load(ctx)
+	snap, err := c.chats.Load(ctx, nil, false)
 	if err != nil {
 		return nil, err
 	}

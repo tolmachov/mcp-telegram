@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
@@ -84,7 +85,8 @@ func makeChats(n int) []tgdata.ChatInfo {
 	return chats
 }
 
-// seededChatsCache returns a cache already holding one snapshot of chats.
+// seededChatsCache returns a cache already holding one snapshot of chats,
+// kept as a handed-out cursor keeps it.
 func seededChatsCache(t *testing.T, chats []tgdata.ChatInfo, truncated bool) (*tgdata.ChatsCache, *tgdata.ChatsSnapshot) {
 	t.Helper()
 	cache := tgdata.NewChatsCache(t.Context(), func(context.Context, tgdata.ProgressFunc) (*tgdata.ChatsList, error) {
@@ -92,6 +94,7 @@ func seededChatsCache(t *testing.T, chats []tgdata.ChatInfo, truncated bool) (*t
 	})
 	snap, err := cache.Load(t.Context(), nil, false)
 	require.NoError(t, err)
+	cache.Keep(snap)
 	return cache, snap
 }
 
@@ -117,7 +120,7 @@ func TestPageFrom(t *testing.T) {
 		{"single item", 1, 0, 100, 1, false, -1},
 	}
 
-	h := &ChatsGetHandler{}
+	h := &ChatsGetHandler{cache: tgdata.NewChatsCache(t.Context(), nil)}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := h.pageFrom(&tgdata.ChatsSnapshot{ID: sid, Chats: makeChats(tt.total)}, tt.offset, tt.limit)
@@ -150,6 +153,7 @@ func TestPageFrom(t *testing.T) {
 				if gotOff != tt.wantCurOff {
 					t.Errorf("cursor offset = %d, want %d", gotOff, tt.wantCurOff)
 				}
+
 			}
 
 			if tt.wantMore && out.PaginationHint == "" {
@@ -157,6 +161,30 @@ func TestPageFrom(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGetChatsKeepsOnlyCursoredSnapshots verifies a fresh load keeps its
+// snapshot for cursors only when a page hands one out.
+func TestGetChatsKeepsOnlyCursoredSnapshots(t *testing.T) {
+	cache := tgdata.NewChatsCache(t.Context(), func(context.Context, tgdata.ProgressFunc) (*tgdata.ChatsList, error) {
+		return &tgdata.ChatsList{Chats: makeChats(5), Count: 5}, nil
+	})
+	h := NewChatsGetHandler(cache)
+
+	_, whole, err := h.handle(t.Context(), &mcp.CallToolRequest{}, GetChatsInput{Limit: 10})
+	require.NoError(t, err)
+	require.Empty(t, whole.NextCursor)
+	newest, err := cache.Load(t.Context(), nil, false)
+	require.NoError(t, err)
+	_, kept := cache.Snapshot(newest.ID)
+	assert.False(t, kept, "a listing served whole needs no cursor")
+
+	_, paged, err := h.handle(t.Context(), &mcp.CallToolRequest{}, GetChatsInput{Limit: 2})
+	require.NoError(t, err)
+	sid, _, err := ParseChatsCursor(paged.NextCursor)
+	require.NoError(t, err)
+	_, kept = cache.Snapshot(sid)
+	assert.True(t, kept, "the snapshot a cursor names is kept")
 }
 
 func TestHandleWithCursorErrors(t *testing.T) {

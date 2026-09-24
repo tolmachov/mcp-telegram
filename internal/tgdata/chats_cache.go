@@ -11,10 +11,10 @@ import (
 )
 
 const (
-	// chatsMaxAge bounds how old the newest snapshot may be before a
-	// non-refreshing read fetches a new one. Completion reads on every
-	// keystroke, so the listing must be cached, yet a chat joined a minute ago
-	// should still be suggested.
+	// chatsMaxAge bounds how old the newest snapshot may grow before a
+	// non-refreshing read starts a new load in the background. Completion
+	// reads on every keystroke, so the listing must be cached, yet a chat
+	// joined a minute ago should soon be suggested.
 	chatsMaxAge = 30 * time.Second
 	// chatsCursorTTL bounds how long after its load a snapshot stays readable
 	// through a GetChats cursor.
@@ -33,8 +33,8 @@ type ChatsLoader func(ctx context.Context, onProgress ProgressFunc) (*ChatsList,
 
 // ChatsSnapshot is one immutable fetch of the full dialog listing. ID is
 // non-zero and unique per fetch; opaque GetChats cursors name it, and
-// ChatsCache.Snapshot serves it to them while it is retained. Chats is shared
-// by every reader and must be treated as read-only.
+// ChatsCache.Snapshot serves it to them while it is kept (ChatsCache.Keep).
+// Chats is shared by every reader and must be treated as read-only.
 type ChatsSnapshot struct {
 	ID        int64
 	Chats     []ChatInfo
@@ -45,7 +45,7 @@ type ChatsSnapshot struct {
 // ChatsCache holds the snapshots of the dialog listing that GetChats,
 // SearchChats, the telegram://chats resource and completion all read, so none
 // of them re-paginates every dialog on its own. The newest snapshot answers
-// Load; the few most recent ones stay readable through Snapshot, so a GetChats
+// Load; the few a GetChats cursor names stay readable through Snapshot, so a
 // cursor keeps paging the listing it started on while other readers refresh.
 // Safe for concurrent use.
 type ChatsCache struct {
@@ -54,13 +54,16 @@ type ChatsCache struct {
 	load ChatsLoader
 
 	mu sync.Mutex
-	// snaps holds the retained snapshots, oldest first; the last one is the
-	// newest.
-	snaps []*ChatsSnapshot
+	// newest is the newest snapshot, or nil before the first load succeeds.
+	newest *ChatsSnapshot
+	// kept holds the snapshots a cursor names (Keep), least recently kept
+	// first.
+	kept []*ChatsSnapshot
 	// flight is the load in progress, if any; started counts the loads ever
-	// started and numbers them.
-	flight  *chatsFlight
-	started int64
+	// started and numbers them, and lastStart is when the latest one started.
+	flight    *chatsFlight
+	started   int64
+	lastStart time.Time
 }
 
 // chatsFlight is one load shared by every caller waiting on it.
@@ -94,10 +97,12 @@ func NewChatsCache(life context.Context, load ChatsLoader) *ChatsCache {
 	return &ChatsCache{life: life, load: load}
 }
 
-// Load returns the newest snapshot. It fetches a new one when the cache is
-// empty, when the newest snapshot is older than chatsMaxAge, or when refresh
-// is true; a refresh is only satisfied by a load that starts after the call,
-// never by one already running.
+// Load returns the newest snapshot. It waits for a new one when the cache is
+// empty or refresh is true; a refresh is only satisfied by a load that starts
+// after the call, never by one already running. Otherwise it answers at once,
+// and a snapshot older than chatsMaxAge starts a load in the background for
+// the reads after it — unless one is running or started within chatsMaxAge,
+// so a failing load is not retried on every read.
 //
 // Concurrent fetches share one load. It belongs to none of its callers: it
 // runs on the cache's lifetime (see NewChatsCache) bounded by
@@ -124,7 +129,10 @@ func (c *ChatsCache) join(ctx context.Context, refresh bool) (*chatsFlight, *Cha
 		minSeq = c.started + 1
 	}
 	for {
-		if snap := c.newest(); !refresh && snap != nil && time.Since(snap.loadedAt) < chatsMaxAge {
+		if snap := c.newest; !refresh && snap != nil {
+			if c.flight == nil && time.Since(snap.loadedAt) >= chatsMaxAge && time.Since(c.lastStart) >= chatsMaxAge {
+				c.startLocked()
+			}
 			c.mu.Unlock()
 			return nil, snap, nil
 		}
@@ -148,13 +156,29 @@ func (c *ChatsCache) join(ctx context.Context, refresh bool) (*chatsFlight, *Cha
 	}
 }
 
-// Snapshot returns the snapshot with ID id while it is retained. ok is false
-// once it has aged out or been pushed out by newer loads, or when it never
-// existed (e.g. a cursor from before a server restart).
+// Keep keeps snap readable through Snapshot, for the cursor about to name
+// it: for chatsCursorTTL after its load, while it is among the
+// chatsCursorSnapshots most recently kept. A snapshot no cursor names is
+// never retained past the next load.
+func (c *ChatsCache) Keep(snap *ChatsSnapshot) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.kept = slices.DeleteFunc(c.kept, func(s *ChatsSnapshot) bool {
+		return s == snap || time.Since(s.loadedAt) >= chatsCursorTTL
+	})
+	c.kept = append(c.kept, snap)
+	if excess := len(c.kept) - chatsCursorSnapshots; excess > 0 {
+		c.kept = slices.Delete(c.kept, 0, excess)
+	}
+}
+
+// Snapshot returns the kept snapshot with ID id. ok is false once it has aged
+// out or been pushed out by newer kept ones, or when it never existed (e.g. a
+// cursor from before a server restart).
 func (c *ChatsCache) Snapshot(id int64) (*ChatsSnapshot, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, snap := range c.snaps {
+	for _, snap := range c.kept {
 		if snap.ID == id && time.Since(snap.loadedAt) < chatsCursorTTL {
 			return snap, true
 		}
@@ -162,18 +186,10 @@ func (c *ChatsCache) Snapshot(id int64) (*ChatsSnapshot, bool) {
 	return nil, false
 }
 
-// newest returns the newest snapshot, or nil for an empty cache. c.mu must be
-// held.
-func (c *ChatsCache) newest() *ChatsSnapshot {
-	if len(c.snaps) == 0 {
-		return nil
-	}
-	return c.snaps[len(c.snaps)-1]
-}
-
 // startLocked starts a new load. c.mu must be held.
 func (c *ChatsCache) startLocked() *chatsFlight {
 	c.started++
+	c.lastStart = time.Now()
 	f := &chatsFlight{seq: c.started, done: make(chan struct{})}
 	c.flight = f
 	go c.run(f)
@@ -181,7 +197,7 @@ func (c *ChatsCache) startLocked() *chatsFlight {
 }
 
 // run performs the load for f on the cache's lifetime and publishes its
-// snapshot.
+// snapshot as the newest.
 func (c *ChatsCache) run(f *chatsFlight) {
 	ctx, cancel := context.WithTimeout(c.life, chatsLoadTimeout)
 	defer cancel()
@@ -197,23 +213,11 @@ func (c *ChatsCache) run(f *chatsFlight) {
 			Truncated: result.Truncated,
 			loadedAt:  time.Now(),
 		}
-		c.retainLocked(f.snap)
+		c.newest = f.snap
 	}
 	c.flight = nil
 	c.mu.Unlock()
 	close(f.done)
-}
-
-// retainLocked appends snap as the newest snapshot and drops those no cursor
-// may read any more. c.mu must be held.
-func (c *ChatsCache) retainLocked(snap *ChatsSnapshot) {
-	c.snaps = slices.DeleteFunc(c.snaps, func(s *ChatsSnapshot) bool {
-		return time.Since(s.loadedAt) >= chatsCursorTTL
-	})
-	c.snaps = append(c.snaps, snap)
-	if excess := len(c.snaps) - chatsCursorSnapshots; excess > 0 {
-		c.snaps = slices.Delete(c.snaps, 0, excess)
-	}
 }
 
 // watch subscribes onProgress to f's progress until the returned func is

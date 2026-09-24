@@ -14,9 +14,9 @@ import (
 // tgdata.ChatsCache and returns the first page of that snapshot. A cursor
 // names the snapshot it came from, so the next pages come from the same
 // listing without hitting the Telegram API, even after other readers
-// (SearchChats, completion, the chats resource) have loaded newer ones; the
-// cache keeps a snapshot readable only for a bounded time and number of newer
-// loads.
+// (SearchChats, completion, the chats resource) have loaded newer ones: a
+// page that hands out a cursor keeps its snapshot in the cache, for a bounded
+// time and among a bounded number of kept ones.
 type ChatsGetHandler struct {
 	cache *tgdata.ChatsCache
 }
@@ -117,6 +117,7 @@ func (h *ChatsGetHandler) pageFrom(snap *tgdata.ChatsSnapshot, offset, limit int
 		Total: total,
 	}
 	if hasMore {
+		h.cache.Keep(snap)
 		out.HasMore = true
 		out.NextCursor = FormatChatsCursor(snap.ID, end)
 		out.PaginationHint = fmt.Sprintf("Showing %d–%d of %d chats. Pass next_cursor to get more.", offset+1, end, total)

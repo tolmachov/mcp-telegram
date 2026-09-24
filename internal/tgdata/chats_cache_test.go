@@ -52,6 +52,7 @@ func TestChatsCacheLoad(t *testing.T) {
 
 		// refresh=true forces a fresh fetch and mints a new snapshot ID; a
 		// cursor issued against the previous snapshot keeps reading it.
+		c.Keep(snap1)
 		snap3, err := c.Load(t.Context(), nil, true)
 		require.NoError(t, err)
 		assert.Equal(t, int64(2), l.calls.Load())
@@ -60,22 +61,62 @@ func TestChatsCacheLoad(t *testing.T) {
 		got, ok := c.Snapshot(snap1.ID)
 		require.True(t, ok, "a cursor survives another reader's refresh")
 		assert.Same(t, snap1, got)
+		_, ok = c.Snapshot(snap3.ID)
+		assert.False(t, ok, "a snapshot no cursor names is not kept")
+		c.Keep(snap3)
 		got, ok = c.Snapshot(snap3.ID)
 		require.True(t, ok)
 		assert.Same(t, snap3, got)
 	})
 
-	t.Run("stale snapshot is re-fetched", func(t *testing.T) {
-		l := &countingLoader{}
-		c := NewChatsCache(t.Context(), l.load)
-		snap, err := c.Load(t.Context(), nil, false)
-		require.NoError(t, err)
+	t.Run("stale snapshot is served while a background load refreshes it", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			l := &countingLoader{}
+			c := NewChatsCache(t.Context(), l.load)
+			snap, err := c.Load(t.Context(), nil, false)
+			require.NoError(t, err)
 
-		snap.loadedAt = time.Now().Add(-chatsMaxAge)
-		fresh, err := c.Load(t.Context(), nil, false)
-		require.NoError(t, err)
-		assert.Equal(t, int64(2), l.calls.Load())
-		assert.NotEqual(t, snap.ID, fresh.ID)
+			time.Sleep(chatsMaxAge)
+			stale, err := c.Load(t.Context(), nil, false)
+			require.NoError(t, err)
+			assert.Same(t, snap, stale, "a stale snapshot is answered at once")
+			synctest.Wait() // the background load finishes
+			assert.Equal(t, int64(2), l.calls.Load())
+
+			fresh, err := c.Load(t.Context(), nil, false)
+			require.NoError(t, err)
+			assert.NotEqual(t, snap.ID, fresh.ID, "the next read gets the refreshed snapshot")
+			assert.Equal(t, int64(2), l.calls.Load())
+		})
+	})
+
+	t.Run("a failing background load is retried once per max age", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var calls atomic.Int64
+			c := NewChatsCache(t.Context(), func(context.Context, ProgressFunc) (*ChatsList, error) {
+				if calls.Add(1) > 1 {
+					return nil, errors.New("boom")
+				}
+				return &ChatsList{Chats: []ChatInfo{{ID: 1}}}, nil
+			})
+			snap, err := c.Load(t.Context(), nil, false)
+			require.NoError(t, err)
+
+			time.Sleep(chatsMaxAge)
+			for range 3 {
+				got, err := c.Load(t.Context(), nil, false)
+				require.NoError(t, err)
+				assert.Same(t, snap, got, "the stale snapshot is served while refreshing fails")
+				synctest.Wait()
+			}
+			assert.Equal(t, int64(2), calls.Load(), "one refresh per max age, not one per read")
+
+			time.Sleep(chatsMaxAge)
+			_, err = c.Load(t.Context(), nil, false)
+			require.NoError(t, err)
+			synctest.Wait()
+			assert.Equal(t, int64(3), calls.Load())
+		})
 	})
 
 	t.Run("unloaded cache has no snapshot", func(t *testing.T) {
@@ -112,11 +153,12 @@ func TestChatsCacheLoad(t *testing.T) {
 		}
 	})
 
-	t.Run("retained snapshots are bounded in age and number", func(t *testing.T) {
+	t.Run("kept snapshots are bounded in age and number", func(t *testing.T) {
 		l := &countingLoader{}
 		c := NewChatsCache(t.Context(), l.load)
 		first, err := c.Load(t.Context(), nil, false)
 		require.NoError(t, err)
+		c.Keep(first)
 
 		first.loadedAt = time.Now().Add(-chatsCursorTTL)
 		_, ok := c.Snapshot(first.ID)
@@ -126,9 +168,11 @@ func TestChatsCacheLoad(t *testing.T) {
 		for range chatsCursorSnapshots + 1 {
 			snap, err := c.Load(t.Context(), nil, true)
 			require.NoError(t, err)
+			c.Keep(snap)
+			c.Keep(snap) // keeping again takes no second slot
 			ids = append(ids, snap.ID)
 		}
-		assert.Len(t, c.snaps, chatsCursorSnapshots, "the expired snapshot is dropped and the count capped")
+		assert.Len(t, c.kept, chatsCursorSnapshots, "the expired snapshot is dropped and the count capped")
 		_, ok = c.Snapshot(ids[0])
 		assert.False(t, ok, "the oldest snapshot is pushed out")
 		for _, id := range ids[1:] {
@@ -214,7 +258,7 @@ func TestChatsCacheLoad(t *testing.T) {
 		for range waiters {
 			require.ErrorIs(t, <-errs, context.Canceled, "ending the lifetime fails the waiters")
 		}
-		assert.Empty(t, c.snaps, "a cancelled load retains nothing")
+		assert.Nil(t, c.newest, "a cancelled load retains nothing")
 		assert.Equal(t, int64(1), l.calls.Load())
 	})
 
