@@ -415,6 +415,33 @@ func TestServerAuxiliaryLifecycleBranches(t *testing.T) {
 	assert.True(t, client.isClosed(), "a failed build disconnects the client it was handed")
 }
 
+// panickingClient is a fakeClient whose API panics, so the wiring that
+// reads it panics mid-build.
+type panickingClient struct{ *fakeClient }
+
+func (panickingClient) API() *tg.Client { panic("wiring bug") }
+
+// TestBuildAssemblyPanicClosesClient pins that a panic in the wiring still
+// disconnects the client buildAssembly was handed, and reaches the caller
+// instead of being swallowed.
+func TestBuildAssemblyPanicClosesClient(t *testing.T) {
+	srv, err := New(Options{
+		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
+		Summarize: testSummarize,
+		Version:   "test",
+		Stdin:     strings.NewReader(""),
+		Stdout:    io.Discard,
+		ErrOut:    io.Discard,
+		Transport: TransportStdio,
+	})
+	require.NoError(t, err)
+	client := panickingClient{newFakeClient()}
+	assert.PanicsWithValue(t, "wiring bug", func() {
+		_, _ = srv.buildAssembly(t.Context(), client, testLogger())
+	})
+	assert.True(t, client.isClosed(), "a panicking build disconnects the client it was handed")
+}
+
 func TestLoginRequiredSmallHelpers(t *testing.T) {
 	assert.Empty(t, accountSuffix(""))
 	assert.Equal(t, " as alice", accountSuffix("alice"))
