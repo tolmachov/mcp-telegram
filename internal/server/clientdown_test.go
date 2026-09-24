@@ -98,7 +98,7 @@ func TestClientDownExplainsADeadSessionOnce(t *testing.T) {
 			require.Len(t, texts, 2)
 			assert.Equal(t, "Failed to get current user: getting current user: telegram session is not authorized: rpc error code 401: SESSION_REVOKED.",
 				texts[0], "the tool renders only its failure")
-			assert.Equal(t, srv.clientDownText(dead, true), texts[1], "the server explains the dead session")
+			assert.Equal(t, srv.clientDownText(dead), texts[1], "the server explains the dead session")
 		})
 	}
 }
@@ -124,7 +124,7 @@ func TestClientDownAgreesWithASecondaryRefusal(t *testing.T) {
 			require.True(t, isError)
 			require.Len(t, texts, 2)
 			assert.Contains(t, texts[0], "Do not ask the user to sign in again", "the tool's own hint")
-			assert.Equal(t, srv.clientDownText(stopped, true), texts[1])
+			assert.Equal(t, srv.clientDownText(stopped), texts[1])
 			for _, text := range texts {
 				assert.NotContains(t, text, "mcp-telegram logout")
 				assert.NotContains(t, text, "mcp-telegram login")
@@ -136,9 +136,8 @@ func TestClientDownAgreesWithASecondaryRefusal(t *testing.T) {
 
 // TestClientDownDefersToACutShortBatch pins what a batch the client stopped
 // under reads over HTTP: MarkAsRead reports the chat it marked, the one the
-// stop failed and the one it skipped, and the appended answer keeps the
-// marked chat from being repeated while leaving the others to be retried
-// once the next request has reconnected — it does not claim the call
+// stop failed and the one it skipped, and the appended answer asks to retry
+// only what the call did not complete — it does not claim the call
 // completed.
 func TestClientDownDefersToACutShortBatch(t *testing.T) {
 	srv := &Server{opts: Options{Transport: TransportHTTP}}
@@ -168,7 +167,5 @@ func TestClientDownDefersToACutShortBatch(t *testing.T) {
 	require.Len(t, texts, 2)
 	assert.Contains(t, texts[0], `"success_ids":[1]`)
 	assert.Contains(t, texts[0], `"skipped_ids":[3]`)
-	assert.Equal(t, "The Telegram connection stopped while this call ran: what its result reports as done stands, so do not repeat that; "+
-		"what it reports as failed, skipped or not done can be retried once the connection is restored. "+
-		"The Telegram connection for this account stopped (telegram client stopped: connection reset). The next request reconnects it.", texts[1])
+	assert.Equal(t, "The Telegram connection stopped (telegram client stopped: connection reset); the server reconnects it. Retry what this call did not complete.", texts[1])
 }

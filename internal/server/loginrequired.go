@@ -243,7 +243,7 @@ func (s *Server) authProbe(ctx context.Context) (account string, authorized bool
 	s.probeMu.Lock()
 	defer s.probeMu.Unlock()
 
-	return probeVerdict(s.connectLocal(ctx, s))
+	return probeVerdict(s.connectLocal(ctx))
 }
 
 // probeVerdict turns a connectLocal outcome into the re-check's answer.

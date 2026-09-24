@@ -97,9 +97,11 @@ type Server struct {
 	summarizer *summarize.Summarizer
 
 	// connectLocal connects the single local account: Run serves on the
-	// client it returns, and the login-required tool's re-check (authProbe)
-	// asks it whether the session is authorized.
-	connectLocal localConnector
+	// client it returns and reconnects through it (reconnectingClient), and
+	// the login-required tool's re-check (authProbe) asks it whether the
+	// session is authorized. New sets connectStoredSession; tests set their
+	// own.
+	connectLocal func(ctx context.Context) (localClient, error)
 	// probeMu serialises authProbe — see its doc comment for why concurrent
 	// probes on one stored session are a hazard rather than just waste.
 	probeMu sync.Mutex
@@ -113,7 +115,12 @@ type Server struct {
 // integration test pipe in custom io.Pipe endpoints.
 // ErrOut is used for slog-based diagnostics (server lifecycle, flood-wait).
 func New(opts Options) (*Server, error) {
-	return newServer(opts, connectStoredSession)
+	srv, err := newServer(opts)
+	if err != nil {
+		return nil, err
+	}
+	srv.connectLocal = srv.connectStoredSession
+	return srv, nil
 }
 
 // localClient is the client of the single local account: what Run serves
@@ -124,11 +131,8 @@ type localClient interface {
 	Self() *tg.User
 }
 
-// localConnector connects the single local account's client for s.
-type localConnector func(ctx context.Context, s *Server) (localClient, error)
-
-// newServer is New connecting the local account through connect.
-func newServer(opts Options, connect localConnector) (*Server, error) {
+// newServer is New without a way to connect the local account.
+func newServer(opts Options) (*Server, error) {
 	if opts.Config == nil {
 		return nil, fmt.Errorf("server.New: Options.Config is required")
 	}
@@ -166,7 +170,7 @@ func newServer(opts Options, connect localConnector) (*Server, error) {
 	logger := slog.New(logging.NewHandler(opts.ErrOut, logFormat, level, "mcp-telegram", opts.Version)).
 		With("component", "mcp-telegram")
 
-	srv := &Server{logger: logger, opts: opts, connectLocal: connect}
+	srv := &Server{logger: logger, opts: opts}
 	srv.summarizer, err = summarize.New(opts.Summarize)
 	if err != nil {
 		logger.Warn("summarisation is misconfigured; SummarizeChat reports it and every other tool works", "err", err)
@@ -210,7 +214,7 @@ func (s *Server) Run(ctx context.Context) error {
 		return s.runHTTPWithAuth(ctx)
 	}
 
-	client, err := s.connectLocal(ctx, s)
+	client, err := s.connectLocal(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			// The host shut down while the client was still starting:
@@ -228,12 +232,12 @@ func (s *Server) Run(ctx context.Context) error {
 	return s.serveAssembly(ctx, client)
 }
 
-// connectStoredSession is the localConnector New uses: it connects the single
+// connectStoredSession is the connectLocal New sets: it connects the single
 // local account on its stored session (the Keychain on darwin, the
 // state-directory file elsewhere) through the same StartClient the HTTP pool
-// uses per user, so stdio startup and the login-required re-check share one
-// "authorized / unauthorized / failed" answer.
-func connectStoredSession(ctx context.Context, s *Server) (localClient, error) {
+// uses per user, so stdio startup, its reconnects and the login-required
+// re-check share one "authorized / unauthorized / failed" answer.
+func (s *Server) connectStoredSession(ctx context.Context) (localClient, error) {
 	storage, err := tgclient.NewSessionStorage()
 	if err != nil {
 		return nil, fmt.Errorf("opening session storage: %w", err)
@@ -260,16 +264,17 @@ func blockedReason(err error) string {
 // until the host disconnects (closes stdin) or ctx is cancelled, then
 // disconnects the client.
 //
-// A client that stops on its own — Telegram refusing the session mid-run, or
-// a permanent transport failure — does not end the session: the host stays
-// connected and every tool call answers with why and how to recover
-// (clientDownMiddleware), which is the login-required state reached
-// mid-session. Swapping in the login-required server itself is not possible:
-// it would hand the host's stdin from one MCP session to the next, and the
-// SDK's stdio connection keeps reading ahead into a buffer it drops on close,
-// losing whatever the host sent in between.
-func (s *Server) serveAssembly(ctx context.Context, client telegramClient) error {
-	asm, err := s.buildAssembly(ctx, client, s.logger)
+// A client that stops on its own does not end the session. Any stop but
+// Telegram refusing the session is reconnected in-process (reconnectingClient),
+// the calls meanwhile answering that it is (clientDownMiddleware). A refused
+// session leaves the host connected with every tool call answering with why
+// and how to log in again: the login-required state reached mid-session.
+// Swapping in a new assembly or the login-required server itself is not
+// possible: it would hand the host's stdin from one MCP session to the next,
+// and the SDK's stdio connection keeps reading ahead into a buffer it drops
+// on close, losing whatever the host sent in between.
+func (s *Server) serveAssembly(ctx context.Context, client localClient) error {
+	asm, err := s.buildAssembly(ctx, newReconnectingClient(ctx, client, s.connectLocal, s.logger), s.logger)
 	if err != nil {
 		return err
 	}
@@ -318,8 +323,7 @@ type assembly struct {
 	variants *variants.Server // non-nil when exposing all variants
 	single   *mcp.Server      // non-nil when --variant pins one
 	client   telegramClient
-	// handler serves the assembly over streamable HTTP; set for the http
-	// transport only.
+	// handler serves the assembly over streamable HTTP.
 	handler http.Handler
 
 	// end ends the assembly's lifetime: the pinned-chat watcher and any
@@ -462,9 +466,7 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 		built.single = newInnerForMode(impl, serverOpts, fullHandlers, researchHandlers, d.mode, wire, logger)
 		pinnedServers = []*mcp.Server{built.single}
 	}
-	if s.opts.Transport == TransportHTTP {
-		built.handler = built.httpHandler()
-	}
+	built.handler = built.httpHandler()
 
 	// The SDK has no BeforeListResources hook, so the pinned-chat set is
 	// refreshed by a periodic poller (default 30s, --pinned-refresh-seconds).
@@ -489,21 +491,18 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 	return built, nil
 }
 
-// clientDownMiddleware tells tool calls and resource reads why the assembly's
-// Telegram client has stopped; clientDownText is the one place that says so.
-// A call arriving afterwards never reaches Telegram and is answered with
-// clientDownText alone. A call the client stopped under keeps its own outcome
-// — the real cause and any note, such as the partial file a backup saved, or
-// the chats a batch marked as read and the ones it skipped — with
-// clientDownText appended. Only the tool knows how much of its work it did,
-// and its result says so; the appended text for a tool call that ran defers
-// to it, whether the call failed, was cut short or finished.
+// clientDownMiddleware tells tool calls and resource reads that the
+// assembly's Telegram client has stopped and what recovers it;
+// clientDownText is the one place that says so. A call arriving afterwards
+// never reaches Telegram and is answered with clientDownText alone. A call the
+// client stopped under keeps its own outcome — the real cause and what it did
+// before the stop, such as the partial file a backup saved or the chats a
+// batch marked as read — with clientDownText appended: only the tool knows how
+// much of its work it did, and its result says so.
 //
 // Completion is left out on purpose: its suggestions go to the user's input
 // box, not to the model, and it answers an empty list on any failure by
 // design, so it has no failure to append to and no reader for the reason.
-// It does not reach the stopped client either: the client's stop ends the
-// assembly's lifetime, which fails the chat-list loads completion reads.
 func (s *Server) clientDownMiddleware(client telegramClient) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
@@ -511,11 +510,11 @@ func (s *Server) clientDownMiddleware(client telegramClient) mcp.Middleware {
 				return next(ctx, method, req)
 			}
 			if down := client.Err(); down != nil {
-				return clientDownResult(method, s.clientDownText(down, false))
+				return clientDownResult(method, s.clientDownText(down))
 			}
 			res, err := next(ctx, method, req)
 			if down := client.Err(); down != nil {
-				return withClientDown(res, err, s.clientDownText(down, method == methodCallTool && err == nil))
+				return withClientDown(res, err, s.clientDownText(down))
 			}
 			return res, err
 		}
@@ -549,48 +548,22 @@ func withClientDown(res mcp.Result, err error, text string) (mcp.Result, error) 
 	return &appended, nil
 }
 
-// ranUnderStopText opens the client-down text of a tool call that ran while
-// the client stopped. What the call did is what its result reports, which
-// only the tool knows: the done part stands, the rest may be what the stop
-// cut short.
-const ranUnderStopText = "The Telegram connection stopped while this call ran: what its result reports as done stands, so do not repeat that; what it reports as failed, skipped or not done can be retried once the connection is restored. "
-
 // clientDownText says why an assembly's Telegram client stopped and what
-// recovers it on this transport, for a call that never ran or, when ran, for
-// a tool call that ran while the client stopped. Over HTTP the pool acts on
-// the next request: a refused session is deleted and the request answered
-// 401, which sends the MCP client back through the QR login, and any other
-// stop is rebuilt. Over stdio nothing restarts the client inside this
-// process, so the fix involves the host reconnecting the server. A client
-// stopped because a DC other than the home one refused a session the home DC
-// still accepts (tgclient.ErrSecondaryRefusal) needs only the reconnect:
-// the session is valid, and no login is due.
-func (s *Server) clientDownText(err error, ran bool) string {
-	refused := errors.Is(err, tgclient.ErrSessionUnauthorized)
-	secondary := errors.Is(err, tgclient.ErrSecondaryRefusal)
-	httpMode := s.opts.Transport == TransportHTTP
-	var text string
+// recovers it. A session Telegram refused needs a new login, which is done
+// differently on each transport: over HTTP the pool deletes the session and
+// answers the next request 401, which sends the MCP client back through the
+// QR login; over stdio the user logs in from a terminal. Any other stop is
+// reconnected — over stdio at once (reconnectingClient), over HTTP by the
+// pool on the next request — so what the call did not complete can be
+// retried.
+func (s *Server) clientDownText(err error) string {
 	switch {
-	case httpMode && refused:
-		text = fmt.Sprintf("Telegram refused this account's session (%v): it was logged out, revoked or expired. The server has stopped using it, and the client's next request is answered with an authorisation error that sends it through the Telegram QR login again.", err)
-	case httpMode && secondary:
-		text = fmt.Sprintf("The Telegram connection for this account stopped (%v). The session is still valid, so no new login is needed: the next request reconnects it, which restores file downloads.", err)
-	case httpMode:
-		text = fmt.Sprintf("The Telegram connection for this account stopped (%v). The next request reconnects it.", err)
-	case refused:
-		text = fmt.Sprintf("Telegram refused this server's session (%v), so every Telegram tool is unavailable until the session is replaced. %s", err, notLoggedInMessage)
-	case secondary:
-		text = fmt.Sprintf("mcp-telegram's Telegram client stopped (%v). The session is still valid, so do not log out or sign in again: reconnecting this MCP server restores file downloads, and every Telegram tool is unavailable until it is reconnected.", err)
+	case !errors.Is(err, tgclient.ErrSessionUnauthorized):
+		return fmt.Sprintf("The Telegram connection stopped (%v); the server reconnects it. Retry what this call did not complete.", err)
+	case s.opts.Transport == TransportHTTP:
+		return fmt.Sprintf("Telegram refused this account's session (%v): it was logged out, revoked or expired. The client's next request is answered with an authorisation error that sends it through the Telegram QR login again.", err)
 	default:
-		text = fmt.Sprintf("mcp-telegram's Telegram client stopped (%v), so every Telegram tool is unavailable until this MCP server is reconnected. If it stops again, the stored session may be corrupt: `mcp-telegram logout` followed by `mcp-telegram login` recovers it.", err)
-	}
-	switch {
-	case ran:
-		return ranUnderStopText + text
-	case httpMode && !refused:
-		return text + " Retry the call."
-	default:
-		return text
+		return fmt.Sprintf("Telegram refused this server's session (%v), so every Telegram tool is unavailable until the session is replaced. %s", err, notLoggedInMessage)
 	}
 }
 

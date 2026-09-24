@@ -182,6 +182,51 @@ func TestServeAssemblyAllVariantsExitsOnStdinEOF(t *testing.T) {
 	require.NoError(t, srv.serveAssembly(t.Context(), newFakeClient()))
 }
 
+// TestStdioReconnectsInProcess pins that over stdio a client that stops for
+// any reason but a refused session is reconnected under the same MCP
+// session: the host keeps its connection, and tool calls reach Telegram
+// again once the reconnect is done.
+func TestStdioReconnectsInProcess(t *testing.T) {
+	clientR, serverW := io.Pipe()
+	serverR, clientW := io.Pipe()
+	second := newFakeClient()
+	srv, err := newServerConnecting(Options{
+		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
+		Summarize: testSummarize,
+		Version:   "test",
+		Variant:   variantFull,
+		Stdin:     serverR,
+		Stdout:    serverW,
+		ErrOut:    io.Discard,
+		Transport: TransportStdio,
+	}, func(context.Context) (localClient, error) { return second, nil })
+	require.NoError(t, err)
+
+	first := newFakeClient()
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.serveAssembly(t.Context(), first) }()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil).
+		Connect(t.Context(), &mcp.IOTransport{Reader: clientR, Writer: clientW}, nil)
+	require.NoError(t, err)
+
+	first.stop(errors.New("read tcp: connection reset by peer"))
+	require.Eventually(t, func() bool {
+		res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "GetMe", Arguments: map[string]any{}})
+		return err == nil && !res.IsError
+	}, 3*time.Second, 10*time.Millisecond, "tool calls reach Telegram again after the reconnect")
+	assert.True(t, first.isClosed(), "the stopped client is disconnected")
+
+	require.NoError(t, cs.Close())
+	_ = clientW.Close()
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("serving did not stop after the host disconnected")
+	}
+	assert.True(t, second.isClosed(), "shutdown disconnects the client in use")
+}
+
 // TestStdioRefusedSessionEntersLoginRequiredState pins the stdio half of a
 // session Telegram refuses mid-run: the host keeps its connection, and every
 // tool call and resource read answers with the login-required reason instead
@@ -234,9 +279,8 @@ func TestStdioRefusedSessionEntersLoginRequiredState(t *testing.T) {
 
 // TestClientDownMiddlewareAnswersForAStoppedClient pins both halves of the
 // middleware: a call the client stopped under keeps its own outcome, failed
-// or not, with the transport's answer appended — for a tool call, the one
-// that defers to what its result reports — and later calls never reach the
-// handler.
+// or not, with the transport's answer appended, and later calls never reach
+// the handler.
 func TestClientDownMiddlewareAnswersForAStoppedClient(t *testing.T) {
 	stops := map[string]error{
 		"refused": fmt.Errorf("%w: %w", tgclient.ErrSessionUnauthorized, tgerr.New(401, "AUTH_KEY_UNREGISTERED")),
@@ -253,7 +297,7 @@ func TestClientDownMiddlewareAnswersForAStoppedClient(t *testing.T) {
 // TestClientDownMiddlewareAnswersForAStoppedClient.
 func testClientDownAnswers(t *testing.T, transport string, stop error) {
 	srv := &Server{opts: Options{Transport: transport}}
-	want, ran := srv.clientDownText(stop, false), srv.clientDownText(stop, true)
+	want := srv.clientDownText(stop)
 	call := &mcp.CallToolRequest{}
 
 	// A backup that stopped part-way reports the file it saved; that
@@ -270,7 +314,7 @@ func testClientDownAnswers(t *testing.T, transport string, stop error) {
 	assert.True(t, tr.IsError)
 	require.Len(t, tr.Content, 2, transport)
 	assert.Equal(t, backupFailure, tr.Content[0].(*mcp.TextContent).Text, "the call's own outcome is kept")
-	assert.Equal(t, ran, tr.Content[1].(*mcp.TextContent).Text, transport)
+	assert.Equal(t, want, tr.Content[1].(*mcp.TextContent).Text, transport)
 
 	tgClient = newFakeClient()
 	readErr := errors.New("reading telegram://me: telegram session is not authorized")
@@ -302,7 +346,7 @@ func testClientDownAnswers(t *testing.T, transport string, stop error) {
 	assert.Equal(t, cutShort.StructuredContent, tr.StructuredContent)
 	require.Len(t, tr.Content, 2, transport)
 	assert.Same(t, handlerContent[0], tr.Content[0], "the call's own outcome is kept")
-	assert.Equal(t, ran, tr.Content[1].(*mcp.TextContent).Text, transport)
+	assert.Equal(t, want, tr.Content[1].(*mcp.TextContent).Text, transport)
 	assert.Len(t, cutShort.Content, 1, "the handler's result is not changed")
 	assert.Nil(t, backing[1], "nor is its Content's spare capacity written")
 
@@ -318,49 +362,21 @@ func testClientDownAnswers(t *testing.T, transport string, stop error) {
 }
 
 // TestClientDownTextFitsTheTransport pins that the answer names the recovery
-// the transport actually offers, and that a session the home DC still
-// accepts is never sent through a login.
+// the transport offers for a refused session, and that any other stop is
+// reconnected alike on either transport, never sending the user through a
+// login.
 func TestClientDownTextFitsTheTransport(t *testing.T) {
 	refused := fmt.Errorf("%w: %w", tgclient.ErrSessionUnauthorized, tgerr.New(401, "SESSION_REVOKED"))
-	dropped := errors.New("telegram client stopped: key fingerprint not found")
-	secondary := fmt.Errorf("%w (%w) while the home DC still accepts it; reconnecting restores the calls it serves", tgclient.ErrSecondaryRefusal, tgerr.New(401, "AUTH_KEY_UNREGISTERED"))
+	dropped := errors.New("key fingerprint not found")
 	stdio := &Server{opts: Options{Transport: TransportStdio}}
 	httpSrv := &Server{opts: Options{Transport: TransportHTTP}}
 
-	for _, ran := range []bool{false, true} {
-		assert.Contains(t, stdio.clientDownText(refused, ran), notLoggedInMessage)
-		assert.Contains(t, stdio.clientDownText(dropped, ran), "reconnected")
-		assert.NotContains(t, stdio.clientDownText(dropped, ran), "not logged in")
-		assert.Contains(t, httpSrv.clientDownText(refused, ran), "QR login")
-		assert.NotContains(t, httpSrv.clientDownText(refused, ran), "mcp-telegram login")
-		assert.NotContains(t, httpSrv.clientDownText(dropped, ran), "QR login")
-
-		// The home DC still accepts the session: reconnecting is all it
-		// takes, on either transport.
-		for _, text := range []string{stdio.clientDownText(secondary, ran), httpSrv.clientDownText(secondary, ran)} {
-			assert.Contains(t, text, "The session is still valid")
-			assert.Contains(t, text, "restores file downloads")
-			assert.NotContains(t, text, "mcp-telegram logout")
-			assert.NotContains(t, text, "mcp-telegram login")
-			assert.NotContains(t, text, "not logged in")
-			assert.NotContains(t, text, "QR login")
-		}
-		assert.Contains(t, stdio.clientDownText(secondary, ran), "reconnecting this MCP server")
-		assert.Contains(t, httpSrv.clientDownText(secondary, ran), "the next request reconnects it")
-	}
-	assert.True(t, strings.HasSuffix(httpSrv.clientDownText(dropped, false), " Retry the call."))
-	assert.True(t, strings.HasSuffix(httpSrv.clientDownText(secondary, false), " Retry the call."))
-
-	// A tool call that ran is told that what its result reports as done
-	// stands and what it reports as not done can be retried; a call that
-	// never ran is told neither.
+	assert.Contains(t, stdio.clientDownText(refused), notLoggedInMessage)
+	assert.Contains(t, httpSrv.clientDownText(refused), "QR login")
+	assert.NotContains(t, httpSrv.clientDownText(refused), "mcp-telegram login")
 	for _, srv := range []*Server{stdio, httpSrv} {
-		for _, err := range []error{refused, dropped, secondary} {
-			text := srv.clientDownText(err, true)
-			assert.True(t, strings.HasPrefix(text, ranUnderStopText), text)
-			assert.NotContains(t, text, "Retry the call", text)
-			assert.NotContains(t, srv.clientDownText(err, false), "while this call ran", "a call that never ran did nothing")
-		}
+		assert.Equal(t, "The Telegram connection stopped (key fingerprint not found); the server reconnects it. Retry what this call did not complete.",
+			srv.clientDownText(dropped), srv.opts.Transport)
 	}
 }
 

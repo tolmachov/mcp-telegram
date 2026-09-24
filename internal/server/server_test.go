@@ -24,9 +24,24 @@ func TestNewRequiresConfig(t *testing.T) {
 	assert.Contains(t, err.Error(), "Config is required")
 }
 
+// connector connects the local account in a test, standing in for
+// Server.connectLocal.
+type connector = func(context.Context) (localClient, error)
+
+// newServerConnecting is newServer connecting the local account through
+// connect.
+func newServerConnecting(opts Options, connect connector) (*Server, error) {
+	srv, err := newServer(opts)
+	if err != nil {
+		return nil, err
+	}
+	srv.connectLocal = connect
+	return srv, nil
+}
+
 // connectViaRun drives the full Server.Run entry point, so the tests that use
 // it also pin that Run routes an unusable config into login-required mode.
-func connectViaRun(t *testing.T, cfg *tgclient.Config, connect localConnector) *mcp.ClientSession {
+func connectViaRun(t *testing.T, cfg *tgclient.Config, connect connector) *mcp.ClientSession {
 	t.Helper()
 	return connectServer(t, cfg, connect, (*Server).Run)
 }
@@ -34,7 +49,7 @@ func connectViaRun(t *testing.T, cfg *tgclient.Config, connect localConnector) *
 // connectLoginRequired enters the mode directly with a given reason, for the
 // tool-behaviour tests: they need credentials present (so the probe branch is
 // reached) without Run trying to use them against the network.
-func connectLoginRequired(t *testing.T, cfg *tgclient.Config, reason string, connect localConnector) *mcp.ClientSession {
+func connectLoginRequired(t *testing.T, cfg *tgclient.Config, reason string, connect connector) *mcp.ClientSession {
 	t.Helper()
 	return connectServer(t, cfg, connect, func(s *Server, ctx context.Context) error {
 		return s.runLoginRequired(ctx, reason)
@@ -45,14 +60,14 @@ func connectLoginRequired(t *testing.T, cfg *tgclient.Config, reason string, con
 // client to the other end, so the tests exercise the same initialize handshake
 // a host performs rather than hand-rolled frames. connect stands in for the
 // local account's connection (and so for the login-required re-check).
-func connectServer(t *testing.T, cfg *tgclient.Config, connect localConnector, start func(*Server, context.Context) error) *mcp.ClientSession {
+func connectServer(t *testing.T, cfg *tgclient.Config, connect connector, start func(*Server, context.Context) error) *mcp.ClientSession {
 	t.Helper()
 	ctx := t.Context()
 
 	clientR, serverW := io.Pipe() // server → client
 	serverR, clientW := io.Pipe() // client → server
 
-	srv, err := newServer(Options{
+	srv, err := newServerConnecting(Options{
 		Config:    cfg,
 		Summarize: testSummarize,
 		Version:   "test",
@@ -92,8 +107,8 @@ func connectServer(t *testing.T, cfg *tgclient.Config, connect localConnector, s
 }
 
 // noConnect is the local connection of a test that must never make one.
-func noConnect(t *testing.T) localConnector {
-	return func(context.Context, *Server) (localClient, error) {
+func noConnect(t *testing.T) connector {
+	return func(context.Context) (localClient, error) {
 		t.Error("the server connected to Telegram")
 		return nil, errors.New("this test does not connect")
 	}
@@ -101,8 +116,8 @@ func noConnect(t *testing.T) localConnector {
 
 // staticConnect connects the local account the same way every time: failing
 // with err, refused by Telegram when not authorized, or else as fakeSelf.
-func staticConnect(authorized bool, err error) localConnector {
-	return func(context.Context, *Server) (localClient, error) {
+func staticConnect(authorized bool, err error) connector {
+	return func(context.Context) (localClient, error) {
 		switch {
 		case err != nil:
 			return nil, err
@@ -204,7 +219,7 @@ func TestLoginRequiredToolProbedStates(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		connect     localConnector
+		connect     connector
 		wantState   LoginState
 		wantAuthzd  bool
 		wantFix     bool
@@ -274,7 +289,7 @@ func TestLoginRequiredToolRechecksLive(t *testing.T) {
 	var calls int
 	probed := newFakeClient()
 	cs := connectLoginRequired(t, &tgclient.Config{APIID: 1, APIHash: "hash"}, notLoggedInMessage,
-		func(context.Context, *Server) (localClient, error) {
+		func(context.Context) (localClient, error) {
 			calls++
 			if calls == 1 {
 				return nil, fmt.Errorf("starting Telegram client: %w", tgclient.ErrSessionUnauthorized)
@@ -340,7 +355,7 @@ func TestRunLoginRequiredExitsCleanlyOnContextCancel(t *testing.T) {
 
 func newPipeServer(t *testing.T, stdin io.Reader) *Server {
 	t.Helper()
-	srv, err := newServer(Options{
+	srv, err := newServerConnecting(Options{
 		Config:    &tgclient.Config{},
 		Summarize: testSummarize,
 		Version:   "test",
@@ -443,7 +458,7 @@ func TestSummarizeMisconfigurationDisablesOnlySummarizeChat(t *testing.T) {
 	serverR, clientW := io.Pipe()
 	var logs bytes.Buffer
 	tgClient := newFakeClient()
-	srv, err := newServer(Options{
+	srv, err := newServerConnecting(Options{
 		Config: &tgclient.Config{APIID: 1, APIHash: "hash"},
 		Summarize: summarize.Config{
 			Provider:     summarize.ProviderGemini,
@@ -456,7 +471,7 @@ func TestSummarizeMisconfigurationDisablesOnlySummarizeChat(t *testing.T) {
 		Stdout:    serverW,
 		ErrOut:    &logs,
 		Transport: TransportStdio,
-	}, func(context.Context, *Server) (localClient, error) { return tgClient, nil })
+	}, func(context.Context) (localClient, error) { return tgClient, nil })
 	require.NoError(t, err)
 	assert.Contains(t, logs.String(), "level=WARN")
 	assert.Contains(t, logs.String(), "the gemini API key is not set")
@@ -532,15 +547,16 @@ func TestRunCancelledDuringStartupReturnsQuietly(t *testing.T) {
 		Stdout:    io.Discard,
 		ErrOut:    &logs,
 		Transport: TransportStdio,
-	}, func(ctx context.Context, s *Server) (localClient, error) {
+	})
+	require.NoError(t, err)
+	srv.connectLocal = func(ctx context.Context) (localClient, error) {
 		close(started)
-		running, err := tgclient.StartClient(ctx, s.opts.Config, blockingSession{}, s.logger, s.floodWaitLogger())
+		running, err := tgclient.StartClient(ctx, srv.opts.Config, blockingSession{}, srv.logger, srv.floodWaitLogger())
 		if err != nil {
 			return nil, err
 		}
 		return running, nil
-	})
-	require.NoError(t, err)
+	}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	errCh := make(chan error, 1)
