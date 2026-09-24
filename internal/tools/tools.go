@@ -343,9 +343,11 @@ func describe(tool string, cause error, hint string) (what, next string) {
 }
 
 // secondaryRefusalHint says what a refusal by a DC other than the home one
-// means while the home DC is asked about the session, so the model does not
-// send the user through a login the session may not need.
-const secondaryRefusalHint = "Do not ask the user to sign in again because of this error: it says nothing about the session itself. If the home DC still accepts the session, the server drops its Telegram connection so that reconnecting restores such calls, and later calls say what reconnecting takes; if the home DC refuses the session too, later calls report that."
+// means while the home DC is asked about the session, so the model neither
+// sends the user through a login the session may not need nor repeats a call
+// that DC keeps refusing. Each answer the check can get is one the model
+// hears (see tgclient.Running.refusalWatch).
+const secondaryRefusalHint = "Do not ask the user to sign in again because of this error: it says nothing about the session itself. Do not repeat this call over and over either: the DC that refused it keeps refusing until the server reconnects to Telegram. If the home DC still accepts the session, the server drops its Telegram connection and later calls say what reconnecting takes; if the home DC refuses the session too, later calls report that; if the home DC cannot be asked, the next such refusal says why and asks it again."
 
 // sentence renders err as a sentence ending in a full stop, so a hint can
 // follow it.

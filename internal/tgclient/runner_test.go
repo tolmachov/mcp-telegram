@@ -283,7 +283,11 @@ func TestRefusalWatchChecksASecondaryRefusalInTheBackground(t *testing.T) {
 
 					w.inv = telegramfake.New(refuseFile(refusal), homeCheck(func(context.Context) error { return nil }))
 					w.api = tg.NewClient(w.refusalWatch().Handle(w.inv))
-					require.ErrorIs(t, w.download(t.Context()), ErrSecondaryRefusal)
+					err := w.download(t.Context())
+					require.ErrorIs(t, err, ErrSecondaryRefusal)
+					assert.ErrorContains(t, err, "asking the home DC again whether the session still stands, as its last check got no answer ("+unreachable.Error()+")",
+						"the next refused download says why the last check failed")
+					assert.False(t, IsSystemic(err), "the check's failure does not classify the call")
 					w.checks.Wait()
 					assert.Zero(t, w.inv.Remaining(), "the next refused download checks again")
 					require.ErrorIs(t, w.Err(), ErrSecondaryRefusal)

@@ -65,6 +65,9 @@ type Running struct {
 	// checking is set while a home-DC check runs, so the refusals it answers
 	// start no other.
 	checking bool
+	// checkErr is why the last home-DC check got no answer, if it got none;
+	// the refusals after it report it (see refusalWatch).
+	checkErr error
 }
 
 // StartClient connects a Telegram client on top of the given session storage
@@ -183,7 +186,8 @@ func (r *Running) connDead(err error) {
 // answered by the home DC, whose refusal is the verdict: the client stops
 // with ErrSessionUnauthorized and the call returns it. A refused call that
 // may have gone to another DC returns ErrSecondaryRefusal at once and has
-// the home DC checked in the background (checkHome).
+// the home DC checked in the background (checkHome), saying why the last
+// check got no answer if it got none.
 func (r *Running) refusalWatch() telegram.Middleware {
 	return telegram.MiddlewareFunc(func(next tg.Invoker) telegram.InvokeFunc {
 		return func(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
@@ -195,11 +199,18 @@ func (r *Running) refusalWatch() telegram.Middleware {
 				verdict := sessionError(err)
 				r.stop(verdict)
 				return verdict
-			case r.checkHome(next, err):
-				return fmt.Errorf("%w (%w); the server is asking the home DC whether the session still stands", ErrSecondaryRefusal, err)
-			default:
+			}
+			checking, lastFailure := r.checkHome(next, err)
+			switch {
+			case !checking:
 				// The client has stopped; why is its own answer.
 				return err //nolint:wrapcheck // a middleware passes Telegram's reply through unchanged.
+			case lastFailure != nil:
+				// The check's failure is told, not wrapped: its timeout or
+				// flood wait is not this call's, and must not classify it.
+				return fmt.Errorf("%w (%w); the server is asking the home DC again whether the session still stands, as its last check got no answer (%v)", ErrSecondaryRefusal, err, lastFailure) //nolint:errorlint // see above.
+			default:
+				return fmt.Errorf("%w (%w); the server is asking the home DC whether the session still stands", ErrSecondaryRefusal, err)
 			}
 		}
 	})
@@ -227,8 +238,9 @@ func answeredAway(input bin.Encoder) bool {
 
 // checkHome starts asking the home DC, through next (the invoker below
 // refusalWatch), whether it still accepts the session a secondary DC just
-// refused, unless a check already runs, and reports whether one now runs:
-// none does once the client has stopped. The check runs on a goroutine of its
+// refused, unless a check already runs, and reports whether one now runs —
+// none does once the client has stopped — and why the last check got no
+// answer, if it got none. The check runs on a goroutine of its
 // own, bounded by homeCheckTimeout and the client's lifetime, and goes beneath
 // the flood-wait middleware: a check Telegram tells to wait fails like any
 // other that gets no answer. The home DC refusing the session is the verdict.
@@ -238,20 +250,20 @@ func answeredAway(input bin.Encoder) bool {
 // rest of the Run loop and exports the authorisation only to a connection it
 // creates, so calls routed there keep being refused until the client
 // reconnects: the check stops the client with a reason that says so, and its
-// owner reconnects it. A check that fails otherwise leaves the client serving;
-// the next refused call checks again.
-func (r *Running) checkHome(next tg.Invoker, refusal error) bool {
+// owner reconnects it. A check that gets no answer leaves the client serving
+// and records why, so that the next refused call reports it and checks again.
+func (r *Running) checkHome(next tg.Invoker, refusal error) (checking bool, lastFailure error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.err != nil {
-		return false
+		return false, nil
 	}
 	if !r.checking {
 		r.checking = true
 		r.checks.Add(1)
 		go r.askHome(next, refusal)
 	}
-	return true
+	return true, r.checkErr
 }
 
 // askHome is the check checkHome starts.
@@ -273,6 +285,9 @@ func (r *Running) askHome(next tg.Invoker, refusal error) {
 	case r.lifetime.Err() != nil:
 		// The client is stopping anyway.
 	default:
+		r.mu.Lock()
+		r.checkErr = err
+		r.mu.Unlock()
 		r.logger.Warn("A Telegram DC other than the home one refused the session and the home DC could not be asked about it; keeping the client", "refusal", refusal, "err", err)
 	}
 }
