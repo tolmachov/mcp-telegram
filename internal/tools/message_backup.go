@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,15 +19,6 @@ import (
 // telegramLaunchDate is the date when Telegram was launched (used as fallback
 // for date range calculations).
 var telegramLaunchDate = time.Date(2013, 8, 14, 0, 0, 0, 0, time.UTC)
-
-// partialNote describes the partial messages a failed save was carrying, or
-// is empty when the fetch completed.
-func partialNote(count int, partialErr error) string {
-	if partialErr == nil {
-		return ""
-	}
-	return fmt.Sprintf(" for %d partial messages fetched before the error %q", count, partialErr.Error())
-}
 
 // MessageBackupHandler handles the BackupMessages tool.
 type MessageBackupHandler struct {
@@ -65,13 +55,15 @@ type BackupMessagesInput struct {
 // BackupMessagesResult is the typed output of BackupMessages. It accompanies
 // the human-readable confirmation text so clients can read the saved path and
 // message count as structured data instead of scraping the message. Partial is
-// true when the file holds a partial backup (e.g. the run was cancelled
-// mid-pagination).
+// true when the file holds a partial backup — the fetch stopped
+// mid-pagination on a flood wait, a timeout, a cancel — and the warning says
+// why and how to fetch the rest.
 type BackupMessagesResult struct {
 	ChatID       int64  `json:"chat_id"`
 	MessageCount int    `json:"message_count"`
 	Filepath     string `json:"filepath"`
 	Partial      bool   `json:"partial,omitempty"`
+	partialOutcome
 }
 
 // Register adds the tool to the MCP server.
@@ -256,21 +248,14 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	result, err := h.provider.FetchAll(ctx, in.ChatID, opts, progress.update)
 	// FetchAll returns partial results (non-nil result alongside err) when
 	// the context is cancelled or a mid-pagination batch fetch fails. When we
-	// have something to save, persist it and report the partial state instead
-	// of losing minutes of fetched history — that's the whole point of
-	// long-running backup progress. Complete failures (result == nil) still
+	// have something to save, persist it and report it as a partial result
+	// instead of losing minutes of fetched history — that's the whole point of
+	// long-running backup progress. Complete failures (nothing fetched) still
 	// bubble up as tool errors; without an error FetchAll always returns a
 	// result.
-	partialErr := err
+	fetchErr := err
 	if err != nil && (result == nil || len(result.Messages) == 0) {
 		return nil, nil, failed(op, err)
-	}
-	if partialErr != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, "BackupMessages", map[string]any{
-			"chat_id":          in.ChatID,
-			"partial_messages": len(result.Messages),
-			"error":            partialErr.Error(),
-		})
 	}
 
 	progress.send(fmt.Sprintf("Collected %d messages", len(result.Messages)))
@@ -281,13 +266,13 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	// Ensure parent directory exists.
 	parentDir := filepath.Dir(targetPath)
 	if err := os.MkdirAll(parentDir, 0o700); err != nil {
-		return nil, nil, failed(op, fmt.Errorf("creating directory%s: %w", partialNote(len(result.Messages), partialErr), err))
+		return nil, nil, failed(op, fmt.Errorf("creating directory: %w", err))
 	}
 
 	// Replace the destination atomically so a crash cannot leave a truncated
 	// backup that looks successful.
 	if err := xdg.WriteFileAtomic(targetPath, []byte(content), 0o600, ".backup-*.tmp"); err != nil {
-		return nil, nil, failed(op, fmt.Errorf("writing file%s: %w", partialNote(len(result.Messages), partialErr), err))
+		return nil, nil, failed(op, fmt.Errorf("writing file: %w", err))
 	}
 
 	// Get an absolute path for clear output. On failure (e.g. Getwd returns
@@ -304,44 +289,18 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 			"error":  err.Error(),
 		})
 	}
-	switch {
-	case partialErr == nil:
-		return textResult(fmt.Sprintf("Backup completed!\nMessages saved: %d\nFile: %s", len(result.Messages), absPath)),
-			&BackupMessagesResult{ChatID: in.ChatID, MessageCount: len(result.Messages), Filepath: absPath}, nil
-	case errors.Is(partialErr, context.Canceled) && ctx.Err() != nil:
-		// User-initiated cancel: not an error. Surface as success so the
-		// caller can decide whether to resume, without the LLM treating the
-		// partial file as a failure to retry blindly. Only the call's own
-		// context says the caller cancelled: a fetch cancelled while the call
-		// still runs was cut short by the Telegram client stopping under it,
-		// which is a failure.
-		return textResult(fmt.Sprintf(
-				"Backup cancelled; partial file saved.\nMessages saved: %d\nFile: %s",
-				len(result.Messages), absPath,
-			)),
-			&BackupMessagesResult{ChatID: in.ChatID, MessageCount: len(result.Messages), Filepath: absPath, Partial: true}, nil
-	default:
-		return nil, nil, partialBackupFailure(op, partialErr, len(result.Messages), absPath)
+	out := &BackupMessagesResult{ChatID: in.ChatID, MessageCount: len(result.Messages), Filepath: absPath}
+	if fetchErr == nil {
+		return textResult(fmt.Sprintf("Backup completed!\nMessages saved: %d\nFile: %s", out.MessageCount, absPath)), out, nil
 	}
-}
-
-// partialBackupFailure reports a fetch that failed mid-pagination (a timeout,
-// FLOOD_WAIT, a transport error, etc.) after count messages were saved to
-// path. We persisted what we fetched so the user doesn't lose minutes of work,
-// but surface it as a tool error so the caller knows the backup is incomplete
-// and needs a retry anchored past the saved file's last message.
-//
-// The note reaches the model whatever the failure, the hint only when the
-// failure is not systemic (see failureText). A timeout is systemic, yet a
-// smaller request can avoid it, so its retry advice goes in the note — unless
-// it struck while the call waited out a wait Telegram told it to take: then
-// the wait is the cause, and the failure says how long it still asks for.
-func partialBackupFailure(op string, err error, count int, path string) error {
-	saved := fmt.Sprintf("a partial file with %d messages was saved to %s.", count, path)
-	if _, told := tgclient.RetryAfter(err); errors.Is(err, context.DeadlineExceeded) && !told {
-		return failed(op, withNote(err, "The backup timed out; "+saved+
-			" Retry with a narrower date window or a smaller limit, or resume from the last saved message."))
-	}
-	return failedHint(op, withNote(err, "The backup stopped mid-stream; "+saved),
-		"Retry with a narrower date window or resume from the last saved message.")
+	// The fetch stopped early: the file holds what came before, newest first.
+	// A pass bounded by the oldest saved message fetches the rest, which it
+	// must write to another file not to overwrite this one.
+	out.Partial = true
+	oldest := result.Messages[len(result.Messages)-1].Date
+	out.warnCause("BackupMessages", fmt.Sprintf(
+		"The backup is incomplete: the file holds only the %d newest messages, fetched before it stopped. To fetch the rest, back up again into another file with to_date=%s. It stopped on this:",
+		out.MessageCount, oldest.Add(time.Second).UTC().Format(time.RFC3339),
+	), fetchErr, "If it stops again, narrow the date window or lower the limit.")
+	return textResult(fmt.Sprintf("Backup incomplete; partial file saved.\nMessages saved: %d\nFile: %s\n%s", out.MessageCount, absPath, out.Warning)), out, nil
 }

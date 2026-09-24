@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/tgerr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -23,7 +24,7 @@ func TestChatSummarizeBuildResult(t *testing.T) {
 	end := time.Date(2026, 4, 8, 0, 0, 0, 0, time.UTC)
 
 	t.Run("success returns full summary", func(t *testing.T) {
-		errRes, out, err := h.buildResult(in, since, end, summarize.Result{Summary: "the summary"}, nil)
+		errRes, out, err := h.buildResult(in, 500, since, end, summarize.Result{Summary: "the summary"}, nil)
 		require.NoError(t, err)
 		require.Nil(t, errRes)
 		require.NotNil(t, out)
@@ -34,37 +35,42 @@ func TestChatSummarizeBuildResult(t *testing.T) {
 	})
 
 	t.Run("sampling unsupported surfaces as error", func(t *testing.T) {
-		_, out, err := h.buildResult(in, since, end, summarize.Result{Summary: ""}, summarize.ErrSamplingUnsupported)
+		_, out, err := h.buildResult(in, 500, since, end, summarize.Result{Summary: ""}, summarize.ErrSamplingUnsupported)
 		require.Nil(t, out)
 		require.ErrorIs(t, err, summarize.ErrSamplingUnsupported)
 		assert.Contains(t, failureText("SummarizeChat", err), "sampling")
 	})
 
 	t.Run("late failure with partial text is salvaged", func(t *testing.T) {
-		errRes, out, err := h.buildResult(in, since, end, summarize.Result{Summary: "batches 1-18"}, errors.New("batch 19/20: boom"))
+		errRes, out, err := h.buildResult(in, 500, since, end, summarize.Result{Summary: "batches 1-18"}, errors.New("batch 19/20: boom"))
 		require.NoError(t, err)
+		require.Nil(t, errRes)
 		require.NotNil(t, out)
 		assert.Equal(t, "batches 1-18", out.Summary)
 		assert.True(t, out.Partial)
-		assert.Contains(t, out.Warning, "stopped early")
-		assert.Contains(t, out.Warning, "boom")
-		// A partial result is not an IsError, but it must carry the MetaWarning
-		// marker so the server request logger surfaces it at Warn.
-		require.NotNil(t, errRes)
-		assert.False(t, errRes.IsError)
-		assert.Equal(t, out.Warning, errRes.Meta[MetaWarning])
+		assert.Equal(t, "Summarisation stopped early, so the summary covers only the batches done before this: batch 19/20: boom.", out.Warning)
+		// A partial result is not an IsError, but AddTool marks it with
+		// MetaWarning so the server request logger surfaces it at Warn.
+		flagged := flagPartial(errRes, out)
+		require.NotNil(t, flagged)
+		assert.False(t, flagged.IsError)
+		assert.Equal(t, out.Warning, flagged.Meta[MetaWarning])
 	})
 
-	t.Run("a late failure keeps the fetch's own warning", func(t *testing.T) {
-		const fetchWarning = "Only 500 of the period's messages were fetched."
-		_, out, err := h.buildResult(in, since, end, summarize.Result{Summary: "batches 1-18", Warning: fetchWarning}, errors.New("batch 19/20: boom"))
+	t.Run("every shortfall is warned of, a wait rendered as a failure would be", func(t *testing.T) {
+		flood := &tgerr.Error{Code: 420, Message: "FLOOD_WAIT_30", Type: "FLOOD_WAIT", Argument: 30}
+		_, out, err := h.buildResult(in, 500, since, end, summarize.Result{Summary: "batches 1-18", Truncated: true, Partial: true, FetchErr: flood}, errors.New("batch 19/20: boom"))
 		require.NoError(t, err)
 		require.NotNil(t, out)
-		assert.Equal(t, fetchWarning+" Summarisation stopped early: batch 19/20: boom.", out.Warning)
+		assert.True(t, out.Partial)
+		assert.Contains(t, out.Warning, "more than max_messages=500")
+		assert.Contains(t, out.Warning, "Fetching the period's history stopped early")
+		assert.Contains(t, out.Warning, "30 seconds", "the fetch's flood wait is described, not dumped")
+		assert.Contains(t, out.Warning, "batch 19/20: boom")
 	})
 
 	t.Run("failure with no text is a hard error", func(t *testing.T) {
-		_, out, err := h.buildResult(in, since, end, summarize.Result{Summary: "   "}, errors.New("batch 1/20: boom"))
+		_, out, err := h.buildResult(in, 500, since, end, summarize.Result{Summary: "   "}, errors.New("batch 1/20: boom"))
 		require.Nil(t, out)
 		require.Error(t, err)
 		assert.Equal(t, "Failed to summarise chat 7: batch 1/20: boom.", failureText("SummarizeChat", err))

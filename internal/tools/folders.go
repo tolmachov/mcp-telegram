@@ -160,6 +160,13 @@ func applyRemovals(filter *tg.DialogFilter, peers []tg.InputPeerClass) (removed,
 	return removed, notPresent
 }
 
+// warnSkipped warns on p of the chat references a folder edit skipped.
+func warnSkipped(p *partialOutcome, skipped []FolderSkippedChat) {
+	if len(skipped) > 0 {
+		p.warn(fmt.Sprintf("%d of the chats were skipped; skipped says why.", len(skipped)))
+	}
+}
+
 // formatSkipped renders skipped chats as "chat (reason); chat (reason)" for
 // embedding in an error message when an entire batch failed to resolve.
 func formatSkipped(skipped []FolderSkippedChat) string {
@@ -336,6 +343,7 @@ type CreateFolderResult struct {
 	Title         string              `json:"title"`
 	IncludedCount int                 `json:"included_count"`
 	Skipped       []FolderSkippedChat `json:"skipped,omitempty"`
+	partialOutcome
 }
 
 // hasCategoryInclude reports whether any include_* category flag is set.
@@ -415,12 +423,14 @@ func (h *CreateFolderHandler) create(ctx context.Context, in CreateFolderInput, 
 		}
 		return nil, failed(op, err)
 	}
-	return &CreateFolderResult{
+	out := &CreateFolderResult{
 		FolderID:      id,
 		Title:         title,
 		IncludedCount: len(includePeers),
 		Skipped:       skipped,
-	}, nil
+	}
+	warnSkipped(&out.partialOutcome, skipped)
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -508,6 +518,7 @@ type AddChatsToFolderResult struct {
 	Added          []int64             `json:"added,omitempty"`
 	AlreadyPresent []int64             `json:"already_present,omitempty"`
 	Skipped        []FolderSkippedChat `json:"skipped,omitempty"`
+	partialOutcome
 }
 
 // Register adds the AddChatsToFolder tool to the MCP server.
@@ -531,7 +542,9 @@ func (h *AddChatsToFolderHandler) handle(ctx context.Context, _ *mcp.CallToolReq
 	if err != nil {
 		return nil, nil, err
 	}
-	return nil, &AddChatsToFolderResult{FolderID: in.FolderID, Added: added, AlreadyPresent: present, Skipped: skipped}, nil
+	out := &AddChatsToFolderResult{FolderID: in.FolderID, Added: added, AlreadyPresent: present, Skipped: skipped}
+	warnSkipped(&out.partialOutcome, skipped)
+	return nil, out, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -560,6 +573,7 @@ type RemoveChatsFromFolderResult struct {
 	Removed    []int64             `json:"removed,omitempty"`
 	NotPresent []int64             `json:"not_present,omitempty"`
 	Skipped    []FolderSkippedChat `json:"skipped,omitempty"`
+	partialOutcome
 }
 
 // Register adds the RemoveChatsFromFolder tool to the MCP server.
@@ -583,7 +597,9 @@ func (h *RemoveChatsFromFolderHandler) handle(ctx context.Context, _ *mcp.CallTo
 	if err != nil {
 		return nil, nil, err
 	}
-	return nil, &RemoveChatsFromFolderResult{FolderID: in.FolderID, Removed: removed, NotPresent: absent, Skipped: skipped}, nil
+	out := &RemoveChatsFromFolderResult{FolderID: in.FolderID, Removed: removed, NotPresent: absent, Skipped: skipped}
+	warnSkipped(&out.partialOutcome, skipped)
+	return nil, out, nil
 }
 
 // editFolderChats resolves chats, applies them to folder folderID with apply,

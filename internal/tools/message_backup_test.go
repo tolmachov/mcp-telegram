@@ -1,9 +1,6 @@
 package tools
 
 import (
-	"context"
-	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,35 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gotd/td/tgerr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// TestPartialBackupFailure pins that a timed-out backup still tells the model
-// how to shrink the request: a timeout is systemic, so failureText drops the
-// hint, and the retry advice must travel in the note.
-func TestPartialBackupFailure(t *testing.T) {
-	timedOut := failureText("BackupMessages", partialBackupFailure("back up chat 1",
-		fmt.Errorf("fetching batch: %w", context.DeadlineExceeded), 42, "/backups/chat.txt"))
-	assert.Contains(t, timedOut, "The backup timed out; a partial file with 42 messages was saved to /backups/chat.txt.")
-	assert.Contains(t, timedOut, "narrower date window or a smaller limit")
-	assert.NotContains(t, timedOut, "mid-stream")
-
-	broken := failureText("BackupMessages", partialBackupFailure("back up chat 1",
-		errors.New("connection reset"), 42, "/backups/chat.txt"))
-	assert.Contains(t, broken, "The backup stopped mid-stream; a partial file with 42 messages was saved to /backups/chat.txt.")
-	assert.Contains(t, broken, "Retry with a narrower date window or resume from the last saved message.")
-
-	// The deadline struck while the call waited out Telegram's wait, so the
-	// wait says when to retry, and nothing invites retrying sooner.
-	waiting := failureText("BackupMessages", partialBackupFailure("back up chat 1",
-		fmt.Errorf("%w while waiting out the 30s Telegram asked for (%w)", context.DeadlineExceeded, tgerr.New(420, "FLOOD_WAIT_30")), 42, "/backups/chat.txt"))
-	assert.Contains(t, waiting, "wait 30s (30 seconds) before retrying")
-	assert.Contains(t, waiting, "The backup stopped mid-stream; a partial file with 42 messages was saved to /backups/chat.txt.")
-	assert.NotContains(t, waiting, "timed out")
-	assert.NotContains(t, waiting, "Retry with")
-}
 
 func TestSanitizeFilename(t *testing.T) {
 	tests := []struct {

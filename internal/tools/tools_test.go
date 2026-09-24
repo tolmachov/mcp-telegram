@@ -18,7 +18,7 @@ import (
 )
 
 // TestFailureText covers the single rendering of handler errors: the flood
-// wait guidance, the peer hint, the failure's own hint, and its outcome note.
+// wait guidance, the peer hint and the failure's own hint.
 func TestFailureText(t *testing.T) {
 	flood := &tgerr.Error{Code: 420, Message: "FLOOD_WAIT_265", Type: "FLOOD_WAIT", Argument: 265}
 	// The client hands a call the home DC refused the verdict (see
@@ -29,7 +29,7 @@ func TestFailureText(t *testing.T) {
 		assert.Equal(t, "Failed to send message: the server recorded no cause for this failure (server bug).",
 			failureText("SendMessage", failed("send message", nil)))
 		assert.Equal(t, "Failed to send message: the server recorded no cause for this failure (server bug). Try again.",
-			failureText("SendMessage", failedHint("send message", withNote(nil, ""), "Try again.")))
+			failureText("SendMessage", failedHint("send message", withHint(nil, ""), "Try again.")))
 	})
 
 	t.Run("bare flood wait", func(t *testing.T) {
@@ -114,22 +114,31 @@ func TestFailureText(t *testing.T) {
 			failureText("ResolveUsername", failedHint("resolve @x", fmt.Errorf("resolving chat 42: %w", context.Canceled), "Try SearchChats instead.")))
 	})
 
-	t.Run("note survives a systemic failure, hint does not", func(t *testing.T) {
-		err := failedHint("back up chat 5", withNote(fmt.Errorf("fetching: %w", flood), "A partial file was saved to /tmp/x."), "Retry later.")
-		txt := failureText("BackupMessages", err)
-		assert.True(t, strings.HasPrefix(txt, "Failed to back up chat 5: Telegram rate-limited this BackupMessages call"), txt)
-		assert.True(t, strings.HasSuffix(txt, " A partial file was saved to /tmp/x."), txt)
-		assert.NotContains(t, txt, "Retry later.")
-	})
-
-	t.Run("note precedes the hint", func(t *testing.T) {
-		err := failedHint("back up chat 5", withNote(errors.New("boom"), "A partial file was saved."), "Retry later.")
-		assert.Equal(t, "Failed to back up chat 5: boom. A partial file was saved. Retry later.", failureText("BackupMessages", err))
-	})
-
 	t.Run("plain error names the tool", func(t *testing.T) {
 		assert.Equal(t, "Failed to run GetMe: boom.", failureText("GetMe", errors.New("boom")))
 	})
+}
+
+// TestPartialOutcome covers the warning of a partial result: its cause is
+// rendered as a failure's would be, and AddTool flags it for the request log.
+func TestPartialOutcome(t *testing.T) {
+	flood := &tgerr.Error{Code: 420, Message: "FLOOD_WAIT_265", Type: "FLOOD_WAIT", Argument: 265}
+
+	var out SearchResultsList
+	assert.Nil(t, flagPartial(nil, &out), "an output without a warning is left to the SDK")
+
+	out.warn("The listing is incomplete.")
+	out.warnCause("SearchChats", "Global search failed:", fmt.Errorf("searching contacts: %w", flood), "Retry later.")
+	assert.True(t, strings.HasPrefix(out.Warning, "The listing is incomplete. Global search failed: Telegram rate-limited this SearchChats call: wait 4m25s (265 seconds)"), out.Warning)
+	assert.NotContains(t, out.Warning, "Retry later.", "a hint cannot cure a flood wait")
+
+	res := flagPartial(textResult("found"), &out)
+	assert.Equal(t, out.Warning, res.Meta[MetaWarning])
+	assert.Equal(t, "found", toolResultText(res))
+
+	var plain SearchResultsList
+	plain.warnCause("SearchChats", "Global search failed:", errors.New("boom"), "Retry later.")
+	assert.Equal(t, "Global search failed: boom. Retry later.", plain.Warning)
 }
 
 // Note: progress-token extraction is now SDK-provided

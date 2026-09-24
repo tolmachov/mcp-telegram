@@ -51,7 +51,7 @@ type SearchResultsList struct {
 	Query   string         `json:"query"`
 	Results []SearchResult `json:"results"`
 	Count   int            `json:"count"`
-	Warning string         `json:"warning,omitempty"`
+	partialOutcome
 }
 
 // Register adds the tool to the MCP server.
@@ -95,33 +95,22 @@ func (h *ChatsSearchHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		return nil, nil, failed("get chats", err)
 	}
 
+	out := &SearchResultsList{Query: query}
 	results := scoreChats(query, snap.Chats)
-
-	var warnings []string
 	if snap.Truncated {
-		warnings = append(warnings, truncatedChatsWarning)
+		out.warn(truncatedChatsWarning)
 	}
 	found := <-global
 	if found.err != nil {
-		mcpLog(ctx, req.Session, logLevelWarning, "SearchChats", map[string]any{
-			"action": "global_search_failed",
-			"query":  query,
-			"error":  found.err.Error(),
-		})
-		warnings = append(warnings, "Global search failed; results may be incomplete (local matches only).")
+		out.warnCause("SearchChats", "Global search failed, so the results hold matches among your own chats only:", found.err, "")
 	} else if len(found.chats) > 0 {
 		results = mergeSearchResults(results, scoreChats(query, found.chats))
 	}
 	if len(results) > limit {
 		results = results[:limit]
 	}
-
-	return nil, &SearchResultsList{
-		Query:   query,
-		Results: results,
-		Count:   len(results),
-		Warning: strings.Join(warnings, " "),
-	}, nil
+	out.Results, out.Count = results, len(results)
+	return nil, out, nil
 }
 
 // searchGlobal performs Telegram's global search by username.

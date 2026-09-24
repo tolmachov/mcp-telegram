@@ -57,10 +57,11 @@ type MarkAsReadResult struct {
 	// tried, so the requested total is TotalChats + len(SkippedIDs).
 	TotalChats int `json:"total_chats"`
 	// SkippedIDs holds chats not attempted because the batch stopped early on
-	// a systemic failure (a flood wait, a dead session, a cancelled call);
-	// Warning explains why. Both are empty on a normal run.
+	// a systemic failure (a flood wait, a dead session, a cancelled call).
 	SkippedIDs []int64 `json:"skipped_ids,omitempty"`
-	Warning    string  `json:"warning,omitempty"`
+	// The warning names the chats that failed or were skipped, and why the
+	// batch stopped.
+	partialOutcome
 }
 
 // markReadResult is the internal per-chat outcome before formatting.
@@ -116,8 +117,7 @@ func (h *MessageReadHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	stopped := func(pending []int64, err error) (*mcp.CallToolResult, *MarkAsReadResult, error) {
 		out := h.buildResult(results)
 		out.SkippedIDs = append([]int64(nil), pending...)
-		what, hint := describe("MarkAsRead", err, "")
-		out.Warning = strings.TrimSpace(what + " " + hint)
+		out.warnCause("MarkAsRead", "The batch stopped early, leaving the chats in skipped_ids untouched:", err, "")
 		return nil, out, nil
 	}
 
@@ -215,6 +215,9 @@ func (h *MessageReadHandler) buildResult(results []markReadResult) *MarkAsReadRe
 				Error:  fmt.Sprintf("%v", r.err),
 			})
 		}
+	}
+	if out.Failed > 0 {
+		out.warn(fmt.Sprintf("%d of the chats could not be marked as read; failures says why.", out.Failed))
 	}
 	return out
 }

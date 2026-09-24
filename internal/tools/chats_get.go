@@ -45,9 +45,9 @@ type getChatsOutput struct {
 	HasMore        bool              `json:"has_more"`
 	NextCursor     string            `json:"next_cursor,omitempty"`
 	PaginationHint string            `json:"pagination_hint,omitempty"`
-	// Warning is set when the underlying listing is truncated, so a chat's
-	// absence from Chats/Total does not prove it doesn't exist.
-	Warning string `json:"warning,omitempty"`
+	// The warning is set when the underlying listing is truncated, so a
+	// chat's absence from Chats/Total does not prove it doesn't exist.
+	partialOutcome
 }
 
 // truncatedChatsWarning explains an incomplete dialog listing to the model. Used
@@ -123,7 +123,7 @@ func (h *ChatsGetHandler) pageFrom(snap *tgdata.ChatsSnapshot, offset, limit int
 		out.PaginationHint = fmt.Sprintf("Showing %d–%d of %d chats. Pass next_cursor to get more.", offset+1, end, total)
 	}
 	if snap.Truncated {
-		out.Warning = truncatedChatsWarning
+		out.warn(truncatedChatsWarning)
 	}
 	return out
 }

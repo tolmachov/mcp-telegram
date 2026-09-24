@@ -189,8 +189,57 @@ func AddTool[In, Out any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, *
 		if out == nil {
 			return nil, nil, fmt.Errorf("%s returned no result (server bug): the outcome of this call is unknown", t.Name)
 		}
-		return res, out, nil
+		return flagPartial(res, out), out, nil
 	})
+}
+
+// MetaWarning is the CallToolResult.Meta key AddTool sets to flag a degraded
+// success — a usable 200 (IsError=false) that nonetheless hides a failure the
+// operator should see. The server's request logger reads it and escalates the
+// entry to Warn (see internal/server/reqlog.go); without it a partial result
+// would be logged only at Info server-side and the failure would be invisible.
+const MetaWarning = "mcp-telegram/warning"
+
+// partialOutcome is embedded in the output of every tool that can succeed in
+// part — a batch that stopped early, a listing that is incomplete, a backup
+// that saved only what it fetched. Warning says what the output lacks and
+// why; AddTool flags an output carrying one with MetaWarning. A handler
+// builds it with warn, or with warnCause when an error cut the work short.
+type partialOutcome struct {
+	Warning string `json:"warning,omitempty"`
+}
+
+// warn adds text, one or more sentences, to the warning.
+func (p *partialOutcome) warn(text string) {
+	p.Warning = strings.TrimSpace(p.Warning + " " + text)
+}
+
+// warnCause adds to the warning what the output lacks, lack, followed by the
+// error that cut the work short and its hint as describe renders them for
+// tool — the same rendering a failure of tool gets.
+func (p *partialOutcome) warnCause(tool, lack string, cause error, hint string) {
+	what, next := describe(tool, cause, hint)
+	p.warn(strings.TrimSpace(lack + " " + what + " " + next))
+}
+
+func (p *partialOutcome) warning() string { return p.Warning }
+
+// flagPartial sets MetaWarning on the result of an output whose
+// partialOutcome carries a warning, creating the result if the handler left
+// it to the SDK.
+func flagPartial(res *mcp.CallToolResult, out any) *mcp.CallToolResult {
+	partial, ok := out.(interface{ warning() string })
+	if !ok || partial.warning() == "" {
+		return res
+	}
+	if res == nil {
+		res = &mcp.CallToolResult{}
+	}
+	if res.Meta == nil {
+		res.Meta = mcp.Meta{}
+	}
+	res.Meta[MetaWarning] = partial.warning()
+	return res
 }
 
 // AddContentTool registers a tool with no typed output (e.g. GetMedia, which
@@ -208,17 +257,15 @@ func AddContentTool[In any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In,
 
 // failure is a tool call that failed past input validation — a Telegram RPC
 // or another runtime error. Handlers return it as their Go error and
-// toolFailure renders it as "Failed to <op>: <err>" plus the note and the
-// hint. A failure without an op only carries a note or hint for an outer
-// failure to render.
+// toolFailure renders it as "Failed to <op>: <err>" plus the hint. A failure
+// without an op only carries a hint for an outer failure to render.
 //
-// A note states an outcome the model must know whatever went wrong, e.g. the
-// partial file a backup saved; a hint suggests how to fix the request, which
-// cannot cure a systemic failure (tgclient.IsSystemic), so it is dropped
-// there.
+// A hint suggests how to fix the request, which cannot cure a condition
+// beyond the request (tgclient.IsBeyondRequest), so it is dropped there. A
+// call that got something done before it failed is no failure: it returns
+// its output with a warning (partialOutcome).
 type failure struct {
 	op   string
-	note string
 	hint string
 	err  error
 }
@@ -238,25 +285,22 @@ func (f *failure) Unwrap() error { return f.err }
 var errNoCause = errors.New("the server recorded no cause for this failure (server bug)")
 
 // newFailure is the one constructor of failure.
-func newFailure(op, note, hint string, err error) error {
+func newFailure(op, hint string, err error) error {
 	if err == nil {
 		err = errNoCause
 	}
-	return &failure{op: op, note: note, hint: hint, err: err}
+	return &failure{op: op, hint: hint, err: err}
 }
 
 // failed reports that op — a phrase fitting "Failed to <op>", e.g. "send
 // message" — failed with err.
-func failed(op string, err error) error { return newFailure(op, "", "", err) }
+func failed(op string, err error) error { return newFailure(op, "", err) }
 
 // failedHint is failed with a recovery hint the model can act on.
-func failedHint(op string, err error, hint string) error { return newFailure(op, "", hint, err) }
+func failedHint(op string, err error, hint string) error { return newFailure(op, hint, err) }
 
 // withHint attaches a recovery hint to err for the failure that wraps it.
-func withHint(err error, hint string) error { return newFailure("", "", hint, err) }
-
-// withNote attaches an outcome note to err for the failure that wraps it.
-func withNote(err error, note string) error { return newFailure("", note, "", err) }
+func withHint(err error, hint string) error { return newFailure("", hint, err) }
 
 // peerHint follows a failure about the one chat a call named (tgclient.IsPeerSpecific).
 const peerHint = "The chat may not exist, you may not have access, or the ID may be wrong. Use SearchChats or GetChats to verify, or ResolveUsername if you only have a @handle."
@@ -274,10 +318,10 @@ func toolFailure(ctx context.Context, req *mcp.CallToolRequest, tool string, err
 }
 
 // failureText renders a handler error as "Failed to <op>: <what happened>",
-// followed by the failure's note and then the hint describe picks.
+// followed by the hint describe picks.
 func failureText(tool string, err error) string {
-	// The outermost op names what failed; the outermost note and hint win.
-	op, note, hint, cause := "run "+tool, "", "", err
+	// The outermost op names what failed; the outermost hint wins.
+	op, hint, cause := "run "+tool, "", err
 	named := false
 	for e := err; ; {
 		var f *failure
@@ -287,9 +331,6 @@ func failureText(tool string, err error) string {
 		if !named && f.op != "" {
 			op, cause, named = f.op, f.err, true
 		}
-		if note == "" {
-			note = f.note
-		}
 		if hint == "" {
 			hint = f.hint
 		}
@@ -297,10 +338,8 @@ func failureText(tool string, err error) string {
 	}
 	what, hint := describe(tool, cause, hint)
 	text := fmt.Sprintf("Failed to %s: %s", op, what)
-	for _, s := range []string{note, hint} {
-		if s != "" {
-			text += " " + s
-		}
+	if hint != "" {
+		text += " " + hint
 	}
 	return text
 }

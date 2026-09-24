@@ -56,18 +56,12 @@ type SummarizeChatResult struct {
 	Summary           string `json:"summary"`
 	MessagesProcessed int    `json:"messages_processed"`
 	Truncated         bool   `json:"truncated"`
-	// Partial is true when summarisation stopped early (e.g. a provider error
-	// on a later batch) and Summary holds only the batches completed so far.
-	Partial bool   `json:"partial,omitempty"`
-	Warning string `json:"warning,omitempty"`
+	// Partial is true when the history fetch or summarisation stopped early
+	// (e.g. a provider error on a later batch) and Summary covers only the
+	// messages or batches done so far; the warning says why.
+	Partial bool `json:"partial,omitempty"`
+	partialOutcome
 }
-
-// MetaWarning is the CallToolResult.Meta key a tool sets to flag a degraded
-// success — a usable 200 (IsError=false) that nonetheless hides a failure the
-// operator should see. The server's request logger reads it and escalates the
-// entry to Warn (see internal/server/reqlog.go); without it a partial result
-// would be logged only at Info server-side and the failure would be invisible.
-const MetaWarning = "mcp-telegram/warning"
 
 // Register adds the tool to the MCP server.
 func (h *ChatSummarizeHandler) Register(s *mcp.Server) {
@@ -120,15 +114,20 @@ func (h *ChatSummarizeHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	}
 
 	result, err := h.summarizer.Summarize(ctx, req.Session, h.msgProvider, in.ChatID, in.Goal, since, maxMessages, onProgress)
-	return h.buildResult(in, since, periodEnd, result, err)
+	return h.buildResult(in, maxMessages, since, periodEnd, result, err)
 }
 
 // buildResult shapes the tool response from a summarizer outcome, kept separate
 // from handle so the (result, err) → response branching is unit-testable without
 // driving a live LLM. On success it returns the full summary; on a late failure
 // that still produced text it returns a partial result (salvaging completed
-// batches); and a total failure is returned as the handler error.
-func (h *ChatSummarizeHandler) buildResult(in SummarizeChatInput, since, periodEnd time.Time, result summarize.Result, err error) (*mcp.CallToolResult, *SummarizeChatResult, error) {
+// batches); and a total failure is returned as the handler error. Whatever
+// the summary lacks — messages past maxMessages, history a failed fetch did
+// not reach, batches after a failed one — its warning says.
+func (h *ChatSummarizeHandler) buildResult(in SummarizeChatInput, maxMessages int, since, periodEnd time.Time, result summarize.Result, err error) (*mcp.CallToolResult, *SummarizeChatResult, error) {
+	if err != nil && strings.TrimSpace(result.Summary) == "" {
+		return nil, nil, failed(fmt.Sprintf("summarise chat %d", in.ChatID), err)
+	}
 	out := &SummarizeChatResult{
 		ChatID:            in.ChatID,
 		Goal:              in.Goal,
@@ -139,27 +138,21 @@ func (h *ChatSummarizeHandler) buildResult(in SummarizeChatInput, since, periodE
 		Summary:           result.Summary,
 		MessagesProcessed: result.MessagesProcessed,
 		Truncated:         result.Truncated,
-		Partial:           result.Partial,
-		Warning:           result.Warning,
+		Partial:           result.Partial || err != nil,
 	}
-
-	if err == nil {
-		if out.Partial || out.Truncated {
-			return &mcp.CallToolResult{Meta: mcp.Meta{MetaWarning: out.Warning}}, out, nil
-		}
-		return nil, out, nil
+	if result.Truncated {
+		out.warn(fmt.Sprintf("The period holds more than max_messages=%d messages; the summary covers only the latest %d.", maxMessages, maxMessages))
 	}
-	// A later batch failed but earlier batches produced a usable summary —
-	// return it marked partial rather than throwing the completed work away.
-	// The warning also rides in Meta so the server request logger surfaces
-	// this degraded success at Warn (the result itself is not an error). A
-	// warning the summariser already gave (e.g. an incomplete fetch) stays.
-	if strings.TrimSpace(result.Summary) != "" {
-		out.Partial = true
-		out.Warning = strings.TrimSpace(result.Warning + " " + fmt.Sprintf("Summarisation stopped early: %v.", err))
-		return &mcp.CallToolResult{Meta: mcp.Meta{MetaWarning: out.Warning}}, out, nil
+	if result.FetchErr != nil {
+		out.warnCause("SummarizeChat", "Fetching the period's history stopped early, so the summary covers only the messages fetched before this:", result.FetchErr, "")
 	}
-	return nil, nil, failed(fmt.Sprintf("summarise chat %d", in.ChatID), err)
+	if err != nil {
+		// A later batch failed but earlier batches produced a usable summary:
+		// return it marked partial rather than throwing the completed work
+		// away.
+		out.warnCause("SummarizeChat", "Summarisation stopped early, so the summary covers only the batches done before this:", err, "")
+	}
+	return nil, out, nil
 }
 
 func (h *ChatSummarizeHandler) parseSinceTime(in SummarizeChatInput) (time.Time, error) {

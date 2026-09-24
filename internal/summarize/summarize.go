@@ -95,12 +95,16 @@ func Unavailable(err error) *Summarizer {
 func (s *Summarizer) ProviderName() ProviderName { return s.name }
 
 // Result includes provenance and degradation state for a bounded operation.
+// Truncated means the period held more than maxMessages messages; FetchErr is
+// the error that stopped the history fetch early, leaving the summary over the
+// messages fetched before it. Partial is set whenever the summary covers only
+// part of what was asked: a fetch or a later batch stopped early.
 type Result struct {
 	Summary           string
 	MessagesProcessed int
 	Truncated         bool
 	Partial           bool
-	Warning           string
+	FetchErr          error
 }
 
 // Summarize fetches at most maxMessages of chatID through msgProvider and
@@ -121,14 +125,7 @@ func (s *Summarizer) Summarize(ctx context.Context, session *mcp.ServerSession, 
 	if fetched == nil || (fetchErr != nil && len(fetched.Messages) == 0) {
 		return Result{}, fmt.Errorf("fetching messages: %w", fetchErr)
 	}
-	out := Result{Truncated: fetched.HasMore}
-	if out.Truncated {
-		out.Warning = fmt.Sprintf("summary input was truncated at max_messages=%d", maxMessages)
-	}
-	if fetchErr != nil {
-		out.Partial = true
-		out.Warning = fmt.Sprintf("message history fetch stopped early: %v", fetchErr)
-	}
+	out := Result{Truncated: fetched.HasMore, FetchErr: fetchErr, Partial: fetchErr != nil}
 
 	if len(fetched.Messages) == 0 {
 		out.Summary = "No messages found in the specified period."

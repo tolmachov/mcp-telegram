@@ -258,7 +258,7 @@ func TestMarkAsReadIsolatesBadChannel(t *testing.T) {
 	assert.Contains(t, out.Failures[0].Error, "CHANNEL_PRIVATE")
 	assert.Equal(t, 2, out.TotalChats)
 	assert.Empty(t, out.SkippedIDs)
-	assert.Empty(t, out.Warning)
+	assert.Equal(t, "1 of the chats could not be marked as read; failures says why.", out.Warning)
 	assert.Zero(t, inv.Remaining())
 }
 
@@ -356,7 +356,7 @@ func TestMarkAsReadDeadSessionStopsBatch(t *testing.T) {
 	require.NotNil(t, out)
 	assert.Zero(t, out.TotalChats)
 	assert.Equal(t, []int64{channelID, groupID}, out.SkippedIDs)
-	assert.Equal(t, "getting channel top messages: telegram session is not authorized: rpc error code 401: AUTH_KEY_UNREGISTERED.", out.Warning,
+	assert.Equal(t, "The batch stopped early, leaving the chats in skipped_ids untouched: getting channel top messages: telegram session is not authorized: rpc error code 401: AUTH_KEY_UNREGISTERED.", out.Warning,
 		"the warning renders the cause as a tool failure does; the server explains the dead session")
 	assert.Len(t, inv.RequestTypes(), len(script), "no call follows the systemic failure")
 }
