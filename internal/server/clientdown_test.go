@@ -103,32 +103,30 @@ func TestClientDownExplainsADeadSessionOnce(t *testing.T) {
 	}
 }
 
-// TestClientDownAgreesWithASecondaryRefusal pins that a call a secondary DC
-// refused, answered after the home DC confirmed the session and the client
-// stopped for a reconnect, is told one thing: the session is valid and
-// reconnecting restores the refused calls — never to log out or sign in.
-func TestClientDownAgreesWithASecondaryRefusal(t *testing.T) {
-	refusal := tgerr.New(401, "AUTH_KEY_UNREGISTERED")
-	inFlight := fmt.Errorf("%w (%w); the server is asking the home DC whether the session still stands", tgclient.ErrSecondaryRefusal, refusal)
-	stopped := fmt.Errorf("%w (%w) while the home DC still accepts it; reconnecting restores the calls it serves", tgclient.ErrSecondaryRefusal, refusal)
+// TestClientDownAgreesWithAnAwayRefusal pins that a call a DC other than the
+// home one refused, which stops the client for a reconnect, is told one
+// thing: the connection is being restored and the call can be retried —
+// never to log out or sign in.
+func TestClientDownAgreesWithAnAwayRefusal(t *testing.T) {
+	away := errors.New("a Telegram DC other than the account's home one refused the session (rpc error code 401: AUTH_KEY_UNREGISTERED); reconnecting has the home DC judge the session")
 	for _, transport := range []string{TransportStdio, TransportHTTP} {
 		t.Run(transport, func(t *testing.T) {
 			srv := &Server{opts: Options{Transport: transport}}
 			tgClient := newFakeClient()
 			api := tg.NewClient(telegramfake.New(telegramfake.Typed(func(context.Context, *tg.UsersGetFullUserRequest, *tg.UsersUserFull) error {
-				tgClient.stop(stopped)
-				return inFlight
+				tgClient.stop(away)
+				return tgclient.Stopped(away)
 			})))
 
 			texts, isError := callThroughClientDown(t, srv, tgClient, tools.NewMeGetHandler(api), "GetMe", map[string]any{})
 			require.True(t, isError)
 			require.Len(t, texts, 2)
-			assert.Contains(t, texts[0], "Do not ask the user to sign in again", "the tool's own hint")
-			assert.Equal(t, srv.clientDownText(stopped), texts[1])
+			assert.Equal(t, "Failed to get current user: getting current user: the Telegram client stopped: "+away.Error()+".", texts[0],
+				"the tool renders only its failure")
+			assert.Equal(t, srv.clientDownText(away), texts[1])
 			for _, text := range texts {
-				assert.NotContains(t, text, "mcp-telegram logout")
-				assert.NotContains(t, text, "mcp-telegram login")
-				assert.NotContains(t, text, "QR login")
+				assert.NotContains(t, text, "logout")
+				assert.NotContains(t, text, "login")
 			}
 		})
 	}
@@ -141,7 +139,7 @@ func TestClientDownAgreesWithASecondaryRefusal(t *testing.T) {
 // completed.
 func TestClientDownDefersToACutShortBatch(t *testing.T) {
 	srv := &Server{opts: Options{Transport: TransportHTTP}}
-	stop := errors.New("telegram client stopped: connection reset")
+	stop := errors.New("connection reset")
 	tgClient := newFakeClient()
 	resolve := func(id int64) telegramfake.InvokeFunc {
 		return telegramfake.Typed(func(_ context.Context, _ *tg.UsersGetUsersRequest, out *tg.UserClassVector) error {
@@ -154,10 +152,10 @@ func TestClientDownDefersToACutShortBatch(t *testing.T) {
 		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesReadHistoryRequest, out *tg.MessagesAffectedMessages) error {
 			return nil
 		}),
-		// gotd fails the calls in flight when the client's Run loop ends.
+		// The client fails the calls in flight with why it stopped.
 		telegramfake.Typed(func(context.Context, *tg.MessagesReadHistoryRequest, *tg.MessagesAffectedMessages) error {
 			tgClient.stop(stop)
-			return context.Canceled
+			return tgclient.Stopped(stop)
 		}),
 	))
 
@@ -167,5 +165,5 @@ func TestClientDownDefersToACutShortBatch(t *testing.T) {
 	require.Len(t, texts, 2)
 	assert.Contains(t, texts[0], `"success_ids":[1]`)
 	assert.Contains(t, texts[0], `"skipped_ids":[3]`)
-	assert.Equal(t, "The Telegram connection stopped (telegram client stopped: connection reset); the server reconnects it. Retry what this call did not complete.", texts[1])
+	assert.Equal(t, "The Telegram connection stopped (connection reset); the server reconnects it. Retry what this call did not complete.", texts[1])
 }

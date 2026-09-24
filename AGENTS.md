@@ -46,7 +46,7 @@ context loading); admin and posting features are secondary. Two transports:
    a stale access hash is dropped from the cache and the call retried.
 4. Return `errResult` only for input validation. Return every other failure as
    the handler's Go error via `failed(op, err)` / `failedHint`: the registration
-   helpers classify it (dead session, a secondary DC's refusal, flood wait, a problem
+   helpers classify it (dead session, a stopped client, flood wait, a problem
    with the chat named — `tgclient.IsPeerSpecific`), render the text the model
    sees and log it under the tool's name.
 5. Add the handler to `buildHandlers` in `internal/server/server.go`: `research`

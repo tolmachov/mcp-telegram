@@ -17,12 +17,16 @@ import (
 // so the client re-runs the OAuth + QR login flow.
 var ErrSessionUnauthorized = errors.New("telegram session is not authorized")
 
-// ErrSecondaryRefusal is a session refusal (isSessionRefusal) answered by a
-// Telegram DC other than the account's home one: the DC gotd sent a file
-// download or a statistics call to refused the authorisation gotd exported
-// to it. It says nothing about the session itself, which only the home DC
-// judges (see Running.refusalWatch).
-var ErrSecondaryRefusal = errors.New("a Telegram DC other than the account's home one refused the session")
+// ErrClientStopped is the failure of a call that could not complete because
+// the Telegram client it went through stopped: the error wraps why the client
+// stopped (Running.Err). It replaces whatever gotd's shutdown left the call
+// with — a cancelled context, a closed connection — which says nothing of the
+// cause and would pass for the caller's own cancellation.
+var ErrClientStopped = errors.New("the Telegram client stopped")
+
+// Stopped is the failure of a call the client could not serve because it
+// stopped for reason: ErrClientStopped wrapping reason.
+func Stopped(reason error) error { return fmt.Errorf("%w: %w", ErrClientStopped, reason) }
 
 // isSessionRefusal reports whether err is one of the replies by which Telegram
 // declares a session unusable: a 401, or one of the other codes Telegram ends
@@ -33,20 +37,31 @@ func isSessionRefusal(err error) bool {
 		"SESSION_REVOKED", "SESSION_EXPIRED", "USER_DEACTIVATED", "USER_DEACTIVATED_BAN")
 }
 
-// IsSystemic reports whether err is a condition of the whole account or call —
-// a dead session (ErrSessionUnauthorized), a wait Telegram told the call to
-// take (RetryAfter) other than one chat's slow mode, or a cancelled/expired
-// context — rather than a problem with the one target a request named. Batch
-// callers abort on it instead of recording a per-item failure: carrying on
-// would hammer a rate limit or a dead session.
+// IsSystemic reports whether err ends a batch: a condition of the whole
+// account or call rather than of the one target a request named, so carrying
+// on would hammer a rate limit, a dead session or a stopped client, or run
+// past the call's end. It is every condition IsBeyondRequest names but one
+// chat's slow mode, which says nothing about the batch's other chats, plus the
+// call running out of time. Batch callers abort on it instead of recording a
+// per-item failure.
 func IsSystemic(err error) bool {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if _, ok := RetryAfter(err); ok {
+		return !IsSlowMode(err)
+	}
+	return errors.Is(err, context.DeadlineExceeded) || IsBeyondRequest(err)
+}
+
+// IsBeyondRequest reports whether err is a condition no change to the request
+// can cure — a wait Telegram told the call to take (RetryAfter), a dead
+// session (ErrSessionUnauthorized), a stopped client (ErrClientStopped) or the
+// caller cancelling — so a hint on how to change the request is wrong for it.
+// A call that ran out of time is not one: a smaller request may finish in
+// time.
+func IsBeyondRequest(err error) bool {
+	if _, ok := RetryAfter(err); ok {
 		return true
 	}
-	if _, ok := RetryAfter(err); ok && !IsSlowMode(err) {
-		return true
-	}
-	return errors.Is(err, ErrSessionUnauthorized)
+	return errors.Is(err, context.Canceled) || errors.Is(err, ErrClientStopped) || errors.Is(err, ErrSessionUnauthorized)
 }
 
 // errSlowModeWait is the type of the wait a chat in slow mode tells a call

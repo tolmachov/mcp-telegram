@@ -318,22 +318,19 @@ func failureText(tool string, err error) string {
 // describe is the one rendering of an error a tool reports, whether as its
 // failure (failureText) or as the warning of a batch the error cut short: it
 // returns what happened and the hint to follow it, given hint, the one the
-// failure carries. A refusal by a DC other than the home one gets what it
-// means for the session instead of any hint. A wait Telegram told the call to
-// take gets its fixed guidance as what happened, and no hint. Any other
-// systemic error gets no hint either: a dead session is explained by the
-// server, not here, because how to recover it depends on the transport — the
-// client stops on it, and the server appends its explanation to the call the
-// client stopped under and answers every later one with it. Anything else
-// shows the error itself, followed by hint or, lacking one, the peer hint
-// when the error is about the chat the call named.
+// failure carries. A wait Telegram told the call to take gets its fixed
+// guidance as what happened, and no hint. Any other condition no change to
+// the request can cure (tgclient.IsBeyondRequest) gets no hint either: a dead
+// session or a stopped client is explained by the server, not here, because
+// how to recover depends on the transport — the server appends its
+// explanation to the call the client stopped under and answers every later
+// one with it. Anything else shows the error itself, followed by hint or,
+// lacking one, the peer hint when the error is about the chat the call named.
 func describe(tool string, cause error, hint string) (what, next string) {
 	switch flood, isWait := floodWaitMessage(tool, cause); {
-	case errors.Is(cause, tgclient.ErrSecondaryRefusal):
-		return sentence(cause), secondaryRefusalHint
 	case isWait:
 		return flood, ""
-	case tgclient.IsSystemic(cause):
+	case tgclient.IsBeyondRequest(cause):
 		return sentence(cause), ""
 	case hint == "" && tgclient.IsPeerSpecific(cause):
 		return sentence(cause), peerHint
@@ -341,13 +338,6 @@ func describe(tool string, cause error, hint string) (what, next string) {
 		return sentence(cause), hint
 	}
 }
-
-// secondaryRefusalHint says what a refusal by a DC other than the home one
-// means while the home DC is asked about the session, so the model neither
-// sends the user through a login the session may not need nor repeats a call
-// that DC keeps refusing. Each answer the check can get is one the model
-// hears (see tgclient.Running.refusalWatch).
-const secondaryRefusalHint = "Do not ask the user to sign in again because of this error: it says nothing about the session itself. Do not repeat this call over and over either: the DC that refused it keeps refusing until the server reconnects to Telegram. If the home DC still accepts the session, the server drops its Telegram connection and later calls say what reconnecting takes; if the home DC refuses the session too, later calls report that; if the home DC cannot be asked, the next such refusal says why and asks it again."
 
 // sentence renders err as a sentence ending in a full stop, so a hint can
 // follow it.

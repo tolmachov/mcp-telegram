@@ -18,8 +18,7 @@ import (
 )
 
 // TestFailureText covers the single rendering of handler errors: the flood
-// wait and secondary-refusal guidance, the peer hint, the failure's own hint,
-// and its outcome note.
+// wait guidance, the peer hint, the failure's own hint, and its outcome note.
 func TestFailureText(t *testing.T) {
 	flood := &tgerr.Error{Code: 420, Message: "FLOOD_WAIT_265", Type: "FLOOD_WAIT", Argument: 265}
 	// The client hands a call the home DC refused the verdict (see
@@ -73,14 +72,9 @@ func TestFailureText(t *testing.T) {
 			failureText("GetMe", failed("get current user", dead)))
 	})
 
-	t.Run("a secondary DC's refusal says what it means for the session", func(t *testing.T) {
-		refusal := fmt.Errorf("%w (%w); the server is asking the home DC whether the session still stands", tgclient.ErrSecondaryRefusal, tgerr.New(401, "AUTH_KEY_UNREGISTERED"))
-		ownHint := "Use a smaller thumb_size."
-
-		txt := failureText("GetMedia", failedHint("download media", fmt.Errorf("downloading: %w", refusal), ownHint))
-		assert.Equal(t, "Failed to download media: downloading: a Telegram DC other than the account's home one refused the session (rpc error code 401: AUTH_KEY_UNREGISTERED); the server is asking the home DC whether the session still stands. "+secondaryRefusalHint, txt)
-		assert.Contains(t, txt, "Do not ask the user to sign in again")
-		assert.NotContains(t, txt, ownHint, "the tool's own hint does not fit a refusal")
+	t.Run("a timeout keeps the hint: a smaller request may finish in time", func(t *testing.T) {
+		err := failedHint("search messages", fmt.Errorf("searching: %w", context.DeadlineExceeded), "Narrow the date window.")
+		assert.Equal(t, "Failed to search messages: searching: context deadline exceeded. Narrow the date window.", failureText("SearchMessages", err))
 	})
 
 	t.Run("a chat that cannot be resolved gets the peer hint", func(t *testing.T) {
@@ -105,9 +99,10 @@ func TestFailureText(t *testing.T) {
 
 	t.Run("systemic failures get no hint", func(t *testing.T) {
 		for name, cause := range map[string]error{
-			"flood wait":   flood,
-			"dead session": dead,
-			"cancellation": fmt.Errorf("resolving chat 42: %w", context.Canceled),
+			"flood wait":     flood,
+			"dead session":   dead,
+			"stopped client": fmt.Errorf("resolving chat 42: %w: connection reset", tgclient.ErrClientStopped),
+			"cancellation":   fmt.Errorf("resolving chat 42: %w", context.Canceled),
 		} {
 			t.Run(name, func(t *testing.T) {
 				txt := failureText("ResolveUsername", failedHint("resolve @x", cause, "Try SearchChats instead."))

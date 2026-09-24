@@ -326,10 +326,10 @@ type assembly struct {
 	// handler serves the assembly over streamable HTTP.
 	handler http.Handler
 
-	// end ends the assembly's lifetime: the pinned-chat watcher and any
-	// chat-list load or peer resolve still running for it. watchDone closes
-	// once the watcher has exited.
-	end       context.CancelFunc
+	// end ends the assembly's lifetime, with why as its cause: the
+	// pinned-chat watcher and any chat-list load or peer resolve still
+	// running for it. watchDone closes once the watcher has exited.
+	end       context.CancelCauseFunc
 	watchDone <-chan struct{}
 	logger    *slog.Logger
 }
@@ -401,10 +401,10 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 	// The assembly gets a lifetime of its own because the stdio host
 	// normally shuts us down by closing stdin, which ends the serve loop
 	// while ctx stays live; Close ends it either way.
-	life, end := context.WithCancel(ctx)
+	life, end := context.WithCancelCause(ctx)
 	defer func() {
 		if asm == nil {
-			end()
+			end(errAssemblyClosed)
 			client.Close()
 		}
 	}()
@@ -474,16 +474,16 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 	// safe to run on a short interval.
 	pinnedProvider := resources.NewPinnedChatsProvider(api, msgProvider, logger, pinnedServers...)
 	built.watchDone = pinnedProvider.WatchInBackground(life, s.opts.PinnedRefresh)
-	// A client that stops on its own ends the assembly's lifetime too: there
-	// is nothing left for the watcher to poll or a load to call. Close ends
-	// the lifetime before it stops the client, so a stop found with the
-	// lifetime already over is the assembly's own teardown.
+	// A client that stops for good ends the assembly's lifetime too, with
+	// why: there is nothing left for the watcher to poll or a load to call.
+	// Close ends the lifetime before it stops the client, so a stop found
+	// with the lifetime already over is the assembly's own teardown.
 	go func() {
 		select {
 		case <-client.Done():
 			if life.Err() == nil {
 				logger.Warn("Telegram client stopped; tool calls and resource reads now answer with the reason", "err", client.Err())
-				end()
+				end(tgclient.Stopped(client.Err()))
 			}
 		case <-life.Done():
 		}
@@ -567,6 +567,9 @@ func (s *Server) clientDownText(err error) string {
 	}
 }
 
+// errAssemblyClosed is why an assembly's lifetime ends when it is closed.
+var errAssemblyClosed = tgclient.Stopped(errors.New("the server closed its Telegram connection"))
+
 // pinnedWatchExitTimeout bounds how long Close waits for the pinned-chat
 // watcher to exit.
 const pinnedWatchExitTimeout = 5 * time.Second
@@ -582,7 +585,7 @@ const pinnedWatchExitTimeout = 5 * time.Second
 // abandoning a live goroutine that will then touch a torn-down server — a
 // real correctness hazard, so it logs at Error, not Warn.
 func (a *assembly) Close() error {
-	a.end()
+	a.end(errAssemblyClosed)
 	select {
 	case <-a.watchDone:
 	case <-time.After(pinnedWatchExitTimeout):

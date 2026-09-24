@@ -10,7 +10,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/gotd/log"
@@ -77,7 +76,8 @@ func TestRunningPreservesCauseAndClassifiesSessionErrors(t *testing.T) {
 		errors.New("storage unavailable"),
 		context.Canceled,
 	} {
-		r := &Running{cancel: func() {}}
+		lifetime, stop := context.WithCancelCause(t.Context())
+		r := &Running{lifetime: lifetime, stop: stop}
 		r.stop(sessionError(original))
 		require.ErrorIs(t, r.Err(), original)
 		assert.Equal(t, isSessionRefusal(original) || errors.Is(original, ErrSessionUnauthorized),
@@ -112,25 +112,21 @@ func TestAnsweredAwayCoversTheRoutableNamespaces(t *testing.T) {
 }
 
 // watched is a serving Running as StartClient builds it, over a scripted
-// Telegram: the context its Run loop would run on, and what it logs.
+// Telegram: the context its Run loop would run on, and the Telegram it calls.
 type watched struct {
 	*Running
-	life context.Context
-	logs *bytes.Buffer
-	inv  *telegramfake.Invoker
+	inv *telegramfake.Invoker
 }
 
-// newWatched returns a serving Running whose calls go through its refusal
-// watch to a Telegram answering with script.
+// newWatched returns a serving Running whose calls go through its stop and
+// refusal watches to a Telegram answering with script.
 func newWatched(t *testing.T, script ...telegramfake.InvokeFunc) *watched {
-	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
-	var logs bytes.Buffer
-	r := &Running{lifetime: ctx, cancel: cancel, logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	lifetime, stop := context.WithCancelCause(t.Context())
+	t.Cleanup(func() { stop(errClosed) })
+	r := &Running{lifetime: lifetime, stop: stop}
 	inv := telegramfake.New(script...)
-	r.api = tg.NewClient(r.refusalWatch().Handle(inv))
-	t.Cleanup(r.checks.Wait)
-	return &watched{Running: r, life: ctx, logs: &logs, inv: inv}
+	r.api = tg.NewClient(r.stopWatch(r.refusalWatch().Handle(inv)))
+	return &watched{Running: r, inv: inv}
 }
 
 // download makes one call gotd may send to a DC other than the home one.
@@ -145,8 +141,8 @@ func (w *watched) history(ctx context.Context) error {
 	return err //nolint:wrapcheck // the test inspects the watch's reply as is.
 }
 
-// refuseFile answers a download with err, as a secondary DC refusing the
-// session does.
+// refuseFile answers a download with err, as a DC other than the home one
+// refusing the session does.
 func refuseFile(err error) telegramfake.InvokeFunc {
 	return telegramfake.Typed(func(context.Context, *tg.UploadGetFileRequest, *tg.UploadFileBox) error { return err })
 }
@@ -158,42 +154,22 @@ func refuseHistory(err error) telegramfake.InvokeFunc {
 	})
 }
 
-// homeCheck answers the home-DC check with check, after verifying it asks
-// for the session's own user.
-func homeCheck(check func(ctx context.Context) error) telegramfake.InvokeFunc {
-	return telegramfake.Typed(func(ctx context.Context, req *tg.UsersGetUsersRequest, out *tg.UserClassVector) error {
-		if len(req.ID) != 1 {
-			return fmt.Errorf("home check asked for %d users", len(req.ID))
-		}
-		if _, ok := req.ID[0].(*tg.InputUserSelf); !ok {
-			return fmt.Errorf("home check asked for %T, not the session's own user", req.ID[0])
-		}
-		if err := check(ctx); err != nil {
-			return err
-		}
-		out.Elems = []tg.UserClass{&tg.User{ID: 7}}
-		return nil
-	})
-}
-
 // TestRefusalWatchPassesOtherFailures pins that a failure which is no refusal
-// neither asks the home DC nor stops the client, whichever DC may have
-// answered it.
+// neither stops the client nor changes, whichever DC may have answered it.
 func TestRefusalWatchPassesOtherFailures(t *testing.T) {
 	for _, alive := range []error{errors.New("dial tcp: no route to host"), tgerr.New(420, "FLOOD_WAIT_30"), tgerr.New(400, "CHANNEL_INVALID")} {
 		w := newWatched(t, refuseFile(alive), refuseHistory(alive))
 		require.ErrorIs(t, w.download(t.Context()), alive)
 		require.ErrorIs(t, w.history(t.Context()), alive)
-		w.checks.Wait()
 		require.NoError(t, w.Err(), "%v must not stop the client", alive)
-		require.NoError(t, w.life.Err())
-		assert.Len(t, w.inv.RequestTypes(), 2, "%v must not trigger a home-DC check", alive)
+		assert.Len(t, w.inv.RequestTypes(), 2, "%v must ask nothing more of Telegram", alive)
 	}
 }
 
 // TestRefusalWatchTakesAHomeRefusalAsTheVerdict pins that a call only the home
 // DC answers, refused, stops the client with the verdict before it returns,
-// without asking anything more of Telegram.
+// without asking anything more of Telegram, and fails as a call on a stopped
+// client.
 func TestRefusalWatchTakesAHomeRefusalAsTheVerdict(t *testing.T) {
 	for _, refusal := range []error{
 		tgerr.New(401, "AUTH_KEY_UNREGISTERED"),
@@ -205,12 +181,12 @@ func TestRefusalWatchTakesAHomeRefusalAsTheVerdict(t *testing.T) {
 	} {
 		w := newWatched(t, refuseHistory(refusal))
 		err := w.history(t.Context())
-		require.ErrorIs(t, err, refusal, "the caller still sees Telegram's own error")
+		require.ErrorIs(t, err, ErrClientStopped)
 		require.ErrorIs(t, err, ErrSessionUnauthorized)
+		require.ErrorIs(t, err, refusal, "the caller still sees Telegram's own error")
 		assert.True(t, IsSystemic(err))
 		require.ErrorIs(t, w.Err(), ErrSessionUnauthorized)
 		require.ErrorIs(t, w.Err(), refusal, "the client keeps the home DC's reply")
-		require.Error(t, w.life.Err(), "the Run loop is told to stop")
 		assert.Zero(t, w.inv.Remaining(), "nothing more is asked of Telegram")
 
 		// A later reason never overwrites the verdict.
@@ -219,119 +195,59 @@ func TestRefusalWatchTakesAHomeRefusalAsTheVerdict(t *testing.T) {
 	}
 }
 
-// TestRefusalWatchChecksASecondaryRefusalInTheBackground pins the secondary-DC
-// case. A refused download returns at once, without waiting for the home DC.
-// Downloads refused while the check runs return at once too and start
-// no other check. The check's answer then decides: the home DC refusing the
-// session is the verdict, the home DC accepting it stops the client so that
-// reconnecting restores the refused calls, and a check that fails keeps the
-// client serving, with the next refused download checking again.
-func TestRefusalWatchChecksASecondaryRefusalInTheBackground(t *testing.T) {
+// TestRefusalWatchReconnectsOnAnAwayRefusal pins that a call another DC may
+// have answered, refused, is no verdict on the session: the client stops with
+// a reason that asks its owner to reconnect, whose readiness check has the
+// home DC judge the session, and the call fails as a call on a stopped client.
+func TestRefusalWatchReconnectsOnAnAwayRefusal(t *testing.T) {
 	refusal := tgerr.New(401, "AUTH_KEY_UNREGISTERED")
-	unreachable := errors.New("dial tcp: i/o timeout")
-	for name, home := range map[string]error{
-		"home DC refuses the session": tgerr.New(401, "SESSION_REVOKED"),
-		"home DC accepts the session": nil,
-		"home DC cannot be asked":     unreachable,
-	} {
-		t.Run(name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				release := make(chan struct{})
-				const refused = 4
-				script := []telegramfake.InvokeFunc{
-					refuseFile(refusal),
-					homeCheck(func(ctx context.Context) error {
-						select {
-						case <-ctx.Done():
-							return ctx.Err()
-						case <-release:
-							return home
-						}
-					}),
-				}
-				for range refused - 1 {
-					script = append(script, refuseFile(refusal))
-				}
-				w := newWatched(t, script...)
-
-				for range refused {
-					err := w.download(t.Context())
-					require.ErrorIs(t, err, ErrSecondaryRefusal)
-					require.ErrorIs(t, err, refusal, "the caller still sees Telegram's own error")
-					assert.NotErrorIs(t, err, ErrSessionUnauthorized, "a secondary DC's refusal is no verdict")
-					assert.False(t, IsSystemic(err))
-					assert.False(t, IsPeerSpecific(err))
-					synctest.Wait() // the one check waits on the home DC
-				}
-				require.NoError(t, w.Err(), "the client serves while the home DC is asked")
-				assert.Zero(t, w.inv.Remaining(), "one check served every refused download")
-
-				close(release)
-				w.checks.Wait()
-				switch {
-				case home == nil:
-					require.ErrorIs(t, w.Err(), ErrSecondaryRefusal)
-					require.ErrorIs(t, w.Err(), refusal)
-					assert.NotErrorIs(t, w.Err(), ErrSessionUnauthorized, "the session stands")
-					assert.ErrorContains(t, w.Err(), "reconnecting restores")
-					require.Error(t, w.life.Err(), "the Run loop is told to stop")
-				case errors.Is(home, unreachable):
-					require.NoError(t, w.Err(), "a failed check keeps the client serving")
-					require.NoError(t, w.life.Err())
-					assert.Contains(t, w.logs.String(), "could not be asked")
-					assert.Contains(t, w.logs.String(), unreachable.Error())
-
-					w.inv = telegramfake.New(refuseFile(refusal), homeCheck(func(context.Context) error { return nil }))
-					w.api = tg.NewClient(w.refusalWatch().Handle(w.inv))
-					err := w.download(t.Context())
-					require.ErrorIs(t, err, ErrSecondaryRefusal)
-					assert.ErrorContains(t, err, "asking the home DC again whether the session still stands, as its last check got no answer ("+unreachable.Error()+")",
-						"the next refused download says why the last check failed")
-					assert.False(t, IsSystemic(err), "the check's failure does not classify the call")
-					w.checks.Wait()
-					assert.Zero(t, w.inv.Remaining(), "the next refused download checks again")
-					require.ErrorIs(t, w.Err(), ErrSecondaryRefusal)
-				default:
-					require.ErrorIs(t, w.Err(), ErrSessionUnauthorized)
-					require.ErrorIs(t, w.Err(), home, "the client keeps the home DC's reply")
-					require.Error(t, w.life.Err(), "the Run loop is told to stop")
-				}
-			})
-		})
-	}
-}
-
-// TestHomeCheckEndsWithTheClient pins the check's own context: it has a
-// deadline, and a client stopping while the check runs ends the check
-// without a warning about an unreachable home DC.
-func TestHomeCheckEndsWithTheClient(t *testing.T) {
-	var w *watched
-	w = newWatched(t, refuseFile(tgerr.New(401, "AUTH_KEY_UNREGISTERED")), homeCheck(func(ctx context.Context) error {
-		_, bounded := ctx.Deadline()
-		assert.True(t, bounded, "the check must be bounded")
-		w.stop(errClosed)
-		<-ctx.Done()
-		return ctx.Err()
-	}))
-	require.ErrorIs(t, w.download(t.Context()), ErrSecondaryRefusal)
-	w.checks.Wait()
-	require.ErrorIs(t, w.Err(), errClosed)
-	assert.Empty(t, w.logs.String(), "a client stopping is no reason to warn")
-}
-
-// TestRefusalWatchAfterTheClientStopped pins that a download refused once the
-// client has stopped asks nothing more of the home DC and claims no check,
-// and that a home refusal then still leaves the first reason in place.
-func TestRefusalWatchAfterTheClientStopped(t *testing.T) {
-	refusal := tgerr.New(401, "AUTH_KEY_UNREGISTERED")
-	w := newWatched(t, refuseFile(refusal), refuseHistory(refusal))
-	w.stop(errClosed)
+	w := newWatched(t, refuseFile(refusal))
 
 	err := w.download(t.Context())
-	require.ErrorIs(t, err, refusal)
-	assert.NotErrorIs(t, err, ErrSecondaryRefusal, "no check runs to answer it")
-	require.ErrorIs(t, w.history(t.Context()), ErrSessionUnauthorized)
-	require.ErrorIs(t, w.Err(), errClosed, "the first reason stays")
+	require.ErrorIs(t, err, ErrClientStopped)
+	require.ErrorIs(t, err, errAwayRefusal)
+	require.ErrorIs(t, err, refusal, "the caller still sees Telegram's own error")
+	assert.NotErrorIs(t, err, ErrSessionUnauthorized, "another DC's refusal is no verdict")
+	assert.True(t, IsSystemic(err), "a batch stops with the client")
+	assert.False(t, IsPeerSpecific(err))
+	require.ErrorIs(t, w.Err(), errAwayRefusal)
+	assert.NotErrorIs(t, w.Err(), ErrSessionUnauthorized)
+	assert.ErrorContains(t, w.Err(), "reconnecting has the home DC judge the session")
+	assert.Zero(t, w.inv.Remaining(), "nothing more is asked of Telegram")
+}
+
+// TestStopWatchNamesWhyTheClientStopped pins that a call failing once the
+// client has stopped fails with why, not with the cancellation or closed
+// connection gotd's shutdown left it with — which would pass for the
+// caller's own cancellation — and that the first reason stays.
+func TestStopWatchNamesWhyTheClientStopped(t *testing.T) {
+	refusal := tgerr.New(401, "AUTH_KEY_UNREGISTERED")
+	dropped := errors.New("read tcp: connection reset by peer")
+	var w *watched
+	w = newWatched(t,
+		refuseHistory(tgerr.New(400, "CHANNEL_INVALID")),
+		telegramfake.Typed(func(context.Context, *tg.MessagesGetHistoryRequest, *tg.MessagesMessagesBox) error {
+			w.stop(dropped)
+			return context.Canceled
+		}),
+		refuseFile(refusal),
+		refuseHistory(refusal),
+	)
+
+	require.True(t, tgerr.Is(w.history(t.Context()), "CHANNEL_INVALID"), "a serving client passes Telegram's reply through")
+
+	err := w.history(t.Context())
+	require.ErrorIs(t, err, ErrClientStopped)
+	require.ErrorIs(t, err, dropped)
+	assert.NotErrorIs(t, err, context.Canceled, "the caller did not cancel")
+
+	for _, call := range []func(context.Context) error{w.download, w.history} {
+		err := call(t.Context())
+		require.ErrorIs(t, err, ErrClientStopped)
+		require.ErrorIs(t, err, dropped, "the first reason stays")
+		assert.NotErrorIs(t, err, ErrSessionUnauthorized)
+	}
+	require.ErrorIs(t, w.Err(), dropped)
 	assert.Zero(t, w.inv.Remaining())
 }
 
@@ -472,23 +388,6 @@ func answerErr(err *tgerr.Error) answer {
 	return func(server *tgtest.Server, req *tgtest.Request) error { return server.SendErr(req, err) }
 }
 
-// answerErrOnRelease signals asked, then answers with err once release is
-// closed. It returns at once, so the DC goes on serving the connection's other
-// requests meanwhile.
-func answerErrOnRelease(err *tgerr.Error, asked chan<- struct{}, release <-chan struct{}) answer {
-	return func(server *tgtest.Server, req *tgtest.Request) error {
-		select {
-		case asked <- struct{}{}:
-		default:
-		}
-		go func() {
-			<-release
-			_ = server.SendErr(req, err)
-		}()
-		return nil
-	}
-}
-
 func answerSelf(server *tgtest.Server, req *tgtest.Request) error {
 	return server.SendVector(req, &tg.User{ID: 7, AccessHash: 70}) //nolint:wrapcheck // the fake server hands the send error to tgtest as is.
 }
@@ -499,56 +398,34 @@ func answerFile(server *tgtest.Server, req *tgtest.Request) error {
 
 // TestStartClientWatchesRefusalsInsideFloodWait pins the real client's
 // wiring. A download waits out its flood wait, and the refusal its retry gets
-// goes through refusalWatch, which returns it at once and has the home DC
-// checked. While the home DC holds the check, the next download is served:
-// the check holds up no call. The home DC then refuses the session, which
-// stops the client with the verdict.
+// goes through refusalWatch: another DC may have answered it, so the client
+// stops for a reconnect, and the download fails with why through stopWatch.
 func TestStartClientWatchesRefusalsInsideFloodWait(t *testing.T) {
 	t.Parallel()
 	var waits atomic.Int32
-	asked, release := make(chan struct{}, 1), make(chan struct{})
-	// gotd resends a request the DC has not answered within a few seconds,
-	// so every copy of the check is held the same way.
-	held := answerErrOnRelease(tgerr.New(401, "SESSION_REVOKED"), asked, release)
 	r, err := startOnCluster(t, func(context.Context, time.Duration, bool) { waits.Add(1) }, func(c *cluster.Cluster) {
 		c.Dispatch(homeDC, "home").
-			HandleFunc(tg.UsersGetUsersRequestTypeID, scripted(answerSelf, held, held, held, held)).
-			HandleFunc(tg.UploadGetFileRequestTypeID, scripted(answerErr(tgerr.New(420, "FLOOD_WAIT_0")), answerErr(tgerr.New(401, "AUTH_KEY_UNREGISTERED")), answerFile))
+			HandleFunc(tg.UsersGetUsersRequestTypeID, scripted(answerSelf)).
+			HandleFunc(tg.UploadGetFileRequestTypeID, scripted(answerErr(tgerr.New(420, "FLOOD_WAIT_0")), answerErr(tgerr.New(401, "AUTH_KEY_UNREGISTERED"))))
 	})
 	require.NoError(t, err)
 	assert.Equal(t, int64(7), r.Self().ID)
 
 	ctx, cancel := context.WithTimeout(t.Context(), clusterTimeout)
 	defer cancel()
-	download := func(ctx context.Context) error {
-		_, err := r.API().UploadGetFile(ctx, &tg.UploadGetFileRequest{Location: &tg.InputDocumentFileLocation{}, Limit: 1024})
-		return err //nolint:wrapcheck // the test inspects the client's answer as is.
-	}
-	err = download(ctx)
-	require.ErrorIs(t, err, ErrSecondaryRefusal, "the refusal is returned before the home DC answers the check")
-	assert.NotErrorIs(t, err, ErrSessionUnauthorized)
+	_, err = r.API().UploadGetFile(ctx, &tg.UploadGetFileRequest{Location: &tg.InputDocumentFileLocation{}, Limit: 1024})
+	require.ErrorIs(t, err, ErrClientStopped)
+	require.ErrorIs(t, err, errAwayRefusal)
+	assert.True(t, tgerr.Is(err, "AUTH_KEY_UNREGISTERED"), "the call keeps Telegram's code: %v", err)
+	assert.NotErrorIs(t, err, ErrSessionUnauthorized, "another DC's refusal is no verdict")
 	assert.Equal(t, int32(1), waits.Load(), "the flood-wait middleware retried the call first")
 
 	select {
-	case <-asked:
-	case <-ctx.Done():
-		t.Fatal("the home DC was never asked about the session")
-	}
-	// A check that held up calls would hold this download until the
-	// check timed out; sent beside it, the download takes a local round trip.
-	sendCtx, sendCancel := context.WithTimeout(ctx, 3*time.Second)
-	defer sendCancel()
-	require.NoError(t, download(sendCtx), "calls are served while the check waits on the home DC")
-	require.NoError(t, r.Err())
-
-	close(release)
-	select {
 	case <-r.Done():
 	case <-ctx.Done():
-		t.Fatal("the client did not stop on the home DC's refusal")
+		t.Fatal("the client did not stop on the refusal")
 	}
-	require.ErrorIs(t, r.Err(), ErrSessionUnauthorized)
-	assert.True(t, tgerr.Is(r.Err(), "SESSION_REVOKED"), "the verdict keeps the home DC's code: %v", r.Err())
+	require.ErrorIs(t, r.Err(), errAwayRefusal)
 }
 
 // TestStartClientDownloadsFromAnotherDC pins that a download the home DC
@@ -576,9 +453,7 @@ func TestStartClientDownloadsFromAnotherDC(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Every answer is a local round trip, so a download that takes seconds
-	// is held, not slow.
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), clusterTimeout)
 	defer cancel()
 	file, err := r.API().UploadGetFile(ctx, &tg.UploadGetFileRequest{Location: &tg.InputDocumentFileLocation{}, Limit: 1024})
 	require.NoError(t, err, "the download completes on DC %d", fileDC)

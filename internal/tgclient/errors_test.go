@@ -10,14 +10,14 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestIsSystemic distinguishes account- or call-wide failures from problems
-// with one request's target.
+// TestIsSystemic pins what ends a batch: a condition of the whole account
+// or call rather than of one request's target.
 func TestIsSystemic(t *testing.T) {
 	assert.False(t, IsSystemic(nil))
 	assert.False(t, IsSystemic(errors.New("plain failure")))
 	assert.False(t, IsSystemic(tgerr.New(400, "USERNAME_NOT_OCCUPIED")))
 	assert.True(t, IsSystemic(context.Canceled))
-	assert.True(t, IsSystemic(context.DeadlineExceeded))
+	assert.True(t, IsSystemic(context.DeadlineExceeded), "a call out of time cannot go on")
 	assert.True(t, IsSystemic(&tgerr.Error{Code: 420, Type: "FLOOD_WAIT", Message: "FLOOD_WAIT_5", Argument: 5}))
 	// Every wait Telegram tells a call to take is systemic but one chat's
 	// slow mode, which says nothing about the batch's other chats.
@@ -29,8 +29,37 @@ func TestIsSystemic(t *testing.T) {
 	// reply to one call is not (see Running.refusalWatch).
 	assert.True(t, IsSystemic(fmt.Errorf("%w: %w", ErrSessionUnauthorized, tgerr.New(401, "SESSION_REVOKED"))))
 	assert.False(t, IsSystemic(tgerr.New(401, "AUTH_KEY_UNREGISTERED")))
+	assert.True(t, IsSystemic(fmt.Errorf("%w: connection reset", ErrClientStopped)))
 	// A wrapped systemic error stays systemic.
 	assert.True(t, IsSystemic(fmt.Errorf("resolving @x: %w", context.Canceled)))
+}
+
+// TestIsBeyondRequest pins which failures no change to the request can cure,
+// so a hint on changing it is wrong for them: the ones IsSystemic names, one
+// chat's slow mode included, but a call out of time, which a smaller request
+// may avoid.
+func TestIsBeyondRequest(t *testing.T) {
+	for _, err := range []error{
+		context.Canceled,
+		fmt.Errorf("resolving @x: %w", context.Canceled),
+		tgerr.New(420, "FLOOD_WAIT_5"),
+		tgerr.New(420, "SLOWMODE_WAIT_10"),
+		tgerr.New(500, "WORKER_BUSY_TOO_LONG_RETRY"),
+		fmt.Errorf("%w: %w", ErrSessionUnauthorized, tgerr.New(401, "SESSION_REVOKED")),
+		fmt.Errorf("%w: connection reset", ErrClientStopped),
+		fmt.Errorf("%w while waiting out the 5s Telegram asked for (%w)", context.DeadlineExceeded, tgerr.New(420, "FLOOD_WAIT_5")),
+	} {
+		assert.True(t, IsBeyondRequest(err), "%v", err)
+	}
+	for _, err := range []error{
+		nil,
+		context.DeadlineExceeded,
+		errors.New("plain failure"),
+		tgerr.New(400, "CHANNEL_INVALID"),
+		tgerr.New(401, "AUTH_KEY_UNREGISTERED"),
+	} {
+		assert.False(t, IsBeyondRequest(err), "%v", err)
+	}
 }
 
 // TestIsPeerSpecific separates failures about one named peer, which a batch may
