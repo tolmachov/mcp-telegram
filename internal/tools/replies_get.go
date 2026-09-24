@@ -69,12 +69,12 @@ func (h *RepliesGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest
 	var rootID int
 	if in.Cursor != "" {
 		if in.ChatID != 0 || in.MessageID != "" || in.Limit != 0 || in.BeforeMessageID != "" || in.FromDate != "" || in.ToDate != "" {
-			return errResult("cursor is incompatible with every other field; pass the cursor alone"), nil, nil
+			return ErrResult("cursor is incompatible with every other field; pass the cursor alone"), nil, nil
 		}
 		var err error
 		state, err = parseMessagePageCursor(in.Cursor, cursorKindReplies)
 		if err != nil {
-			return errResult(fmt.Sprintf("invalid cursor: %v", err)), nil, nil
+			return ErrResult(fmt.Sprintf("invalid cursor: %v", err)), nil, nil
 		}
 		in.ChatID, in.Limit = state.ChatID, state.Limit
 		in.FromDate, in.ToDate = state.FromDate, state.ToDate

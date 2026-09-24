@@ -331,13 +331,13 @@ func (h *CreateFolderHandler) Register(s *mcp.Server) {
 func (h *CreateFolderHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in CreateFolderInput) (*mcp.CallToolResult, *CreateFolderResult, error) {
 	title := strings.TrimSpace(in.Title)
 	if title == "" {
-		return errResult("title is required: a short folder name (max 12 characters)."), nil, nil
+		return ErrResult("title is required: a short folder name (max 12 characters)."), nil, nil
 	}
 	if utf8.RuneCountInString(title) > maxFolderTitleRunes {
-		return errResult(fmt.Sprintf("title %q is too long: max %d characters.", title, maxFolderTitleRunes)), nil, nil
+		return ErrResult(fmt.Sprintf("title %q is too long: max %d characters.", title, maxFolderTitleRunes)), nil, nil
 	}
 	if len(in.Chats) == 0 && !in.hasCategoryInclude() {
-		return errResult("a folder needs at least one chat to include or one include_* category flag (e.g. include_groups). Telegram rejects empty folders."), nil, nil
+		return ErrResult("a folder needs at least one chat to include or one include_* category flag (e.g. include_groups). Telegram rejects empty folders."), nil, nil
 	}
 
 	op := fmt.Sprintf("create folder %q", title)
@@ -437,7 +437,7 @@ func (h *DeleteFolderHandler) Register(s *mcp.Server) {
 
 func (h *DeleteFolderHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in DeleteFolderInput) (*mcp.CallToolResult, *DeleteFolderResult, error) {
 	if in.FolderID <= 0 {
-		return errResult("folder_id is required: a positive folder ID from GetFolders."), nil, nil
+		return ErrResult("folder_id is required: a positive folder ID from GetFolders."), nil, nil
 	}
 	if errRes := requireExplicitConfirmation(in.Confirm, "delete the folder"); errRes != nil {
 		return errRes, nil, nil
@@ -499,10 +499,10 @@ func (h *AddChatsToFolderHandler) Register(s *mcp.Server) {
 
 func (h *AddChatsToFolderHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in AddChatsToFolderInput) (*mcp.CallToolResult, *AddChatsToFolderResult, error) {
 	if in.FolderID <= 0 {
-		return errResult("folder_id is required: a positive folder ID from GetFolders."), nil, nil
+		return ErrResult("folder_id is required: a positive folder ID from GetFolders."), nil, nil
 	}
 	if len(in.Chats) == 0 {
-		return errResult("chats is required: one or more @usernames or numeric chat IDs to add."), nil, nil
+		return ErrResult("chats is required: one or more @usernames or numeric chat IDs to add."), nil, nil
 	}
 
 	added, present, skipped, err := editFolderChats(ctx, h.peers, in.FolderID, in.Chats, "added to", applyAdditions)
@@ -554,10 +554,10 @@ func (h *RemoveChatsFromFolderHandler) Register(s *mcp.Server) {
 
 func (h *RemoveChatsFromFolderHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in RemoveChatsFromFolderInput) (*mcp.CallToolResult, *RemoveChatsFromFolderResult, error) {
 	if in.FolderID <= 0 {
-		return errResult("folder_id is required: a positive folder ID from GetFolders."), nil, nil
+		return ErrResult("folder_id is required: a positive folder ID from GetFolders."), nil, nil
 	}
 	if len(in.Chats) == 0 {
-		return errResult("chats is required: one or more @usernames or numeric chat IDs to remove."), nil, nil
+		return ErrResult("chats is required: one or more @usernames or numeric chat IDs to remove."), nil, nil
 	}
 
 	removed, absent, skipped, err := editFolderChats(ctx, h.peers, in.FolderID, in.Chats, "removed from", applyRemovals)

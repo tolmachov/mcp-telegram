@@ -97,7 +97,7 @@ func TestLeaveChatRejectsInvite(t *testing.T) {
 			require.Nil(t, out)
 			require.NotNil(t, errRes)
 			require.True(t, errRes.IsError)
-			assert.Contains(t, toolResultText(errRes), "does not accept invite links")
+			assert.Contains(t, ResultText(errRes), "does not accept invite links")
 		})
 	}
 }

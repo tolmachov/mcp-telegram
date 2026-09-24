@@ -270,7 +270,7 @@ func runPartialBackup(t *testing.T, ctx context.Context, channelID int64, second
 	assert.Contains(t, out.Warning, "to_date=1970-01-01T00:01:41Z", "the rest starts after the oldest saved message")
 	require.NotNil(t, res)
 	assert.False(t, res.IsError)
-	assert.Contains(t, toolResultText(res), out.Warning)
+	assert.Contains(t, ResultText(res), out.Warning)
 	assert.Equal(t, out.Warning, flagPartial(res, out).Meta[MetaWarning])
 	content, readErr := os.ReadFile(target) //nolint:gosec // target is inside the test's private temporary directory.
 	require.NoError(t, readErr)

@@ -76,11 +76,11 @@ func TestAddToolNeverSerializesZeroOutput(t *testing.T) {
 
 	t.Run("error result carries text and no structured content", func(t *testing.T) {
 		res := callTool(t, register(func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, *wrapperOut, error) {
-			return errResult("Failed to delete messages: rpc error code 403: MESSAGE_DELETE_FORBIDDEN"), nil, nil
+			return ErrResult("Failed to delete messages: rpc error code 403: MESSAGE_DELETE_FORBIDDEN"), nil, nil
 		}), "T", nil)
 		assert.True(t, res.IsError)
 		assert.Nil(t, res.StructuredContent)
-		assert.Contains(t, toolResultText(res), "MESSAGE_DELETE_FORBIDDEN")
+		assert.Contains(t, ResultText(res), "MESSAGE_DELETE_FORBIDDEN")
 	})
 
 	t.Run("handler error is rendered as a tool error", func(t *testing.T) {
@@ -89,7 +89,7 @@ func TestAddToolNeverSerializesZeroOutput(t *testing.T) {
 		}), "T", nil)
 		assert.True(t, res.IsError)
 		assert.Nil(t, res.StructuredContent)
-		assert.Equal(t, "Failed to delete messages: rpc error code 403: MESSAGE_DELETE_FORBIDDEN.", toolResultText(res))
+		assert.Equal(t, "Failed to delete messages: rpc error code 403: MESSAGE_DELETE_FORBIDDEN.", ResultText(res))
 	})
 
 	t.Run("non-error result without output is an error", func(t *testing.T) {
@@ -98,7 +98,7 @@ func TestAddToolNeverSerializesZeroOutput(t *testing.T) {
 		}), "T", nil)
 		assert.True(t, res.IsError)
 		assert.Nil(t, res.StructuredContent)
-		assert.Contains(t, toolResultText(res), "returned no result")
+		assert.Contains(t, ResultText(res), "returned no result")
 	})
 
 	t.Run("typed output passes through", func(t *testing.T) {
@@ -164,7 +164,7 @@ func TestConfirmGatedToolsFailClosed(t *testing.T) {
 			res := callTool(t, func(s *mcp.Server) { tc.register(s, client) }, tc.name, tc.args)
 			assert.True(t, res.IsError)
 			assert.Nil(t, res.StructuredContent)
-			assert.Contains(t, toolResultText(res), "confirm")
+			assert.Contains(t, ResultText(res), "confirm")
 			assert.Zero(t, inv.writes, "an unconfirmed call must not reach Telegram")
 		})
 	}

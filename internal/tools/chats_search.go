@@ -66,7 +66,7 @@ func (h *ChatsSearchHandler) Register(s *mcp.Server) {
 func (h *ChatsSearchHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in SearchChatsInput) (*mcp.CallToolResult, *SearchResultsList, error) {
 	query := strings.TrimSpace(in.Query)
 	if query == "" {
-		return errResult("query parameter is required (search by chat title or @username; partial matches work)."), nil, nil
+		return ErrResult("query parameter is required (search by chat title or @username; partial matches work)."), nil, nil
 	}
 
 	limit := clampLimit(in.Limit, 10, 50)

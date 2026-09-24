@@ -134,7 +134,7 @@ func TestPartialOutcome(t *testing.T) {
 
 	res := flagPartial(textResult("found"), &out)
 	assert.Equal(t, out.Warning, res.Meta[MetaWarning])
-	assert.Equal(t, "found", toolResultText(res))
+	assert.Equal(t, "found", ResultText(res))
 
 	var plain SearchResultsList
 	plain.warnCause("SearchChats", "Global search failed:", errors.New("boom"), "Retry later.")
@@ -209,7 +209,7 @@ func TestRequireExplicitConfirmation(t *testing.T) {
 	res := requireExplicitConfirmation(false, "delete")
 	require.NotNil(t, res)
 	assert.True(t, res.IsError)
-	assert.Contains(t, toolResultText(res), "confirm=true")
+	assert.Contains(t, ResultText(res), "confirm=true")
 }
 
 func TestEveryToolHandlerRegisters(t *testing.T) {

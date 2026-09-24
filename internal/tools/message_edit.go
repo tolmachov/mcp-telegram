@@ -72,7 +72,7 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		return errInvalidMessageID("message_id", in.MessageID, err), nil, nil
 	}
 	if in.NewText == "" {
-		return errResult("new_text is required"), nil, nil
+		return ErrResult("new_text is required"), nil, nil
 	}
 	if errRes := errMessageTooLong("new_text", in.NewText); errRes != nil {
 		return errRes, nil, nil
@@ -88,7 +88,7 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	// regular messages we reject the field to avoid silent no-ops.
 	if ref.Scheduled {
 		if in.ScheduleAt == "" {
-			return errResult("schedule_at is required when editing a scheduled message (\"s:...\"). Provide an RFC3339 timestamp in the future — it sets the new delivery time and fully replaces the old schedule."), nil, nil
+			return ErrResult("schedule_at is required when editing a scheduled message (\"s:...\"). Provide an RFC3339 timestamp in the future — it sets the new delivery time and fully replaces the old schedule."), nil, nil
 		}
 		t, errRes := parseFutureSchedule(in.ScheduleAt)
 		if errRes != nil {
@@ -96,7 +96,7 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		}
 		editReq.ScheduleDate = int(t.Unix())
 	} else if in.ScheduleAt != "" {
-		return errResult("schedule_at is only valid when editing a scheduled message (\"s:...\"). To reschedule a pending delivery, pass the scheduled handle instead."), nil, nil
+		return ErrResult("schedule_at is only valid when editing a scheduled message (\"s:...\"). To reschedule a pending delivery, pass the scheduled handle instead."), nil, nil
 	}
 
 	updates, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, func(p tgclient.Peer) (tg.UpdatesClass, error) {

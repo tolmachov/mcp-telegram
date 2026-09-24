@@ -84,20 +84,20 @@ func (h *ChatSummarizeHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 		return errChatIDRequired(), nil, nil
 	}
 	if in.Goal == "" {
-		return errResult("goal is required"), nil, nil
+		return ErrResult("goal is required"), nil, nil
 	}
 	maxMessages := in.MaxMessages
 	if maxMessages == 0 {
 		maxMessages = defaultSummaryMaxMessages
 	}
 	if maxMessages < 1 || maxMessages > hardSummaryMaxMessages {
-		return errResult(fmt.Sprintf("max_messages must be between 1 and %d", hardSummaryMaxMessages)), nil, nil
+		return ErrResult(fmt.Sprintf("max_messages must be between 1 and %d", hardSummaryMaxMessages)), nil, nil
 	}
 
 	periodEnd := time.Now()
 	since, err := h.parseSinceTime(in)
 	if err != nil {
-		return errResult(fmt.Sprintf("Invalid time parameters: %v", err)), nil, nil
+		return ErrResult(fmt.Sprintf("Invalid time parameters: %v", err)), nil, nil
 	}
 
 	mcpLog(ctx, req.Session, logLevelInfo, "SummarizeChat", map[string]any{

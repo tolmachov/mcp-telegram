@@ -69,12 +69,12 @@ func (h *MessageLinkResolveHandler) Register(s *mcp.Server) {
 
 func (h *MessageLinkResolveHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in ResolveMessageLinkInput) (*mcp.CallToolResult, *ResolveMessageLinkResult, error) {
 	if in.Link == "" {
-		return errResult("link is required. Expected a t.me message URL such as https://t.me/durov/123 or https://t.me/c/1234567890/42."), nil, nil
+		return ErrResult("link is required. Expected a t.me message URL such as https://t.me/durov/123 or https://t.me/c/1234567890/42."), nil, nil
 	}
 
 	parsed, err := parseTMeLink(in.Link)
 	if err != nil {
-		return errResult(fmt.Sprintf("invalid link %q: %v. Supported forms: https://t.me/<username>/<message_id>, https://t.me/c/<internal_id>/<message_id>, with an optional <topic_id> segment in between for forum chats.", in.Link, err)), nil, nil
+		return ErrResult(fmt.Sprintf("invalid link %q: %v. Supported forms: https://t.me/<username>/<message_id>, https://t.me/c/<internal_id>/<message_id>, with an optional <topic_id> segment in between for forum chats.", in.Link, err)), nil, nil
 	}
 
 	out := &ResolveMessageLinkResult{
@@ -91,7 +91,7 @@ func (h *MessageLinkResolveHandler) handle(ctx context.Context, _ *mcp.CallToolR
 		}
 		chatID, title, found := resolvedPeerInfo(resolved)
 		if !found {
-			return errResult(fmt.Sprintf("username @%s resolved with no usable chat or user. The link may point to a private or deleted entity.", parsed.Username)), nil, nil
+			return ErrResult(fmt.Sprintf("username @%s resolved with no usable chat or user. The link may point to a private or deleted entity.", parsed.Username)), nil, nil
 		}
 		out.ChatID = chatID
 		out.ChatTitle = title

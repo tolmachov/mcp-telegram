@@ -63,7 +63,7 @@ func (h *ChatMuteHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in
 		return errChatIDRequired(), nil, nil
 	}
 	if in.DurationSeconds < 0 {
-		return errResult("duration_seconds must be >= 0 (0 = mute forever)"), nil, nil
+		return ErrResult("duration_seconds must be >= 0 (0 = mute forever)"), nil, nil
 	}
 
 	// mute_until=0 restores default settings (unmute); otherwise mute either

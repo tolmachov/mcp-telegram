@@ -63,7 +63,7 @@ func (h *UsernameResolveHandler) Register(s *mcp.Server) {
 func (h *UsernameResolveHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in ResolveUsernameInput) (*mcp.CallToolResult, *ResolveUsernameResult, error) {
 	username := strings.TrimPrefix(strings.TrimSpace(in.Username), "@")
 	if username == "" {
-		return errResult("username is required (e.g. '@durov' or 'durov'). For chats without a public @username, use SearchChats by title instead."), nil, nil
+		return ErrResult("username is required (e.g. '@durov' or 'durov'). For chats without a public @username, use SearchChats by title instead."), nil, nil
 	}
 
 	resolved, err := resolvePublicUsername(ctx, h.peers, username)
@@ -114,7 +114,7 @@ func (h *UsernameResolveHandler) handle(ctx context.Context, _ *mcp.CallToolRequ
 	}
 
 	if len(out.Entities) == 0 {
-		return errResult(fmt.Sprintf("Username @%s not found. The user/chat may not exist, may be private, or may not have a public @username. Try SearchChats with a partial title instead.", username)), nil, nil
+		return ErrResult(fmt.Sprintf("Username @%s not found. The user/chat may not exist, may be private, or may not have a public @username. Try SearchChats with a partial title instead.", username)), nil, nil
 	}
 
 	return nil, out, nil

@@ -62,7 +62,7 @@ func TestSearchMessagesGlobalHandleValidation(t *testing.T) {
 			require.Nil(t, out)
 			require.NotNil(t, result)
 			require.True(t, result.IsError)
-			assert.Contains(t, toolResultText(result), tc.errSubstr)
+			assert.Contains(t, ResultText(result), tc.errSubstr)
 		})
 	}
 }

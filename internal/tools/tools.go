@@ -93,14 +93,14 @@ func parseDate(value string) (time.Time, error) {
 func parseDateWindow(from, to string) (time.Time, time.Time, *mcp.CallToolResult) {
 	minDate, err := parseDate(from)
 	if err != nil {
-		return time.Time{}, time.Time{}, errResult(fmt.Sprintf("invalid from_date: %v", err))
+		return time.Time{}, time.Time{}, ErrResult(fmt.Sprintf("invalid from_date: %v", err))
 	}
 	maxDate, err := parseDate(to)
 	if err != nil {
-		return time.Time{}, time.Time{}, errResult(fmt.Sprintf("invalid to_date: %v", err))
+		return time.Time{}, time.Time{}, ErrResult(fmt.Sprintf("invalid to_date: %v", err))
 	}
 	if !minDate.IsZero() && !maxDate.IsZero() && !minDate.Before(maxDate) {
-		return time.Time{}, time.Time{}, errResult(fmt.Sprintf("from_date (%s) is not before to_date (%s); the date window is empty.", minDate.Format(time.RFC3339), maxDate.Format(time.RFC3339)))
+		return time.Time{}, time.Time{}, ErrResult(fmt.Sprintf("from_date (%s) is not before to_date (%s); the date window is empty.", minDate.Format(time.RFC3339), maxDate.Format(time.RFC3339)))
 	}
 	return minDate, maxDate, nil
 }
@@ -184,7 +184,7 @@ func AddTool[In, Out any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, *
 			return nil, nil, toolFailure(ctx, req, t.Name, err)
 		}
 		if res != nil && res.IsError {
-			return nil, nil, errors.New(toolResultText(res))
+			return nil, nil, errors.New(ResultText(res))
 		}
 		if out == nil {
 			return nil, nil, fmt.Errorf("%s returned no result (server bug): the outcome of this call is unknown", t.Name)
@@ -374,8 +374,8 @@ func sentence(err error) string {
 	return strings.TrimSuffix(err.Error(), ".") + "."
 }
 
-// toolResultText concatenates the text blocks of a tool result.
-func toolResultText(r *mcp.CallToolResult) string {
+// ResultText concatenates the text blocks of a tool result.
+func ResultText(r *mcp.CallToolResult) string {
 	if r == nil {
 		return ""
 	}
@@ -395,10 +395,10 @@ func textResult(text string) *mcp.CallToolResult {
 	}
 }
 
-// errResult constructs an error CallToolResult with a single TextContent.
+// ErrResult constructs an error CallToolResult with a single TextContent.
 // The model can read the error text and self-correct, so include actionable
 // recovery hints in the message.
-func errResult(text string) *mcp.CallToolResult {
+func ErrResult(text string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{
 		IsError: true,
 		Content: []mcp.Content{&mcp.TextContent{Text: text}},
@@ -409,7 +409,7 @@ func errResult(text string) *mcp.CallToolResult {
 // with a recovery hint pointing to the discovery tools. Per MCP tool-design
 // guidance, errors should turn dead ends into next steps.
 func errChatIDRequired() *mcp.CallToolResult {
-	return errResult("chat_id is required. Use SearchChats (by title) or ResolveUsername (by @handle) to find the numeric chat ID first.")
+	return ErrResult("chat_id is required. Use SearchChats (by title) or ResolveUsername (by @handle) to find the numeric chat ID first.")
 }
 
 // errInvalidMessageID wraps a ParseMessageRef failure of the named input field
@@ -417,7 +417,7 @@ func errChatIDRequired() *mcp.CallToolResult {
 // opaque message handle so the model understands the expected format and where
 // to get valid handles from.
 func errInvalidMessageID(field, s string, err error) *mcp.CallToolResult {
-	return errResult(fmt.Sprintf(
+	return ErrResult(fmt.Sprintf(
 		"invalid %s %q: %v. Expected an opaque handle returned by GetMessages or SendMessage (e.g. \"42\" for a regular message, \"s:42\" for a scheduled one). Do not parse or construct handles manually.",
 		field, s, err,
 	))
@@ -429,7 +429,7 @@ func errInvalidMessageID(field, s string, err error) *mcp.CallToolResult {
 // message as a reply target). The verb should fit the pattern "cannot %s a
 // scheduled message", e.g. "forward", "reply to".
 func errCannotOnScheduled(verb string) *mcp.CallToolResult {
-	return errResult(fmt.Sprintf(
+	return ErrResult(fmt.Sprintf(
 		"cannot %s a scheduled message: it has not been sent yet and only exists in Telegram's schedule queue. Wait until it is delivered, or cancel it via DeleteMessages and create a new regular message.",
 		verb,
 	))
@@ -454,10 +454,10 @@ func parseRegularRef(field, s, verb string) (int, *mcp.CallToolResult) {
 func parseFutureSchedule(scheduleAt string) (time.Time, *mcp.CallToolResult) {
 	t, err := time.Parse(time.RFC3339, scheduleAt)
 	if err != nil {
-		return time.Time{}, errResult(fmt.Sprintf("invalid schedule_at %q: %v. Expected RFC3339 format like \"2026-04-10T15:30:00Z\".", scheduleAt, err))
+		return time.Time{}, ErrResult(fmt.Sprintf("invalid schedule_at %q: %v. Expected RFC3339 format like \"2026-04-10T15:30:00Z\".", scheduleAt, err))
 	}
 	if !t.After(time.Now()) {
-		return time.Time{}, errResult("schedule_at must be in the future")
+		return time.Time{}, ErrResult("schedule_at must be in the future")
 	}
 	return t, nil
 }
@@ -529,7 +529,7 @@ func requireExplicitConfirmation(confirm bool, action string) *mcp.CallToolResul
 	if confirm {
 		return nil
 	}
-	return errResult(fmt.Sprintf("explicit confirmation required: set confirm=true to %s after the user approves the action", action))
+	return ErrResult(fmt.Sprintf("explicit confirmation required: set confirm=true to %s after the user approves the action", action))
 }
 
 // clampLimit returns limit clamped to [1, maxLimit], or defaultVal when limit is non-positive.

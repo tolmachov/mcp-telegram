@@ -244,7 +244,7 @@ func TestCreateFolderValidation(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, errRes)
 			require.True(t, errRes.IsError)
-			assert.Contains(t, toolResultText(errRes), tc.wantErrPart)
+			assert.Contains(t, ResultText(errRes), tc.wantErrPart)
 		})
 	}
 }
@@ -269,7 +269,7 @@ func TestAddChatsToFolderValidation(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, errRes)
 			require.True(t, errRes.IsError)
-			assert.Contains(t, toolResultText(errRes), tc.wantErrPart)
+			assert.Contains(t, ResultText(errRes), tc.wantErrPart)
 		})
 	}
 }
@@ -293,7 +293,7 @@ func TestRemoveChatsFromFolderValidation(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, errRes)
 			require.True(t, errRes.IsError)
-			assert.Contains(t, toolResultText(errRes), tc.wantErrPart)
+			assert.Contains(t, ResultText(errRes), tc.wantErrPart)
 		})
 	}
 }
@@ -307,7 +307,7 @@ func TestDeleteFolderValidation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, errRes)
 	require.True(t, errRes.IsError)
-	assert.Contains(t, toolResultText(errRes), "folder_id is required")
+	assert.Contains(t, ResultText(errRes), "folder_id is required")
 }
 
 // TestResolveFolderChatsSkipsOnlyChatProblems pins that a folder edit skips a

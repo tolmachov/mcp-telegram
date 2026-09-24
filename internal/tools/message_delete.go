@@ -98,7 +98,7 @@ func (h *MessageDeleteHandler) handle(ctx context.Context, _ *mcp.CallToolReques
 		return errChatIDRequired(), nil, nil
 	}
 	if len(in.MessageIDs) == 0 || len(in.MessageIDs) > maxDeleteBatch {
-		return errResult(fmt.Sprintf("message_ids must hold 1-%d handles, got %d. Split larger cleanups into several calls.", maxDeleteBatch, len(in.MessageIDs))), nil, nil
+		return ErrResult(fmt.Sprintf("message_ids must hold 1-%d handles, got %d. Split larger cleanups into several calls.", maxDeleteBatch, len(in.MessageIDs))), nil, nil
 	}
 
 	var ids []int
@@ -111,7 +111,7 @@ func (h *MessageDeleteHandler) handle(ctx context.Context, _ *mcp.CallToolReques
 		if i == 0 {
 			scheduled = ref.Scheduled
 		} else if ref.Scheduled != scheduled {
-			return errResult("message_ids mixes regular (\"42\") and scheduled (\"s:42\") handles. Delete each kind in its own call."), nil, nil
+			return ErrResult("message_ids mixes regular (\"42\") and scheduled (\"s:42\") handles. Delete each kind in its own call."), nil, nil
 		}
 		if !slices.Contains(ids, ref.ID) {
 			ids = append(ids, ref.ID)

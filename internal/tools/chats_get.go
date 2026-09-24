@@ -90,15 +90,15 @@ func (h *ChatsGetHandler) handleFreshLoad(ctx context.Context, req *mcp.CallTool
 func (h *ChatsGetHandler) handleWithCursor(cursor string, limit int) (*mcp.CallToolResult, *getChatsOutput, error) {
 	sid, offset, err := ParseChatsCursor(cursor)
 	if err != nil {
-		return errResult(fmt.Sprintf("Invalid cursor: %v. Call GetChats without cursor to start fresh.", err)), nil, nil
+		return ErrResult(fmt.Sprintf("Invalid cursor: %v. Call GetChats without cursor to start fresh.", err)), nil, nil
 	}
 
 	snap, ok := h.cache.Snapshot(sid)
 	if !ok {
-		return errResult("Cursor expired (its chat listing is too old, was replaced by newer loads, or the server restarted). Call GetChats without cursor to start fresh."), nil, nil
+		return ErrResult("Cursor expired (its chat listing is too old, was replaced by newer loads, or the server restarted). Call GetChats without cursor to start fresh."), nil, nil
 	}
 	if offset >= len(snap.Chats) {
-		return errResult(fmt.Sprintf("Cursor offset %d is beyond the cached list (%d chats). Call GetChats without cursor to start fresh.", offset, len(snap.Chats))), nil, nil
+		return ErrResult(fmt.Sprintf("Cursor offset %d is beyond the cached list (%d chats). Call GetChats without cursor to start fresh.", offset, len(snap.Chats))), nil, nil
 	}
 
 	return nil, h.pageFrom(snap, offset, limit), nil

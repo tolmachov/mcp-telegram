@@ -74,11 +74,11 @@ func (h *ForumTopicsGetHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	var offsetTopic, offsetID, offsetDate, seen int
 	if in.Cursor != "" {
 		if in.ChatID != 0 || in.Query != "" || in.Limit != 0 {
-			return errResult("cursor is incompatible with chat_id, query, or limit; pass the cursor alone"), nil, nil
+			return ErrResult("cursor is incompatible with chat_id, query, or limit; pass the cursor alone"), nil, nil
 		}
 		cursor, err := ParseForumTopicsCursor(in.Cursor)
 		if err != nil {
-			return errResult(fmt.Sprintf("invalid cursor: %v. Omit cursor to start from the first page.", err)), nil, nil
+			return ErrResult(fmt.Sprintf("invalid cursor: %v. Omit cursor to start from the first page.", err)), nil, nil
 		}
 		in.ChatID, in.Query, limit = cursor.ChatID, cursor.Query, cursor.Limit
 		offsetTopic, offsetID, offsetDate, seen = cursor.OffsetTopic, cursor.OffsetID, cursor.OffsetDate, cursor.Seen

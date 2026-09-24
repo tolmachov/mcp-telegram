@@ -54,7 +54,7 @@ func (h *MessageContextGetHandler) handle(ctx context.Context, req *mcp.CallTool
 		return errChatIDRequired(), nil, nil
 	}
 	if in.MessageID == "" {
-		return errResult("message_id is required. Pass an opaque handle returned by GetMessages or ResolveMessageLink."), nil, nil
+		return ErrResult("message_id is required. Pass an opaque handle returned by GetMessages or ResolveMessageLink."), nil, nil
 	}
 	msgID, errRes := parseRegularRef("message_id", in.MessageID, "get context around")
 	if errRes != nil {

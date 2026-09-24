@@ -213,7 +213,7 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	// Generate filename if not provided.
 	if targetPath == "" {
 		if len(allowedPaths) == 0 {
-			return errResult("no allowed paths configured for backup. Pass --allowed-paths / MCP_TELEGRAM_ALLOWED_PATHS."), nil, nil
+			return ErrResult("no allowed paths configured for backup. Pass --allowed-paths / MCP_TELEGRAM_ALLOWED_PATHS."), nil, nil
 		}
 		chatName := tgdata.ChatInfoFromPeer(peer).Name
 		filename := fmt.Sprintf("%s-%s.txt", sanitizeFilename(chatName), time.Now().Format("2006-01-02_15-04-05"))
@@ -222,7 +222,7 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 
 	// Validate the path against allowed directories.
 	if err := isPathAllowed(targetPath, allowedPaths); err != nil {
-		return errResult(err.Error()), nil, nil
+		return ErrResult(err.Error()), nil, nil
 	}
 
 	progress, stopProgress := startBackupProgress(ctx, req, fromDate, toDate, count)

@@ -77,7 +77,7 @@ func (h *MessagesSearchGlobalHandler) Register(s *mcp.Server) {
 func (h *MessagesSearchGlobalHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in SearchMessagesGlobalInput) (*mcp.CallToolResult, *searchMessagesGlobalOutput, error) {
 	query := strings.TrimSpace(in.Query)
 	if query == "" {
-		return errResult("query is required and must be a non-empty string."), nil, nil
+		return ErrResult("query is required and must be a non-empty string."), nil, nil
 	}
 
 	opts := messages.GlobalSearchOptions{
@@ -88,7 +88,7 @@ func (h *MessagesSearchGlobalHandler) handle(ctx context.Context, req *mcp.CallT
 	if in.Cursor != "" {
 		cursor, err := ParseGlobalSearchCursor(in.Cursor)
 		if err != nil {
-			return errResult(fmt.Sprintf(
+			return ErrResult(fmt.Sprintf(
 				"invalid cursor: %v. The cursor must be copied verbatim from a prior response's next_cursor — do not construct or modify it. To restart pagination, omit the cursor entirely.",
 				err,
 			)), nil, nil

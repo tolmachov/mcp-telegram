@@ -64,12 +64,12 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	state := messagePageCursor{Kind: cursorKindHistory}
 	if in.Cursor != "" {
 		if in.ChatID != 0 || in.Limit != 0 || in.BeforeMessageID != "" || in.FromDate != "" || in.ToDate != "" || in.UnreadOnly || in.IncludeScheduled {
-			return errResult("cursor is incompatible with every other field; pass the cursor alone"), nil, nil
+			return ErrResult("cursor is incompatible with every other field; pass the cursor alone"), nil, nil
 		}
 		var err error
 		state, err = parseMessagePageCursor(in.Cursor, cursorKindHistory)
 		if err != nil {
-			return errResult(fmt.Sprintf("invalid cursor: %v", err)), nil, nil
+			return ErrResult(fmt.Sprintf("invalid cursor: %v", err)), nil, nil
 		}
 		in.ChatID, in.Limit = state.ChatID, state.Limit
 		in.FromDate, in.ToDate = state.FromDate, state.ToDate

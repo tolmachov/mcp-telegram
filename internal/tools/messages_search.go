@@ -97,12 +97,12 @@ func (h *MessagesSearchHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	query := strings.TrimSpace(in.Query)
 	if in.Cursor != "" {
 		if in.ChatID != 0 || query != "" || in.Limit != 0 || in.BeforeMessageID != "" || in.FromDate != "" || in.ToDate != "" || in.FromSenderID != 0 || in.MediaType != "" || in.TopMsgID != "" {
-			return errResult("cursor is incompatible with every other field; pass the cursor alone"), nil, nil
+			return ErrResult("cursor is incompatible with every other field; pass the cursor alone"), nil, nil
 		}
 		var err error
 		state, err = parseMessagePageCursor(in.Cursor, cursorKindSearch)
 		if err != nil {
-			return errResult(fmt.Sprintf("invalid cursor: %v", err)), nil, nil
+			return ErrResult(fmt.Sprintf("invalid cursor: %v", err)), nil, nil
 		}
 		in.ChatID, in.Limit = state.ChatID, state.Limit
 		in.FromDate, in.ToDate = state.FromDate, state.ToDate
@@ -113,7 +113,7 @@ func (h *MessagesSearchHandler) handle(ctx context.Context, req *mcp.CallToolReq
 			return errChatIDRequired(), nil, nil
 		}
 		if query == "" {
-			return errResult("query is required and must be a non-empty string."), nil, nil
+			return ErrResult("query is required and must be a non-empty string."), nil, nil
 		}
 	}
 
@@ -145,7 +145,7 @@ func (h *MessagesSearchHandler) handle(ctx context.Context, req *mcp.CallToolReq
 	if in.MediaType != "" {
 		ctor, ok := mediaFilterMap[in.MediaType]
 		if !ok {
-			return errResult(fmt.Sprintf("invalid media_type %q: expected one of %s.", in.MediaType, strings.Join(mediaTypes, ", "))), nil, nil
+			return ErrResult(fmt.Sprintf("invalid media_type %q: expected one of %s.", in.MediaType, strings.Join(mediaTypes, ", "))), nil, nil
 		}
 		opts.Filter = ctor()
 	}

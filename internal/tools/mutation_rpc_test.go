@@ -43,7 +43,7 @@ func TestEditMessageIDRangeThroughMCP(t *testing.T) {
 		}})
 		require.NoError(t, err)
 		require.True(t, res.IsError)
-		assert.Contains(t, toolResultText(res), "message_id")
+		assert.Contains(t, ResultText(res), "message_id")
 		require.Empty(t, inv.RequestTypes(), "invalid target reached Telegram")
 	}
 	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "EditMessage", Arguments: map[string]any{
@@ -102,7 +102,7 @@ func TestDestructiveHandlersFailClosedBeforeTelegramRPC(t *testing.T) {
 			got := tt.call(tg.NewClient(inv))
 			require.NotNil(t, got)
 			assert.True(t, got.IsError)
-			assert.Contains(t, toolResultText(got), "confirm=true")
+			assert.Contains(t, ResultText(got), "confirm=true")
 			assert.Empty(t, inv.RequestTypes(), "unconfirmed mutation reached Telegram")
 		})
 	}
@@ -368,7 +368,7 @@ func TestForwardAndMembershipMutationsUseExpectedRPCs(t *testing.T) {
 		require.NoError(t, err)
 		require.Nil(t, out)
 		require.NotNil(t, errRes)
-		assert.Contains(t, toolResultText(errRes), "not a channel or supergroup")
+		assert.Contains(t, ResultText(errRes), "not a channel or supergroup")
 		assert.Zero(t, inv.Remaining())
 	})
 }

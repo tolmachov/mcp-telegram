@@ -44,7 +44,7 @@ func TestRepliesGetHandlerValidation(t *testing.T) {
 			require.Nil(t, out)
 			require.NotNil(t, errRes)
 			require.True(t, errRes.IsError)
-			assert.Contains(t, toolResultText(errRes), tc.wantErrPart)
+			assert.Contains(t, ResultText(errRes), tc.wantErrPart)
 		})
 	}
 }
@@ -69,7 +69,7 @@ func TestForumTopicsGetHandlerValidation(t *testing.T) {
 			require.Nil(t, out)
 			require.NotNil(t, errRes)
 			require.True(t, errRes.IsError)
-			assert.Contains(t, toolResultText(errRes), tc.wantErrPart)
+			assert.Contains(t, ResultText(errRes), tc.wantErrPart)
 		})
 	}
 }

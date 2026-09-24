@@ -107,7 +107,7 @@ func (h *LeaveChatHandler) Register(s *mcp.Server) {
 func (h *JoinChatHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in JoinChatInput) (*mcp.CallToolResult, *JoinChatResult, error) {
 	chat := strings.TrimSpace(in.Chat)
 	if chat == "" {
-		return errResult("chat is required: pass a public @username, a numeric chat ID, or an invite link (t.me/+hash)."), nil, nil
+		return ErrResult("chat is required: pass a public @username, a numeric chat ID, or an invite link (t.me/+hash)."), nil, nil
 	}
 
 	if kind, hash := classifyChatRef(chat); kind == chatRefInvite {
@@ -134,7 +134,7 @@ func (h *JoinChatHandler) joinKnown(ctx context.Context, chat string) (*mcp.Call
 	}
 	channel, ok := peer.Chat.(*tg.Channel)
 	if !ok {
-		return errResult(fmt.Sprintf("%q is not a channel or supergroup. Only channels and supergroups can be joined by @username or ID; basic groups and private chats require an invite link.", chat)), nil, nil
+		return ErrResult(fmt.Sprintf("%q is not a channel or supergroup. Only channels and supergroups can be joined by @username or ID; basic groups and private chats require an invite link.", chat)), nil, nil
 	}
 	known := &JoinChatResult{Status: statusAlreadyMember, Chat: chat}
 	fillJoinResultFromChannel(known, channel)
@@ -176,7 +176,7 @@ func joinError(chat string, alreadyResult *JoinChatResult, err error) (*mcp.Call
 func (h *LeaveChatHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in LeaveChatInput) (*mcp.CallToolResult, *LeaveChatResult, error) {
 	chat := strings.TrimSpace(in.Chat)
 	if chat == "" {
-		return errResult("chat is required: pass a public @username or a numeric chat ID of a chat you're a member of."), nil, nil
+		return ErrResult("chat is required: pass a public @username or a numeric chat ID of a chat you're a member of."), nil, nil
 	}
 	if errRes := requireExplicitConfirmation(in.Confirm, "leave the chat"); errRes != nil {
 		return errRes, nil, nil
@@ -196,9 +196,9 @@ func (h *LeaveChatHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, i
 	})
 	switch {
 	case errors.Is(err, errInviteChatRef):
-		return errResult("LeaveChat does not accept invite links. Pass the chat's @username or numeric ID instead (find it with GetChats or SearchChats)."), nil, nil
+		return ErrResult("LeaveChat does not accept invite links. Pass the chat's @username or numeric ID instead (find it with GetChats or SearchChats)."), nil, nil
 	case errors.Is(err, errPrivateChat):
-		return errResult(fmt.Sprintf("%q is a private (one-to-one) chat, not a group or channel — there's nothing to leave. Use DeleteMessages or your client to clear the conversation instead.", chat)), nil, nil
+		return ErrResult(fmt.Sprintf("%q is a private (one-to-one) chat, not a group or channel — there's nothing to leave. Use DeleteMessages or your client to clear the conversation instead.", chat)), nil, nil
 	case err != nil:
 		return nil, nil, err
 	}

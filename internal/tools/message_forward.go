@@ -60,14 +60,14 @@ func (h *MessageForwardHandler) Register(s *mcp.Server) {
 
 func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in ForwardMessageInput) (*mcp.CallToolResult, *ForwardMessageResult, error) {
 	if in.FromChatID == 0 {
-		return errResult("from_chat_id is required. Use SearchChats or GetChats to find the source chat ID."), nil, nil
+		return ErrResult("from_chat_id is required. Use SearchChats or GetChats to find the source chat ID."), nil, nil
 	}
 	msgID, errRes := parseRegularRef("message_id", in.MessageID, "forward")
 	if errRes != nil {
 		return errRes, nil, nil
 	}
 	if in.ToChatID == 0 {
-		return errResult("to_chat_id is required. Use SearchChats or GetChats to find the destination chat ID."), nil, nil
+		return ErrResult("to_chat_id is required. Use SearchChats or GetChats to find the destination chat ID."), nil, nil
 	}
 	if errRes := requireExplicitConfirmation(in.Confirm, "forward the message"); errRes != nil {
 		return errRes, nil, nil

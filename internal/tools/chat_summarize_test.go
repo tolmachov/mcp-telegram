@@ -104,7 +104,7 @@ func TestChatSummarizeHandlerValidation(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, errRes)
 			require.True(t, errRes.IsError)
-			assert.Contains(t, toolResultText(errRes), tc.wantErrPart)
+			assert.Contains(t, ResultText(errRes), tc.wantErrPart)
 		})
 	}
 }

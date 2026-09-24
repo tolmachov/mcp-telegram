@@ -86,10 +86,10 @@ func (h *MessageReadHandler) Register(s *mcp.Server) {
 
 func (h *MessageReadHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in MarkAsReadInput) (*mcp.CallToolResult, *MarkAsReadResult, error) {
 	if len(in.ChatIDs) == 0 {
-		return errResult("chat_ids is required and must not be empty. Use GetChats to discover chat IDs first."), nil, nil
+		return ErrResult("chat_ids is required and must not be empty. Use GetChats to discover chat IDs first."), nil, nil
 	}
 	if len(in.ChatIDs) > maxMarkAsReadChats {
-		return errResult(fmt.Sprintf("Cannot process more than %d chats at once. Split the request into batches.", maxMarkAsReadChats)), nil, nil
+		return ErrResult(fmt.Sprintf("Cannot process more than %d chats at once. Split the request into batches.", maxMarkAsReadChats)), nil, nil
 	}
 
 	results := make([]markReadResult, 0, len(in.ChatIDs))

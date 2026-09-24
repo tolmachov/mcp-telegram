@@ -118,38 +118,38 @@ var mediaURIPattern = regexp.MustCompile(`^telegram://media/(\d+)/(-?\d+)/(\d+)/
 
 func (h *MediaGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in GetMediaInput) (*mcp.CallToolResult, any, error) {
 	if in.URI == "" {
-		return errResult("uri parameter is required"), nil, nil
+		return ErrResult("uri parameter is required"), nil, nil
 	}
 
 	matches := mediaURIPattern.FindStringSubmatch(in.URI)
 	if matches == nil {
-		return errResult(fmt.Sprintf("invalid media URI format: %s", in.URI)), nil, nil
+		return ErrResult(fmt.Sprintf("invalid media URI format: %s", in.URI)), nil, nil
 	}
 
 	mediaID, err := strconv.ParseInt(matches[1], 10, 64)
 	if err != nil {
-		return errResult(fmt.Sprintf("invalid media ID: %v", err)), nil, nil
+		return ErrResult(fmt.Sprintf("invalid media ID: %v", err)), nil, nil
 	}
 
 	accessHash, err := strconv.ParseInt(matches[2], 10, 64)
 	if err != nil {
-		return errResult(fmt.Sprintf("invalid access hash: %v", err)), nil, nil
+		return ErrResult(fmt.Sprintf("invalid access hash: %v", err)), nil, nil
 	}
 
 	// DC ID is included in the URI but not used directly — the client handles DC transfer.
 	if _, err := strconv.Atoi(matches[3]); err != nil {
-		return errResult(fmt.Sprintf("invalid DC ID: %v", err)), nil, nil
+		return ErrResult(fmt.Sprintf("invalid DC ID: %v", err)), nil, nil
 	}
 
 	thumbSize := matches[4]
 
 	fileRefEncoded, err := url.QueryUnescape(matches[5])
 	if err != nil {
-		return errResult(fmt.Sprintf("invalid file reference encoding: %v", err)), nil, nil
+		return ErrResult(fmt.Sprintf("invalid file reference encoding: %v", err)), nil, nil
 	}
 	fileReference, err := base64.URLEncoding.DecodeString(fileRefEncoded)
 	if err != nil {
-		return errResult(fmt.Sprintf("invalid file reference: %v", err)), nil, nil
+		return ErrResult(fmt.Sprintf("invalid file reference: %v", err)), nil, nil
 	}
 
 	location := &tg.InputPhotoFileLocation{

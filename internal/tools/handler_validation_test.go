@@ -77,7 +77,7 @@ func TestMessageSendHandlerValidation(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, errRes)
 			require.True(t, errRes.IsError)
-			assert.Contains(t, toolResultText(errRes), tc.wantErrPart)
+			assert.Contains(t, ResultText(errRes), tc.wantErrPart)
 		})
 	}
 }
@@ -91,7 +91,7 @@ func TestChatsSearchHandlerWhitespaceValidation(t *testing.T) {
 	require.Nil(t, out)
 	require.NotNil(t, errRes)
 	require.True(t, errRes.IsError)
-	assert.Contains(t, toolResultText(errRes), "query parameter is required")
+	assert.Contains(t, ResultText(errRes), "query parameter is required")
 }
 
 func TestResolveUsernameHandlerWhitespaceValidation(t *testing.T) {
@@ -103,7 +103,7 @@ func TestResolveUsernameHandlerWhitespaceValidation(t *testing.T) {
 	require.Nil(t, out)
 	require.NotNil(t, errRes)
 	require.True(t, errRes.IsError)
-	assert.Contains(t, toolResultText(errRes), "username is required")
+	assert.Contains(t, ResultText(errRes), "username is required")
 }
 
 // TestMessageEditHandlerValidation covers the input-validation layer of
@@ -166,7 +166,7 @@ func TestMessageEditHandlerValidation(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, errRes)
 			require.True(t, errRes.IsError)
-			assert.Contains(t, toolResultText(errRes), tc.wantErrPart)
+			assert.Contains(t, ResultText(errRes), tc.wantErrPart)
 		})
 	}
 }
@@ -216,7 +216,7 @@ func TestMessageDeleteHandlerValidation(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, errRes)
 			require.True(t, errRes.IsError)
-			assert.Contains(t, toolResultText(errRes), tc.wantErrPart)
+			assert.Contains(t, ResultText(errRes), tc.wantErrPart)
 		})
 	}
 }
@@ -256,7 +256,7 @@ func TestSetReactionHandlerValidation(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, errRes)
 			require.True(t, errRes.IsError)
-			assert.Contains(t, toolResultText(errRes), tc.wantErrPart)
+			assert.Contains(t, ResultText(errRes), tc.wantErrPart)
 		})
 	}
 }
@@ -301,7 +301,7 @@ func TestMessageForwardHandlerValidation(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, errRes)
 			require.True(t, errRes.IsError)
-			assert.Contains(t, toolResultText(errRes), tc.wantErrPart)
+			assert.Contains(t, ResultText(errRes), tc.wantErrPart)
 		})
 	}
 }
@@ -317,7 +317,7 @@ func TestJoinChatHandlerValidation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, errRes)
 	require.True(t, errRes.IsError)
-	assert.Contains(t, toolResultText(errRes), "chat is required")
+	assert.Contains(t, ResultText(errRes), "chat is required")
 }
 
 // TestLeaveChatHandlerValidation covers the input-validation layer of
@@ -331,7 +331,7 @@ func TestLeaveChatHandlerValidation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, errRes)
 	require.True(t, errRes.IsError)
-	assert.Contains(t, toolResultText(errRes), "chat is required")
+	assert.Contains(t, ResultText(errRes), "chat is required")
 }
 
 // TestMessageContextGetHandlerValidation covers the validation paths of
@@ -374,7 +374,7 @@ func TestMessageContextGetHandlerValidation(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, errRes)
 			require.True(t, errRes.IsError)
-			assert.Contains(t, toolResultText(errRes), tc.wantErrPart)
+			assert.Contains(t, ResultText(errRes), tc.wantErrPart)
 		})
 	}
 }
@@ -393,7 +393,7 @@ func TestGetMessagesDateInversionValidation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, errRes)
 	require.True(t, errRes.IsError)
-	assert.Contains(t, toolResultText(errRes), "not before")
+	assert.Contains(t, ResultText(errRes), "not before")
 }
 
 // TestSearchMessagesDateInversionValidation checks the same guard in the
@@ -411,7 +411,7 @@ func TestSearchMessagesDateInversionValidation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, errRes)
 	require.True(t, errRes.IsError)
-	assert.Contains(t, toolResultText(errRes), "not before")
+	assert.Contains(t, ResultText(errRes), "not before")
 }
 
 // TestSearchMessagesGlobalDateInversionValidation checks the same guard in the
@@ -429,7 +429,7 @@ func TestSearchMessagesGlobalDateInversionValidation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, errRes)
 	require.True(t, errRes.IsError)
-	assert.Contains(t, toolResultText(errRes), "not before")
+	assert.Contains(t, ResultText(errRes), "not before")
 }
 
 // TestMarkAsReadHandlerValidation covers the input-validation layer of
@@ -462,7 +462,7 @@ func TestMarkAsReadHandlerValidation(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, errRes)
 			require.True(t, errRes.IsError)
-			assert.Contains(t, toolResultText(errRes), tc.wantErrPart)
+			assert.Contains(t, ResultText(errRes), tc.wantErrPart)
 		})
 	}
 }
@@ -482,7 +482,7 @@ func TestBackupMessagesDateInversionValidation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, errRes)
 	require.True(t, errRes.IsError)
-	assert.Contains(t, toolResultText(errRes), "empty")
+	assert.Contains(t, ResultText(errRes), "empty")
 }
 
 // TestErrMessageTooLongCountsUTF16 pins that the limit is measured in UTF-16

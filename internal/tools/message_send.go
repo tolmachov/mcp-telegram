@@ -27,7 +27,7 @@ func errMessageTooLong(field, text string) *mcp.CallToolResult {
 	if n <= telegramMaxMessageLength {
 		return nil
 	}
-	return errResult(fmt.Sprintf(
+	return ErrResult(fmt.Sprintf(
 		"%s is too long: %d UTF-16 code units (Telegram limit is %d). Split it into multiple messages or shorten the text.",
 		field, n, telegramMaxMessageLength,
 	))
@@ -114,7 +114,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		return errChatIDRequired(), nil, nil
 	}
 	if in.Message == "" {
-		return errResult("message is required and must be non-empty"), nil, nil
+		return ErrResult("message is required and must be non-empty"), nil, nil
 	}
 	if errRes := errMessageTooLong("message", in.Message); errRes != nil {
 		return errRes, nil, nil
@@ -126,7 +126,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	switch mode {
 	case sendModeDefault, sendModeSend, sendModeSchedule, sendModeDraft:
 	default:
-		return errResult(fmt.Sprintf("invalid mode %q: expected one of \"send\", \"schedule\", \"draft\" (or omit for default send)", in.Mode)), nil, nil
+		return ErrResult(fmt.Sprintf("invalid mode %q: expected one of \"send\", \"schedule\", \"draft\" (or omit for default send)", in.Mode)), nil, nil
 	}
 
 	// Parse reply target once up front — shared by all modes. Reject
@@ -148,7 +148,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	var scheduleAtOut string
 	if mode == sendModeSchedule {
 		if in.ScheduleAt == "" {
-			return errResult("schedule_at is required when mode=\"schedule\". Provide an RFC3339 timestamp in the future (e.g. 2026-04-10T15:30:00Z)."), nil, nil
+			return ErrResult("schedule_at is required when mode=\"schedule\". Provide an RFC3339 timestamp in the future (e.g. 2026-04-10T15:30:00Z)."), nil, nil
 		}
 		t, errRes := parseFutureSchedule(in.ScheduleAt)
 		if errRes != nil {
@@ -157,7 +157,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		scheduleUnix = int(t.Unix())
 		scheduleAtOut = t.UTC().Format(time.RFC3339)
 	} else if in.ScheduleAt != "" {
-		return errResult(fmt.Sprintf("schedule_at is only valid when mode=\"schedule\" (got mode=%q). Set mode=\"schedule\" or remove schedule_at.", mode)), nil, nil
+		return ErrResult(fmt.Sprintf("schedule_at is only valid when mode=\"schedule\" (got mode=%q). Set mode=\"schedule\" or remove schedule_at.", mode)), nil, nil
 	}
 
 	// Draft mode: messages.saveDraft supports reply_to_msg_id but does not
