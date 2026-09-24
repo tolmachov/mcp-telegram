@@ -106,6 +106,15 @@ func TestExtractScheduledMessageID(t *testing.T) {
 	}
 }
 
+// editedMessage is message id sent at date and edited at editDate.
+func editedMessage(id, date, editDate int) *tg.Message {
+	msg := &tg.Message{ID: id, Date: date}
+	msg.SetEditDate(editDate)
+	return msg
+}
+
+// TestExtractEditedMessageID pins that an edit reports when it was made
+// (EditDate), not when the message was first sent (Date).
 func TestExtractEditedMessageID(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -116,16 +125,23 @@ func TestExtractEditedMessageID(t *testing.T) {
 		{
 			name: "Updates with UpdateEditMessage",
 			updates: newUpdatesWith(&tg.UpdateEditMessage{
-				Message: &tg.Message{ID: 10, Date: 4000},
+				Message: editedMessage(10, 4000, 4500),
 			}),
-			wantID: 10, wantDate: 4000,
+			wantID: 10, wantDate: 4500,
 		},
 		{
 			name: "Updates with UpdateEditChannelMessage",
 			updates: newUpdatesWith(&tg.UpdateEditChannelMessage{
-				Message: &tg.Message{ID: 20, Date: 6000},
+				Message: editedMessage(20, 6000, 6500),
 			}),
-			wantID: 20, wantDate: 6000,
+			wantID: 20, wantDate: 6500,
+		},
+		{
+			name: "a message without an edit date has none",
+			updates: newUpdatesWith(&tg.UpdateEditMessage{
+				Message: &tg.Message{ID: 30, Date: 7000},
+			}),
+			wantID: 30, wantDate: 0,
 		},
 		{
 			name:    "unrecognised type returns zero",

@@ -107,7 +107,7 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		return nil, nil, failed(fmt.Sprintf("edit message %s in chat %d", in.MessageID, in.ChatID), err)
 	}
 
-	editedMsgID, date := extractEditedMessageID(updates)
+	editedMsgID, editDate := extractEditedMessageID(updates)
 	if editedMsgID == 0 {
 		mcpLog(ctx, req.Session, logLevelWarning, "EditMessage", map[string]any{
 			"action":  "edited_message_id_extraction_failed",
@@ -140,16 +140,22 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 			res.Note = "message_id may be stale: Telegram returned an unrecognised update type. Verify via GetMessages."
 		}
 	}
-	if date > 0 {
-		res.EditedAt = formatUnixRFC3339(date)
+	if editDate > 0 {
+		res.EditedAt = formatUnixRFC3339(editDate)
 	}
 	return nil, res, nil
 }
 
-// extractEditedMessageID pulls the edited message ID + date out of an
-// UpdatesClass returned by messages.editMessage. Covers both
-// UpdateEditMessage (for regular chats and scheduled messages) and
-// UpdateEditChannelMessage (for channels/supergroups).
-func extractEditedMessageID(updates tg.UpdatesClass) (int, int) {
-	return firstMessageInUpdates(updates, tg.UpdateEditMessageTypeID, tg.UpdateEditChannelMessageTypeID)
+// extractEditedMessageID pulls the edited message's ID and edit date out of
+// an UpdatesClass returned by messages.editMessage, or (0, 0) when it carries
+// none. Covers both UpdateEditMessage (for regular chats and scheduled
+// messages) and UpdateEditChannelMessage (for channels/supergroups). The edit
+// date is the message's EditDate: its Date stays the original send time.
+func extractEditedMessageID(updates tg.UpdatesClass) (id, editDate int) {
+	msg := firstMessageInUpdates(updates, tg.UpdateEditMessageTypeID, tg.UpdateEditChannelMessageTypeID)
+	if msg == nil {
+		return 0, 0
+	}
+	editDate, _ = msg.GetEditDate()
+	return msg.ID, editDate
 }

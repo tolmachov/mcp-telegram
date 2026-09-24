@@ -272,7 +272,7 @@ func extractSentMessageID(updates tg.UpdatesClass) (int, int) {
 		// (a single-recipient PM where the server can omit full Updates).
 		return u.ID, u.Date
 	}
-	return firstMessageInUpdates(updates, tg.UpdateNewMessageTypeID, tg.UpdateNewChannelMessageTypeID)
+	return idAndDate(firstMessageInUpdates(updates, tg.UpdateNewMessageTypeID, tg.UpdateNewChannelMessageTypeID))
 }
 
 // extractScheduledMessageID pulls the new message ID + date out of an
@@ -283,5 +283,13 @@ func extractSentMessageID(updates tg.UpdatesClass) (int, int) {
 // case this helper returns (0, 0) and the caller should fall back to
 // extractSentMessageID to recover the ID.
 func extractScheduledMessageID(updates tg.UpdatesClass) (int, int) {
-	return firstMessageInUpdates(updates, tg.UpdateNewScheduledMessageTypeID)
+	return idAndDate(firstMessageInUpdates(updates, tg.UpdateNewScheduledMessageTypeID))
+}
+
+// idAndDate returns msg's ID and send date, or (0, 0) for no message.
+func idAndDate(msg *tg.Message) (int, int) {
+	if msg == nil {
+		return 0, 0
+	}
+	return msg.ID, msg.Date
 }

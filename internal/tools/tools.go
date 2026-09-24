@@ -471,13 +471,13 @@ func formatUnixRFC3339(unix int) string {
 	return time.Unix(int64(unix), 0).UTC().Format(time.RFC3339)
 }
 
-// firstMessageInUpdates returns the ID and date of the first *tg.Message
-// carried by an update of one of the given types inside an Updates container,
-// or (0, 0) when there is none.
-func firstMessageInUpdates(updates tg.UpdatesClass, typeIDs ...uint32) (int, int) {
+// firstMessageInUpdates returns the first *tg.Message carried by an update of
+// one of the given types inside an Updates container, or nil when there is
+// none.
+func firstMessageInUpdates(updates tg.UpdatesClass, typeIDs ...uint32) *tg.Message {
 	u, ok := updates.(*tg.Updates)
 	if !ok {
-		return 0, 0
+		return nil
 	}
 	for _, update := range u.Updates {
 		if !slices.Contains(typeIDs, update.TypeID()) {
@@ -488,10 +488,10 @@ func firstMessageInUpdates(updates tg.UpdatesClass, typeIDs ...uint32) (int, int
 			continue
 		}
 		if msg, ok := carrier.GetMessage().(*tg.Message); ok {
-			return msg.ID, msg.Date
+			return msg
 		}
 	}
-	return 0, 0
+	return nil
 }
 
 // floodWaitMessage returns the deterministic retry-after guidance for a wait
