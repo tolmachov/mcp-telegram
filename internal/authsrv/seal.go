@@ -120,18 +120,20 @@ func encryptBlob[T claims](s *sealer, spec blobSpec[T], v T) (string, error) {
 
 // openBlob reverses sealBlob: it opens the blob as openAuthentic does, then
 // checks it was not issued in the future and enforces the spec's TTL. Every
-// failure unwraps to errInvalidBlob; the concrete reason is for server-side
-// logs only.
+// failure unwraps to errInvalidBlob and comes with zero claims, so no caller
+// can act on a rejected blob's contents; the concrete reason is for
+// server-side logs only.
 func openBlob[T claims](s *sealer, spec blobSpec[T], blob string, now time.Time) (T, error) {
+	var zero T
 	v, err := openAuthentic(s, spec, blob)
 	if err != nil {
-		return v, err
+		return zero, err
 	}
 	if v.issuedAt() > now.Add(maxIssueSkew).Unix() {
-		return v, errIssuedInFuture
+		return zero, errIssuedInFuture
 	}
 	if spec.ttl > 0 && expired(v.issuedAt(), spec.ttl, now) {
-		return v, errBlobExpired
+		return zero, errBlobExpired
 	}
 	return v, nil
 }
@@ -139,44 +141,48 @@ func openBlob[T claims](s *sealer, spec blobSpec[T], blob string, now time.Time)
 // openAuthentic decrypts the blob and checks its claims are valid for this
 // issuer, and checks no time: it answers only whether this deployment sealed
 // these claims. Revocation needs exactly that — an authentic token is
-// revocable however its times compare with this instance's clock.
+// revocable however its times compare with this instance's clock. A failure
+// comes with zero claims.
 func openAuthentic[T claims](s *sealer, spec blobSpec[T], blob string) (T, error) {
+	var zero T
 	v, err := decryptBlob(s, spec, blob)
 	if err != nil {
-		return v, err
+		return zero, err
 	}
 	if !v.valid(s.issuer) {
-		return v, errInvalidClaims
+		return zero, errInvalidClaims
 	}
 	return v, nil
 }
 
 // decryptBlob reverses encryptBlob. It is the format layer under openBlob and
-// checks nothing about the claims.
+// checks nothing about the claims. A failure comes with zero claims, even
+// when the payload decoded part-way.
 func decryptBlob[T claims](s *sealer, spec blobSpec[T], blob string) (T, error) {
-	var v T
+	var zero T
 	raw, ok := strings.CutPrefix(blob, spec.prefix)
 	if !ok {
-		return v, errInvalidBlob
+		return zero, errInvalidBlob
 	}
 	buf, err := base64.RawURLEncoding.DecodeString(raw)
 	if err != nil || len(buf) == 0 {
-		return v, errInvalidBlob
+		return zero, errInvalidBlob
 	}
 	k, ok := s.ring.byID(buf[0])
 	if !ok {
-		return v, fmt.Errorf("%w (key id %#02x)", errUnknownKeyID, buf[0])
+		return zero, fmt.Errorf("%w (key id %#02x)", errUnknownKeyID, buf[0])
 	}
 	if len(buf) < 1+k.aead.NonceSize() {
-		return v, errInvalidBlob
+		return zero, errInvalidBlob
 	}
 	nonce := buf[1 : 1+k.aead.NonceSize()]
 	payload, err := k.aead.Open(nil, nonce, buf[1+k.aead.NonceSize():], s.aad(spec.kind))
 	if err != nil {
-		return v, errInvalidBlob
+		return zero, errInvalidBlob
 	}
+	var v T
 	if err := json.Unmarshal(payload, &v); err != nil {
-		return v, errInvalidBlob
+		return zero, errInvalidBlob
 	}
 	return v, nil
 }
