@@ -55,6 +55,14 @@ func TestChatSummarizeBuildResult(t *testing.T) {
 		assert.Equal(t, out.Warning, errRes.Meta[MetaWarning])
 	})
 
+	t.Run("a late failure keeps the fetch's own warning", func(t *testing.T) {
+		const fetchWarning = "Only 500 of the period's messages were fetched."
+		_, out, err := h.buildResult(in, since, end, summarize.Result{Summary: "batches 1-18", Warning: fetchWarning}, errors.New("batch 19/20: boom"))
+		require.NoError(t, err)
+		require.NotNil(t, out)
+		assert.Equal(t, fetchWarning+" Summarisation stopped early: batch 19/20: boom.", out.Warning)
+	})
+
 	t.Run("failure with no text is a hard error", func(t *testing.T) {
 		_, out, err := h.buildResult(in, since, end, summarize.Result{Summary: "   "}, errors.New("batch 1/20: boom"))
 		require.Nil(t, out)

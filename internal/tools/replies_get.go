@@ -109,7 +109,7 @@ func (h *RepliesGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest
 
 	result, err := h.provider.FetchReplies(ctx, in.ChatID, rootID, opts)
 	if err != nil {
-		return nil, nil, failedHint(fmt.Sprintf("get replies to message %s in chat %d", in.MessageID, in.ChatID), err, "Make sure the message has a comment thread (channel post with discussion) or is a forum topic id, and that you have access.")
+		return nil, nil, failedHint(fmt.Sprintf("get replies to message %s in chat %d", presentation.FormatRegularRef(rootID), in.ChatID), err, "Make sure the message has a comment thread (channel post with discussion) or is a forum topic id, and that you have access.")
 	}
 
 	out := &getRepliesOutput{

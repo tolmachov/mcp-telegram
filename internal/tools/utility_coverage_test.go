@@ -299,3 +299,23 @@ func TestBackupMessagesSavesPartialOnCancel(t *testing.T) {
 	require.NoError(t, statErr)
 	assert.Zero(t, inv.Remaining())
 }
+
+// TestBackupMessagesSavesPartialOnTimeout verifies a backup cut short by a
+// deadline tells the model where the partial file is: the outcome rides in
+// the note, which a systemic failure keeps.
+func TestBackupMessagesSavesPartialOnTimeout(t *testing.T) {
+	const channelID = int64(64)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "backup.txt")
+	inv := partialBackupScript(t, channelID, func() error { return context.DeadlineExceeded })
+	peers := tgclient.NewResolver(t.Context(), tg.NewClient(inv))
+	handler := NewMessageBackupHandler(peers, messages.NewProvider(peers, 100_000), []string{dir})
+
+	_, out, err := handler.handle(t.Context(), &mcp.CallToolRequest{}, BackupMessagesInput{ChatID: channelID, Filepath: target})
+	require.Error(t, err)
+	assert.Nil(t, out)
+	text := failureText("BackupMessages", err)
+	assert.Contains(t, text, "context deadline exceeded")
+	assert.Contains(t, text, "a partial file with 2 messages was saved to "+target)
+	assert.Zero(t, inv.Remaining())
+}

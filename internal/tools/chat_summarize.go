@@ -152,10 +152,11 @@ func (h *ChatSummarizeHandler) buildResult(in SummarizeChatInput, since, periodE
 	// A later batch failed but earlier batches produced a usable summary —
 	// return it marked partial rather than throwing the completed work away.
 	// The warning also rides in Meta so the server request logger surfaces
-	// this degraded success at Warn (the result itself is not an error).
+	// this degraded success at Warn (the result itself is not an error). A
+	// warning the summariser already gave (e.g. an incomplete fetch) stays.
 	if strings.TrimSpace(result.Summary) != "" {
 		out.Partial = true
-		out.Warning = fmt.Sprintf("summarization stopped early: %v", err)
+		out.Warning = strings.TrimSpace(result.Warning + " " + fmt.Sprintf("Summarisation stopped early: %v.", err))
 		return &mcp.CallToolResult{Meta: mcp.Meta{MetaWarning: out.Warning}}, out, nil
 	}
 	return nil, nil, failed(fmt.Sprintf("summarize chat %d", in.ChatID), err)

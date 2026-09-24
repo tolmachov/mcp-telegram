@@ -2,10 +2,17 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"github.com/gotd/td/tg"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tolmachov/mcp-telegram/internal/messages"
+	telegramfake "github.com/tolmachov/mcp-telegram/internal/testutil/telegram"
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // TestRepliesGetHandlerValidation covers GetReplies input validation. The
@@ -65,4 +72,18 @@ func TestForumTopicsGetHandlerValidation(t *testing.T) {
 			assert.Contains(t, toolResultText(errRes), tc.wantErrPart)
 		})
 	}
+}
+
+// TestRepliesGetFailureNamesTheThreadOnACursorCall pins that a failed cursor
+// call names the thread the cursor holds, not the empty message_id input.
+func TestRepliesGetFailureNamesTheThreadOnACursorCall(t *testing.T) {
+	peers := tgclient.NewResolver(t.Context(), tg.NewClient(telegramfake.New(
+		telegramfake.Typed(func(context.Context, *tg.UsersGetUsersRequest, *tg.UserClassVector) error { return errors.New("boom") }),
+	)))
+	h := NewGetRepliesHandler(messages.NewProvider(peers, 100))
+	cursor := formatMessagePageCursor(messagePageCursor{Kind: cursorKindReplies, ChatID: 5, OffsetID: 10, Limit: 20, RootMessageID: 42})
+
+	_, _, err := h.handle(t.Context(), &mcp.CallToolRequest{}, GetRepliesInput{Cursor: cursor})
+	require.Error(t, err)
+	assert.Contains(t, failureText("GetReplies", err), "Failed to get replies to message 42 in chat 5:")
 }

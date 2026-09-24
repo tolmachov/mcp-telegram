@@ -374,14 +374,11 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	// have something to save, persist it and report the partial state instead
 	// of losing minutes of fetched history — that's the whole point of
 	// long-running backup progress. Complete failures (result == nil) still
-	// bubble up as tool errors.
+	// bubble up as tool errors; without an error FetchAll always returns a
+	// result.
 	partialErr := err
 	if err != nil && (result == nil || len(result.Messages) == 0) {
 		return nil, nil, failed(op, err)
-	}
-	// Provider may return (nil, nil) which the guard above misses (no err to check).
-	if result == nil {
-		return nil, nil, failed(op, errors.New("provider returned no result"))
 	}
 	if partialErr != nil {
 		mcpLog(ctx, req.Session, logLevelWarning, "BackupMessages", map[string]any{
@@ -435,20 +432,13 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 				len(result.Messages), absPath,
 			)),
 			&BackupMessagesResult{ChatID: in.ChatID, MessageCount: len(result.Messages), Filepath: absPath, Partial: true}, nil
-	case errors.Is(partialErr, context.DeadlineExceeded):
-		// Context deadline exceeded: surface as a tool error so the caller
-		// knows the backup is incomplete and can retry with a narrower window.
-		// The partial file is still useful, so we report it alongside the error.
-		return nil, nil, failedHint(op, withNote(partialErr, fmt.Sprintf(
-			"The backup timed out; a partial file with %d messages was saved to %s.",
-			len(result.Messages), absPath,
-		)), "Retry with a narrower date window or smaller count.")
 	default:
-		// Real mid-pagination failure (FLOOD_WAIT, transport error, etc.).
-		// We persisted what we fetched so the user doesn't lose minutes of
-		// work, but surface it as a tool error so the caller knows the
-		// backup is incomplete and needs a retry anchored past the saved
-		// file's last message.
+		// Real mid-pagination failure (a timeout, FLOOD_WAIT, a transport
+		// error, etc.). We persisted what we fetched so the user doesn't lose
+		// minutes of work, but surface it as a tool error so the caller knows
+		// the backup is incomplete and needs a retry anchored past the saved
+		// file's last message. The note reaches the model whatever the
+		// failure; the hint only when it is not systemic (see failure).
 		return nil, nil, failedHint(op, withNote(partialErr, fmt.Sprintf(
 			"The backup stopped mid-stream; a partial file with %d messages was saved to %s.",
 			len(result.Messages), absPath,
