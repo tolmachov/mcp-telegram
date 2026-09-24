@@ -64,7 +64,7 @@ type PinnedChatResource struct {
 //
 // servers is the set the pinned resources are mirrored onto; passing none is a
 // programming error (RefreshResources would fetch from Telegram and register the
-// results onto nobody), so it is logged loudly rather than silently no-ooping.
+// results onto nobody), so it is logged loudly rather than silently no-oping.
 func NewPinnedChatsProvider(client *tg.Client, provider *messages.Provider, logger *slog.Logger, servers ...*mcp.Server) *PinnedChatsProvider {
 	if logger == nil {
 		logger = slog.Default()
@@ -174,12 +174,10 @@ func (p *PinnedChatsProvider) doRefresh(ctx context.Context) error {
 }
 
 // WatchInBackground starts a goroutine that periodically refreshes the pinned
-// chat resource set. Stops when ctx is cancelled. Replaces the on-demand
-// BeforeListResources hook from the previous SDK (which has no equivalent in
-// the official Go SDK) with a tighter polling interval. Returns a channel
-// that closes when the watcher goroutine has fully exited — the caller must
-// wait on it before tearing down the MCP server so the goroutine cannot race
-// with server shutdown while in the middle of AddResource/RemoveResources.
+// chat resource set. Stops when ctx is cancelled. Returns a channel that
+// closes when the watcher goroutine has fully exited — the caller must wait
+// on it before tearing down the MCP server so the goroutine cannot race with
+// server shutdown while in the middle of AddResource/RemoveResources.
 //
 // Refresh errors are logged so an operator sees auth/flood-wait problems
 // instead of a silently frozen resource set: the initial refresh failing is

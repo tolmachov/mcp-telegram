@@ -64,7 +64,7 @@ func (p *SamplingProvider) Summarize(ctx context.Context, req Request) (string, 
 	text := contentText(result.Content)
 	if text == "" {
 		// Non-text content (image/audio) or an empty reply. Returning ("", nil)
-		// would let the rolling summarizer silently drop the accumulated summary
+		// would let the rolling summariser silently drop the accumulated summary
 		// for this batch; fail loudly so the caller can surface partial work.
 		return "", fmt.Errorf("sampling returned no text content")
 	}

@@ -50,8 +50,7 @@ func newEntityMaps(users []tg.UserClass, chats []tg.ChatClass) entityMaps {
 // dialogToChatInfo maps a dialog to ChatInfo using the response entities.
 // It returns ok=false when the peer's entity is missing from the response
 // (a "phantom" dialog for a deleted/left/migrated chat) so the caller can
-// skip it — matching the previous behaviour where such dialogs resolved to
-// an empty input peer and were dropped.
+// skip it.
 func (em entityMaps) dialogToChatInfo(dialog *tg.Dialog, now time.Time) (ChatInfo, bool) {
 	var info ChatInfo
 	switch peer := dialog.Peer.(type) {

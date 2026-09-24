@@ -173,7 +173,9 @@ func mcpLog(ctx context.Context, ss *mcp.ServerSession, level mcp.LoggingLevel, 
 //   - an IsError result (input validation) is turned into a Go error, which
 //     the SDK sends as IsError + text with no structured content;
 //   - a non-error result without a typed output is a handler bug and is
-//     reported as an error rather than an empty success.
+//     reported as an error rather than an empty success;
+//   - an output that succeeded only in part carries a warning
+//     (partialOutcome), which flagPartial sets as the result's MetaWarning.
 //
 // The handler runs with a flood-wait budget of its own
 // (tgclient.WithWaitBudget), so the Telegram calls of one tool call wait no
@@ -306,7 +308,8 @@ func failedHint(op string, err error, hint string) error { return newFailure(op,
 // withHint attaches a recovery hint to err for the failure that wraps it.
 func withHint(err error, hint string) error { return newFailure("", hint, err) }
 
-// peerHint follows a failure about the one chat a call named (tgclient.IsPeerSpecific).
+// peerHint follows a failure about the one chat a call named
+// (tgclient.IsPeerSpecific).
 const peerHint = "The chat may not exist, you may not have access, or the ID may be wrong. Use SearchChats or GetChats to verify, or ResolveUsername if you only have a @handle."
 
 // toolFailure is the single place a handler's Go error becomes the tool error

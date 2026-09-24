@@ -15,7 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Provider is an interface for LLM providers that can summarize text.
+// Provider is an interface for LLM providers that can summarise text.
 type Provider interface {
 	Summarize(ctx context.Context, req Request) (string, error)
 }
@@ -147,7 +147,9 @@ const httpMaxResponseBytes = 10 << 20
 // HTTP pipeline for the direct-LLM providers (anthropic/gemini/ollama), so
 // timeout-independent behaviour (status handling, body limits, error snippets)
 // lives in one place. providerName tags errors for attribution. A non-200
-// status becomes an error carrying a bounded snippet of the body; the
+// status becomes an error carrying a bounded snippet of the body — after up
+// to 3 attempts when it is 429 or a 5xx gateway/server error, spaced by the
+// response's Retry-After or else a short jittered back-off. The
 // provider-specific inline-error check (some APIs report errors with HTTP 200)
 // stays in the caller, which inspects respBody after this returns nil.
 func postJSON(ctx context.Context, client *http.Client, providerName, url string, headers map[string]string, reqBody, respBody any) error {

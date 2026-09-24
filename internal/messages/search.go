@@ -103,9 +103,9 @@ func (p *Provider) searchWithPeer(ctx context.Context, chatID int64, peer tg.Inp
 // SearchGlobal runs a substring search across all chats the user is in,
 // via messages.searchGlobal. Pagination uses an opaque cursor built from
 // the (offset_rate, offset_peer, offset_id) tuple of the prior response.
-// Only standard FLOOD_WAIT applies — the per-day `searchPostsFlood` quota
-// documented for hashtag search (channels.searchPosts) does not affect
-// this method.
+// Telegram's usual flood limits apply; no per-day quota does — the per-day
+// `searchPostsFlood` quota documented for hashtag search
+// (channels.searchPosts) does not affect this method.
 func (p *Provider) SearchGlobal(ctx context.Context, opts GlobalSearchOptions) (*GlobalSearchResult, error) {
 	if opts.Query == "" {
 		return nil, fmt.Errorf("search query is required")

@@ -32,7 +32,7 @@ func NewChatSummarizeHandler(msgProvider *messages.Provider, summarizer *summari
 // SummarizeChatInput is the input for the SummarizeChat tool.
 type SummarizeChatInput struct {
 	MaxMessages int    `json:"max_messages,omitempty" jsonschema:"Maximum messages sent to the summariser (default 2000, hard maximum 10000)."`
-	ChatID      int64  `json:"chat_id" jsonschema:"The chat ID to summarize"`
+	ChatID      int64  `json:"chat_id" jsonschema:"The chat ID to summarise"`
 	Goal        string `json:"goal" jsonschema:"What you want from the summary. Examples: 'key points and decisions'\\, 'extract all action items and deadlines'\\, 'analyse sentiment and mood'\\, 'identify top 5 discussed topics'\\, 'create meeting minutes'"`
 	Period      string `json:"period,omitempty" jsonschema:"Time period to look back over (default: 'month')"`
 	Since       string `json:"since,omitempty" jsonschema:"Date to start from (alternative to period): YYYY-MM-DD or YYYY-MM-DD HH:MM:SS in UTC\\, or RFC3339\\, e.g. '2024-01-15'"`
@@ -119,7 +119,7 @@ func (h *ChatSummarizeHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	return h.buildResult(in, maxMessages, since, periodEnd, result, err)
 }
 
-// buildResult shapes the tool response from a summarizer outcome, kept separate
+// buildResult shapes the tool response from a summariser outcome, kept separate
 // from handle so the (result, err) → response branching is unit-testable without
 // driving a live LLM. On success it returns the full summary; on a late failure
 // that still produced text it returns a partial result (salvaging completed

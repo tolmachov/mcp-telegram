@@ -16,8 +16,8 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/xdg"
 )
 
-// telegramLaunchDate is the date when Telegram was launched (used as fallback
-// for date range calculations).
+// telegramLaunchDate is the date when Telegram was launched: the start of a
+// backup's progress window when only to_date bounds it.
 var telegramLaunchDate = time.Date(2013, 8, 14, 0, 0, 0, 0, time.UTC)
 
 // MessageBackupHandler handles the BackupMessages tool.

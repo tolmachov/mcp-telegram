@@ -99,7 +99,7 @@ func (h *MessageLinkResolveHandler) handle(ctx context.Context, _ *mcp.CallToolR
 	} else {
 		// Private channel form: t.me/c/<internal>/<id>. The URL's "c" segment
 		// is already the bare MTProto channel ID the toolbox uses. We don't hit
-		// the API here — ChatInfoGet can enrich on demand if the caller needs
+		// the API here — GetChatInfo can enrich on demand if the caller needs
 		// metadata.
 		out.ChatID = parsed.ChannelRaw
 		out.Hint = "Private channel link — chat_title omitted (no API call). Call GetChatInfo with chat_id if you need the title/members."
@@ -161,7 +161,7 @@ func parseTMeLink(raw string) (parsedLink, error) {
 	case "resolve":
 		// tg://resolve?domain=foo&post=123 form — handled below via query.
 	default:
-		return parsedLink{}, fmt.Errorf("unsupported host %q (expected t.me or telegram.me)", u.Host)
+		return parsedLink{}, fmt.Errorf("unsupported host %q (expected t.me, telegram.me or telegram.dog)", u.Host)
 	}
 
 	// tg://resolve?domain=foo&post=123 form.

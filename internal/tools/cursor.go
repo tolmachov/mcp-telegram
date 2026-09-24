@@ -10,13 +10,12 @@ import (
 )
 
 // This file holds the shared opaque-cursor codec. Every paginating tool
-// (SearchMessagesGlobal, GetChats, GetForumTopics) encodes its resume state as
-// a short JSON envelope, base64url-encodes it into a single opaque string, and
-// tags it with a schema version. The three used to carry hand-copied variants
-// of this logic that had already drifted apart (notably their version policy);
-// they now share encodeCursor/decodeCursor — with the version check folded into
-// decodeCursor via the versioned interface — so the wire format and
-// exact-version validation rules stay identical.
+// (GetMessages, SearchMessages, GetReplies, SearchMessagesGlobal, GetChats,
+// GetForumTopics) encodes its resume state as a short JSON envelope tagged
+// with a schema version and base64url-encodes it into a single opaque string
+// through encodeCursor/decodeCursor, which checks the version (see
+// versioned), so the wire format and exact-version validation rules are the
+// same for all of them.
 
 // encodeCursor renders a JSON-serialisable envelope as an opaque base64url
 // string. RawURLEncoding (no padding) keeps the token count down since the

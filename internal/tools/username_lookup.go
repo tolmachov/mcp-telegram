@@ -12,14 +12,12 @@ import (
 )
 
 // This file is the single username-resolution seam for the tool handlers.
-// Several tools (the folder edits, ResolveMessageLink, JoinChat/LeaveChat) turn
-// a public @username into a peer, and each used to hand-roll the
-// contacts.resolveUsername call and then guess which returned entity was the
-// answer — one taking the first user, another the first chat. Because a single
-// response can carry several entities (a bot inside a chat, a linked discussion
-// group), those guesses could disagree and hand the same @username a different
-// chat_id in different tools. The accessors below all key off r.Peer — the
-// entity Telegram itself designates as the resolution — so every caller agrees.
+// The folder edits, ResolveMessageLink and JoinChat/LeaveChat turn a public
+// @username into a peer through it. One answer can carry several entities (a
+// bot inside a chat, a linked discussion group), so the accessors below all
+// key off r.Peer — the entity Telegram itself designates as the resolution —
+// and every caller hands the same @username the same chat_id. ResolveUsername
+// alone lists every entity of the answer.
 
 // resolvePublicUsername normalises a public username (with or without a leading
 // @), rejects empty input as a reference that names no chat
@@ -40,7 +38,8 @@ func resolvePublicUsername(ctx context.Context, peers *tgclient.Resolver, userna
 }
 
 // resolvedEntity returns the response entity that r.Peer designates — a
-// *tg.User, *tg.Chat or *tg.Channel — or nil when the response does not carry it.
+// *tg.User, *tg.Chat or *tg.Channel — or nil when the response does not carry
+// it.
 func resolvedEntity(r *tg.ContactsResolvedPeer) any {
 	switch p := r.Peer.(type) {
 	case *tg.PeerUser:

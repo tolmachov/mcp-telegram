@@ -27,12 +27,14 @@ type ForumTopic struct {
 	Date         time.Time `json:"date"`
 }
 
-// ForumTopicsOffset is the (offset_topic, offset_id, offset_date) tuple
-// Telegram's getForumTopics needs to resume from the last topic of a page. The
-// three components are only meaningful together, so they are bundled into one
-// value — a nil *ForumTopicsOffset means "no more pages", which makes a
-// half-built or all-zero offset unrepresentable. Mirrors the nil-when-done
-// shape of GlobalSearchResult.NextCursor.
+// ForumTopicsOffset is where the next page of getForumTopics starts: the
+// (offset_topic, offset_id, offset_date) tuple Telegram needs to resume after
+// the last live topic of a page, and Seen, how many raw topics the listing
+// has consumed through that topic, which tells when the listing reaches
+// Telegram's total. The components are only meaningful together, so they are
+// bundled into one value — a nil *ForumTopicsOffset means "no more pages",
+// which makes a half-built or all-zero offset unrepresentable. Mirrors the
+// nil-when-done shape of GlobalSearchResult.NextCursor.
 type ForumTopicsOffset struct {
 	Topic int
 	ID    int
@@ -52,8 +54,8 @@ type ForumTopicsResult struct {
 
 // FetchForumTopics lists the topics of a forum supergroup via
 // messages.getForumTopics. query filters by topic title (empty = all topics).
-// Pass zero offsets for the first page; for subsequent pages pass the
-// NextOffset* values from the previous result.
+// Pass zero offsets and seen for the first page; for subsequent pages pass the
+// fields of the previous result's NextOffset.
 //
 // Telegram only accepts this call for forum-enabled supergroups; for any other
 // peer it returns an error, which is propagated to the caller.
@@ -104,9 +106,9 @@ func (p *Provider) fetchForumTopicsWithPeer(ctx context.Context, peer tg.InputPe
 }
 
 // buildForumTopicsResult converts a messages.getForumTopics response into a
-// paginated ForumTopicsResult. Split out from FetchForumTopics so the parsing,
-// HasMore computation, and next-offset derivation are testable without a live
-// client (mirroring processHistory).
+// paginated ForumTopicsResult, given seen, the raw topics consumed before this
+// page. Split out from fetchForumTopicsWithPeer so the parsing and next-offset
+// derivation are testable without a live client.
 func buildForumTopicsResult(resp *tg.MessagesForumTopics, seen int) (*ForumTopicsResult, error) {
 	// Index related messages by ID so we can recover each topic's
 	// top-message date for the pagination cursor.

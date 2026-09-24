@@ -196,15 +196,16 @@ func (p *Provider) FetchContext(ctx context.Context, chatID int64, anchorID, bef
 
 func (p *Provider) fetchContextWithPeer(ctx context.Context, peer tg.InputPeerClass, anchorID, before, after int) (*FetchResult, error) {
 
-	// Standard Telethon-style context fetch:
-	//   offset_id = anchorID, add_offset = -after, limit = before+after+1
+	// Context fetch around the anchor:
+	//   offset_id = anchorID, add_offset = -(after+1), limit = before+after+1
 	//
-	// Telegram's messages.getHistory returns messages with ID < offset_id
-	// starting at (offset_id + add_offset). With add_offset = -after it
-	// shifts the window forward by `after` positions, so the returned slice
-	// contains at most `after` messages newer than the anchor, the anchor
-	// itself, and at most `before` messages older than the anchor — in
-	// reverse-chronological order, exactly the window we want.
+	// Telegram's messages.getHistory returns messages older than offset_id,
+	// shifted by add_offset positions. offset_id itself is excluded, so
+	// add_offset = -(after+1) shifts the window forward past the anchor and
+	// `after` newer messages: the returned slice holds at most `after`
+	// messages newer than the anchor, the anchor itself, and at most `before`
+	// messages older than it — in reverse-chronological order, exactly the
+	// window we want.
 	limit := before + after + 1
 	req := &tg.MessagesGetHistoryRequest{
 		Peer:      peer,
@@ -623,7 +624,7 @@ func extractReactions(r tg.MessageReactions) []ReactionInfo {
 }
 
 // extractReplies converts Telegram's MessageReplies into the compact
-// RepliesInfo. Comments reports whether this is a channel-post comment section
+// RepliesInfo. IsComments reports whether this is a channel-post comment section
 // (true) or a plain group/topic reply thread (false). ChannelID and MaxID are
 // optional flag fields, surfaced only when present.
 func extractReplies(r tg.MessageReplies) *RepliesInfo {
