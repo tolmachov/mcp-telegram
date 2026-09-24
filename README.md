@@ -341,7 +341,7 @@ resolve as CLI flags → process environment → defaults. The binary never read
 | `MCP_TELEGRAM_MEDIA_MAX_BYTES` | Max bytes `GetMedia` downloads; `0` or less removes the cap | `52428800` |
 | `MCP_TELEGRAM_RATE_LIMIT_RPS` | Telegram history RPS ceiling (must be positive) | `1` |
 | `MCP_TELEGRAM_PINNED_REFRESH_SECONDS` | Pinned resource polling interval; `0` disables the watcher | `30` |
-| `MCP_TELEGRAM_FLOOD_WAIT_MAX_SECONDS` | Maximum handled `FLOOD_WAIT` (must be positive) | `60` |
+| `MCP_TELEGRAM_FLOOD_WAIT_MAX_SECONDS` | Maximum seconds one call waits in all on `FLOOD_WAIT`s before failing with a retry-after error (must be positive) | `60` |
 | `MCP_VARIANT` | Pin `full`, `compact`, or `research`; empty enables negotiation | empty |
 | `MCP_TRANSPORT` | MCP transport: `stdio` or `http` (streamable HTTP) | `stdio` |
 | `MCP_HTTP_ADDR` | Explicit listen address for HTTP; when unset on Cloud Run, the server binds to injected `:$PORT` | `127.0.0.1:8080` |

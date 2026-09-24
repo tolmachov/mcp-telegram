@@ -11,16 +11,12 @@ import (
 	"github.com/gotd/td/tgerr"
 )
 
-// floodWaitRetries is how many waits one call sits out before the next wait
-// it is told to take is returned as its error.
-const floodWaitRetries = 5
-
-// FloodWaitCallback is invoked when Telegram tells a call to wait and the call
-// has waits left, with how long it was told to wait: the call sleeps that long
-// and retries when the wait is within the client's FloodWaitMaxWait, and
-// returns Telegram's error otherwise. Use it to surface throttling to the MCP
-// client (via mcpLog at warning level) so users understand why a tool is slow.
-type FloodWaitCallback func(ctx context.Context, duration time.Duration)
+// FloodWaitCallback is invoked each time Telegram tells a call to wait (see
+// RetryAfter), with how long, and whether the call waits it out and retries —
+// it does while the waits it takes add up to no more than the client's
+// FloodWaitMaxWait — or gives up and returns Telegram's error. Use it to
+// surface throttling so users understand why a tool is slow or failed.
+type FloodWaitCallback func(ctx context.Context, wait time.Duration, retrying bool)
 
 // floodWait is the middleware that waits out the waits Telegram tells a call
 // to take, inside that call: each call sleeps on its own and retries, so a
@@ -29,46 +25,48 @@ type FloodWaitCallback func(ctx context.Context, duration time.Duration)
 // session's authorisation to the DC a FILE_MIGRATE names, for one — so a
 // middleware that sends calls one at a time deadlocks on them.
 //
-// A wait longer than maxWait, or one past the call's floodWaitRetries, is
+// maxWait is what one call may wait in all, so that it returns within the
+// MCP client's tool-call timeout: a wait that would take the call past it is
 // returned at once, wrapping Telegram's error so tools can render its
-// retry-after. onWait, if non-nil, is told of every wait the call does not
-// give up on for its retries (see FloodWaitCallback).
+// retry-after. A call whose context ends while it waits returns both. onWait,
+// if non-nil, is told of every wait, the ones the call gives up on included.
 func floodWait(maxWait time.Duration, onWait FloodWaitCallback) telegram.Middleware {
 	return telegram.MiddlewareFunc(func(next tg.Invoker) telegram.InvokeFunc {
 		return func(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
-			for waited := 0; ; waited++ {
+			var waited time.Duration
+			for {
 				err := next.Invoke(ctx, input, output)
-				wait, ok := floodWaitOf(err)
-				switch {
-				case !ok:
+				wait, ok := RetryAfter(err)
+				if !ok {
 					return err //nolint:wrapcheck // a middleware passes Telegram's reply through unchanged.
-				case waited == floodWaitRetries:
-					return fmt.Errorf("giving up after waiting out %d flood waits: %w", waited, err)
 				}
+				retrying := waited+wait <= maxWait
 				if onWait != nil {
-					onWait(ctx, wait)
+					onWait(ctx, wait, retrying)
 				}
-				if wait > maxWait {
-					return fmt.Errorf("flood wait of %s exceeds the %s the client waits out: %w", wait, maxWait, err)
+				if !retrying {
+					return fmt.Errorf("telegram asked for a wait of %s, which with the %s already waited passes the %s a call waits out: %w", wait, waited, maxWait, err)
 				}
 				timer := time.NewTimer(wait)
 				select {
 				case <-timer.C:
+					waited += wait
 				case <-ctx.Done():
 					timer.Stop()
-					return fmt.Errorf("waiting out a flood wait of %s: %w", wait, ctx.Err())
+					return fmt.Errorf("%w while waiting out the %s Telegram asked for (%w)", ctx.Err(), wait, err)
 				}
 			}
 		}
 	})
 }
 
-// floodWaitOf reports how long err tells its call to wait before retrying, and
-// whether it is such an error at all. The set follows TDLib's NetQueryDelayer
-// (as gotd/contrib's floodwait does): the 420 waits that carry their length,
-// and two errors that carry none and are retried after the one-second minimum
-// every wait is raised to — a FLOOD_WAIT_0 included.
-func floodWaitOf(err error) (time.Duration, bool) {
+// RetryAfter reports how long err tells its call to wait before retrying — at
+// least a second — and whether it is such an error at all, wrapped or not.
+// The set follows TDLib's NetQueryDelayer (as gotd/contrib's floodwait does):
+// the 420 waits that carry their length, a FLOOD_WAIT_0 raised to the
+// one-second minimum, and two errors that carry none and are retried after
+// that minimum.
+func RetryAfter(err error) (time.Duration, bool) {
 	rpcErr, ok := tgerr.As(err)
 	if !ok {
 		return 0, false

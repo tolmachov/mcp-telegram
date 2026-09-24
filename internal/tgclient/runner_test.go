@@ -506,7 +506,7 @@ func TestStartClientWatchesRefusalsInsideFloodWait(t *testing.T) {
 	// gotd resends a request the DC has not answered within a few seconds,
 	// so every copy of the check is held the same way.
 	held := answerErrOnRelease(tgerr.New(401, "SESSION_REVOKED"), asked, release)
-	r, err := startOnCluster(t, func(context.Context, time.Duration) { waits.Add(1) }, func(c *cluster.Cluster) {
+	r, err := startOnCluster(t, func(context.Context, time.Duration, bool) { waits.Add(1) }, func(c *cluster.Cluster) {
 		c.Dispatch(homeDC, "home").
 			HandleFunc(tg.UsersGetUsersRequestTypeID, scripted(answerSelf, held, held, held, held)).
 			HandleFunc(tg.UploadGetFileRequestTypeID, scripted(answerErr(tgerr.New(420, "FLOOD_WAIT_0")), answerErr(tgerr.New(401, "AUTH_KEY_UNREGISTERED")), answerFile))

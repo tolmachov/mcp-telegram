@@ -3,6 +3,7 @@ package tgclient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -31,10 +32,18 @@ func (s *floodScript) Invoke(context.Context, bin.Encoder, bin.Decoder) error {
 	return nil
 }
 
-// waitLog records the waits a flood-wait middleware reports.
-type waitLog struct{ waits []time.Duration }
+// waitEvent is one wait a flood-wait middleware reports.
+type waitEvent struct {
+	wait     time.Duration
+	retrying bool
+}
 
-func (l *waitLog) record(_ context.Context, d time.Duration) { l.waits = append(l.waits, d) }
+// waitLog records the waits a flood-wait middleware reports.
+type waitLog struct{ events []waitEvent }
+
+func (l *waitLog) record(_ context.Context, wait time.Duration, retrying bool) {
+	l.events = append(l.events, waitEvent{wait, retrying})
+}
 
 // ping makes one call through invoker.
 func ping(ctx context.Context, invoker tg.Invoker) error {
@@ -50,7 +59,7 @@ func TestFloodWaitSleepsAndRetries(t *testing.T) {
 
 		require.NoError(t, ping(t.Context(), floodWait(time.Minute, log.record).Handle(script)))
 		assert.Equal(t, int32(3), script.tries.Load(), "the call is retried after each wait")
-		assert.Equal(t, []time.Duration{3 * time.Second, time.Second}, log.waits, "a FLOOD_WAIT_0 waits the one-second minimum")
+		assert.Equal(t, []waitEvent{{3 * time.Second, true}, {time.Second, true}}, log.events, "a FLOOD_WAIT_0 waits the one-second minimum")
 		assert.Equal(t, 4*time.Second, time.Since(start), "the call sleeps each wait out")
 	})
 }
@@ -65,31 +74,37 @@ func TestFloodWaitReturnsAWaitPastTheMaximumAtOnce(t *testing.T) {
 		d, ok := tgerr.AsFloodWait(err)
 		require.True(t, ok, "Telegram's error survives for the tools' retry-after: %v", err)
 		assert.Equal(t, 265*time.Second, d)
-		assert.Equal(t, []time.Duration{265 * time.Second}, log.waits, "the callback hears of the wait it fails fast on")
+		assert.Equal(t, []waitEvent{{265 * time.Second, false}}, log.events, "the callback hears of the wait it fails fast on")
 		assert.Equal(t, int32(1), script.tries.Load(), "the call is not retried")
 		assert.Zero(t, time.Since(start), "the call does not sleep")
 	})
 }
 
-func TestFloodWaitGivesUpAfterItsRetries(t *testing.T) {
+// TestFloodWaitCapsTheTotalWaitOfACall pins that maxWait bounds what one call
+// waits in all, not each wait: the waits that fit are slept out, and the one
+// that would take the call past maxWait is returned at once and reported as
+// given up on.
+func TestFloodWaitCapsTheTotalWaitOfACall(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		flood := tgerr.New(420, "FLOOD_WAIT_1")
-		script := &floodScript{}
-		for range floodWaitRetries + 1 {
-			script.errs = append(script.errs, flood)
-		}
+		busy := tgerr.New(500, "WORKER_BUSY_TOO_LONG_RETRY")
+		script := &floodScript{errs: []error{tgerr.New(420, "FLOOD_WAIT_30"), tgerr.New(420, "FLOOD_WAIT_30"), busy}}
 		var log waitLog
+		start := time.Now()
 
 		err := ping(t.Context(), floodWait(time.Minute, log.record).Handle(script))
-		require.ErrorIs(t, err, flood)
-		assert.Equal(t, int32(floodWaitRetries+1), script.tries.Load())
-		assert.Len(t, log.waits, floodWaitRetries, "the callback hears only of the waits the call sleeps out")
+		require.ErrorIs(t, err, busy, "Telegram's error survives for the tools' retry-after")
+		assert.ErrorContains(t, err, "with the 1m0s already waited passes the 1m0s a call waits out")
+		assert.Equal(t, int32(3), script.tries.Load())
+		assert.Equal(t, []waitEvent{{30 * time.Second, true}, {30 * time.Second, true}, {time.Second, false}}, log.events,
+			"the callback hears of the wait the call gives up on too")
+		assert.Equal(t, time.Minute, time.Since(start), "the call waits no more than maxWait in all")
 	})
 }
 
 func TestFloodWaitStopsSleepingWhenTheCallIsCancelled(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		script := &floodScript{errs: []error{tgerr.New(420, "FLOOD_WAIT_30")}}
+		flood := tgerr.New(420, "FLOOD_WAIT_30")
+		script := &floodScript{errs: []error{flood}}
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan error, 1)
 		start := time.Now()
@@ -99,6 +114,7 @@ func TestFloodWaitStopsSleepingWhenTheCallIsCancelled(t *testing.T) {
 		cancel()
 		err := <-done
 		require.ErrorIs(t, err, context.Canceled)
+		require.ErrorIs(t, err, flood, "Telegram's error survives for the tools' retry-after")
 		assert.Zero(t, time.Since(start), "the call returns without sleeping the wait out")
 		assert.Equal(t, int32(1), script.tries.Load())
 	})
@@ -132,7 +148,7 @@ func TestFloodWaitHoldsUpNoOtherCall(t *testing.T) {
 	})
 }
 
-func TestFloodWaitOfRecognisesTelegramsWaits(t *testing.T) {
+func TestRetryAfterRecognisesTelegramsWaits(t *testing.T) {
 	waits := map[*tgerr.Error]time.Duration{
 		tgerr.New(420, "FLOOD_WAIT_7"):               7 * time.Second,
 		tgerr.New(420, "FLOOD_PREMIUM_WAIT_5"):       5 * time.Second,
@@ -146,7 +162,7 @@ func TestFloodWaitOfRecognisesTelegramsWaits(t *testing.T) {
 		tgerr.New(420, "FLOOD_WAIT_2147483647"):      2147483647 * time.Second,
 	}
 	for rpcErr, want := range waits {
-		d, ok := floodWaitOf(rpcErr)
+		d, ok := RetryAfter(fmt.Errorf("wrapped: %w", rpcErr))
 		assert.True(t, ok, rpcErr.Message)
 		assert.Equal(t, want, d, rpcErr.Message)
 	}
@@ -158,7 +174,7 @@ func TestFloodWaitOfRecognisesTelegramsWaits(t *testing.T) {
 		tgerr.New(420, "SOMETHING_NEW_5"),
 		tgerr.New(500, "INTERNAL_SERVER_ERROR"),
 	} {
-		_, ok := floodWaitOf(err)
+		_, ok := RetryAfter(err)
 		assert.False(t, ok, "%v", err)
 	}
 }

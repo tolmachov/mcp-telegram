@@ -284,26 +284,26 @@ func (s *Server) serveAssembly(ctx context.Context, client telegramClient) error
 	return nil
 }
 
-// floodWaitLogger surfaces flood waits to the logs in a way that makes the
-// absorbed-vs-surfaced decision visible: waits under the configured max are
-// slept out and retried; longer ones fail fast rather than blocking past the
-// MCP client's tool-call timeout. Every tool then renders that failure as a
-// retry-after error (via tools.floodWaitMessage).
+// floodWaitLogger logs each wait Telegram tells a call to take, and whether
+// the call waits it out and retries or gives up: a call waits no more than
+// the configured max in all, so that it fails before the MCP client's
+// tool-call timeout instead of hanging into it, and every tool then renders
+// the wait it gave up on as a retry-after error (via tools.floodWaitMessage).
 func (s *Server) floodWaitLogger() tgclient.FloodWaitCallback {
 	floodMaxWait := s.opts.Config.FloodWaitMaxWait
-	return func(_ context.Context, d time.Duration) {
-		if d > floodMaxWait {
-			s.logger.Warn("telegram flood-wait exceeds max; failing fast",
-				"wait_seconds", d.Seconds(),
+	return func(_ context.Context, wait time.Duration, retrying bool) {
+		if retrying {
+			s.logger.Warn("telegram told a call to wait; waiting it out",
+				"wait_seconds", wait.Seconds(),
 				"max_wait_seconds", floodMaxWait.Seconds(),
-				"reason", "Telegram rate limit longer than the configured auto-wait; the call fails fast (the tool renders a retry-after error) instead of blocking past the client timeout",
+				"reason", "Telegram rate limit; the call retries automatically after the wait",
 			)
 			return
 		}
-		s.logger.Warn("telegram flood-wait; waiting it out",
-			"wait_seconds", d.Seconds(),
+		s.logger.Warn("telegram told a call to wait longer than it may; failing fast",
+			"wait_seconds", wait.Seconds(),
 			"max_wait_seconds", floodMaxWait.Seconds(),
-			"reason", "Telegram rate limit; the request will retry automatically after the wait",
+			"reason", "the call's waits would add up past the configured max; the call fails fast with a retry-after error instead of blocking past the client timeout",
 		)
 	}
 }
