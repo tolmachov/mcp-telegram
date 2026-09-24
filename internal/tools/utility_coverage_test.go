@@ -194,6 +194,33 @@ func TestChatsHandlersServeSeededSnapshot(t *testing.T) {
 	assert.Contains(t, found.Warning, "incomplete")
 }
 
+// TestGetMessagesWarnsWhenScheduledFetchFails verifies a failed
+// include_scheduled sub-fetch keeps the regular history and warns that the
+// empty scheduled list says nothing.
+func TestGetMessagesWarnsWhenScheduledFetchFails(t *testing.T) {
+	const channelID = int64(66)
+	inv := telegramfake.New(
+		telegramfake.NotUser(t, channelID),
+		telegramfake.Channel(t, channelID, 166),
+		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
+			out.Messages = &tg.MessagesMessages{Messages: []tg.MessageClass{&tg.Message{ID: 1, Date: 100, Message: "hi"}}}
+			return nil
+		}),
+		telegramfake.Typed(func(context.Context, *tg.MessagesGetScheduledHistoryRequest, *tg.MessagesMessagesBox) error {
+			return errors.New("boom")
+		}),
+	)
+	h := NewMessagesGetHandler(messages.NewProvider(tgclient.NewResolver(t.Context(), tg.NewClient(inv)), 100_000))
+
+	errRes, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, GetMessagesInput{ChatID: channelID, IncludeScheduled: true})
+	require.NoError(t, err)
+	require.Nil(t, errRes)
+	require.Len(t, out.Messages, 1)
+	assert.Empty(t, out.ScheduledMessages)
+	assert.Equal(t, "The scheduled messages could not be fetched, so scheduled_messages says nothing about them: getting scheduled messages: boom.", out.Warning)
+	assert.Zero(t, inv.Remaining())
+}
+
 func TestBackupMessagesWritesAtomicallyInsideConfiguredPath(t *testing.T) {
 	const channelID = int64(61)
 	dir := t.TempDir()

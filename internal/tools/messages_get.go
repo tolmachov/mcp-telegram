@@ -40,14 +40,16 @@ type GetMessagesInput struct {
 // ScheduledMessages field keeps regular-message pagination semantics intact
 // while still letting a single tool call surface the full chat picture.
 type getMessagesOutput struct {
-	ChatID              int64                  `json:"chat_id"`
-	Messages            []presentation.Message `json:"messages"`
-	ScheduledMessages   []presentation.Message `json:"scheduled_messages,omitempty"`
-	Count               int                    `json:"count"`
-	HasMore             bool                   `json:"has_more"`
-	NextCursor          string                 `json:"next_cursor,omitempty"`
-	PaginationHint      string                 `json:"pagination_hint,omitempty"`
-	ScheduledFetchError string                 `json:"scheduled_fetch_error,omitempty"` // non-empty when include_scheduled fetch failed
+	ChatID            int64                  `json:"chat_id"`
+	Messages          []presentation.Message `json:"messages"`
+	ScheduledMessages []presentation.Message `json:"scheduled_messages,omitempty"`
+	Count             int                    `json:"count"`
+	HasMore           bool                   `json:"has_more"`
+	NextCursor        string                 `json:"next_cursor,omitempty"`
+	PaginationHint    string                 `json:"pagination_hint,omitempty"`
+	// The warning is set when include_scheduled could not fetch the
+	// scheduled messages.
+	partialOutcome
 }
 
 // Register adds the tool to the MCP server.
@@ -115,8 +117,8 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	out.NextCursor, out.PaginationHint = pageCursorResult(result, state, "GetMessages", "messages")
 
 	// Optionally fetch scheduled messages. A failure in the scheduled sub-fetch
-	// should not fail the whole tool — log a warning and continue with an
-	// empty list so the caller still gets the regular history.
+	// should not fail the whole tool: the caller still gets the regular
+	// history, with a warning that the scheduled list is missing.
 	if in.IncludeScheduled {
 		// Always initialise as a non-nil empty slice so JSON emits "[]" rather
 		// than omitting the field — clients/LLMs then see an unambiguous
@@ -124,15 +126,9 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		out.ScheduledMessages = make([]presentation.Message, 0)
 		scheduled, err := h.provider.FetchScheduled(ctx, in.ChatID)
 		if err != nil {
-			// Log and surface the error so the LLM knows the scheduled list may
-			// be incomplete — an empty slice alone is indistinguishable from
-			// "no pending scheduled messages".
-			mcpLog(ctx, req.Session, logLevelWarning, "GetMessages", map[string]any{
-				"action":  "include_scheduled_fetch_failed",
-				"chat_id": in.ChatID,
-				"error":   err.Error(),
-			})
-			out.ScheduledFetchError = fmt.Sprintf("scheduled messages unavailable: %v", err)
+			// An empty slice alone is indistinguishable from "no pending
+			// scheduled messages", so the warning says it is not that.
+			out.warnCause("GetMessages", "The scheduled messages could not be fetched, so scheduled_messages says nothing about them:", err, "")
 		} else {
 			out.ScheduledMessages = presentation.FromMessages(scheduled.Messages, true)
 		}
