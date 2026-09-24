@@ -447,10 +447,12 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 //
 // The note reaches the model whatever the failure, the hint only when the
 // failure is not systemic (see failureText). A timeout is systemic, yet a
-// smaller request can avoid it, so its retry advice goes in the note.
+// smaller request can avoid it, so its retry advice goes in the note — unless
+// it struck while the call waited out a wait Telegram told it to take: then
+// the wait is the cause, and the failure says how long it still asks for.
 func partialBackupFailure(op string, err error, count int, path string) error {
 	saved := fmt.Sprintf("a partial file with %d messages was saved to %s.", count, path)
-	if errors.Is(err, context.DeadlineExceeded) {
+	if _, told := tgclient.RetryAfter(err); errors.Is(err, context.DeadlineExceeded) && !told {
 		return failed(op, withNote(err, "The backup timed out; "+saved+
 			" Retry with a narrower date window or a smaller limit, or resume from the last saved message."))
 	}

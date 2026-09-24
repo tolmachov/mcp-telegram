@@ -34,19 +34,28 @@ func isSessionRefusal(err error) bool {
 }
 
 // IsSystemic reports whether err is a condition of the whole account or call —
-// a dead session (ErrSessionUnauthorized), a flood wait, or a
-// cancelled/expired context — rather than a problem with the one target a
-// request named. Batch callers abort on it instead of recording a per-item
-// failure: carrying on would hammer a rate limit or a dead session.
+// a dead session (ErrSessionUnauthorized), a wait Telegram told the call to
+// take (RetryAfter) other than one chat's slow mode, or a cancelled/expired
+// context — rather than a problem with the one target a request named. Batch
+// callers abort on it instead of recording a per-item failure: carrying on
+// would hammer a rate limit or a dead session.
 func IsSystemic(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
-	if _, ok := tgerr.AsFloodWait(err); ok {
+	if _, ok := RetryAfter(err); ok && !IsSlowMode(err) {
 		return true
 	}
 	return errors.Is(err, ErrSessionUnauthorized)
 }
+
+// errSlowModeWait is the type of the wait a chat in slow mode tells a call
+// to take before it sends there again: a condition of that chat alone.
+const errSlowModeWait = "SLOWMODE_WAIT"
+
+// IsSlowMode reports whether err is the wait a chat in slow mode tells a call
+// to take before it sends there again.
+func IsSlowMode(err error) bool { return tgerr.Is(err, errSlowModeWait) }
 
 // ShouldRefreshPeer identifies stale-access-hash errors for which a caller may
 // invalidate and perform exactly one fresh resolve/RPC attempt.

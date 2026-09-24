@@ -73,7 +73,7 @@ func RetryAfter(err error) (time.Duration, bool) {
 	}
 	switch {
 	case rpcErr.Code == 420 && rpcErr.IsOneOf(tgerr.ErrFloodWait, tgerr.ErrPremiumFloodWait,
-		"SLOWMODE_WAIT", "2FA_CONFIRM_WAIT", "TAKEOUT_INIT_DELAY", "FLOOD_TEST_PHONE_WAIT"):
+		errSlowModeWait, "2FA_CONFIRM_WAIT", "TAKEOUT_INIT_DELAY", "FLOOD_TEST_PHONE_WAIT"):
 		return time.Duration(max(rpcErr.Argument, 1)) * time.Second, true
 	case rpcErr.Code == 420 && rpcErr.IsType("FLOOD_SKIP_FAILED_WAIT"),
 		rpcErr.Code == 500 && rpcErr.IsType("WORKER_BUSY_TOO_LONG_RETRY"):

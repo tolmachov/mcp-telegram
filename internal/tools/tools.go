@@ -276,7 +276,7 @@ const peerHint = "The chat may not exist, you may not have access, or the ID may
 // it under the tool's name.
 func toolFailure(ctx context.Context, req *mcp.CallToolRequest, tool string, err error) error {
 	level := logLevelError
-	if _, ok := tgerr.AsFloodWait(err); ok {
+	if _, ok := tgclient.RetryAfter(err); ok {
 		level = logLevelWarning
 	}
 	mcpLog(ctx, req.Session, level, tool, map[string]any{"error": err.Error()})
@@ -319,21 +319,21 @@ func failureText(tool string, err error) string {
 // failure (failureText) or as the warning of a batch the error cut short: it
 // returns what happened and the hint to follow it, given hint, the one the
 // failure carries. A refusal by a DC other than the home one gets what it
-// means for the session instead of any hint. A systemic error gets no hint: a
-// flood wait gets its fixed guidance as what happened, and a dead session is
-// explained by the server, not here, because how to recover it depends on
-// the transport — the client stops on it, and the server appends its
-// explanation to the call the client stopped under and answers every later
-// one with it. Anything else shows the error itself, followed by hint or,
-// lacking one, the peer hint when the error is about the chat the call named.
+// means for the session instead of any hint. A wait Telegram told the call to
+// take gets its fixed guidance as what happened, and no hint. Any other
+// systemic error gets no hint either: a dead session is explained by the
+// server, not here, because how to recover it depends on the transport — the
+// client stops on it, and the server appends its explanation to the call the
+// client stopped under and answers every later one with it. Anything else
+// shows the error itself, followed by hint or, lacking one, the peer hint
+// when the error is about the chat the call named.
 func describe(tool string, cause error, hint string) (what, next string) {
-	switch {
+	switch flood, isWait := floodWaitMessage(tool, cause); {
 	case errors.Is(cause, tgclient.ErrSecondaryRefusal):
 		return sentence(cause), secondaryRefusalHint
+	case isWait:
+		return flood, ""
 	case tgclient.IsSystemic(cause):
-		if flood, ok := floodWaitMessage(tool, cause); ok {
-			return flood, ""
-		}
 		return sentence(cause), ""
 	case hint == "" && tgclient.IsPeerSpecific(cause):
 		return sentence(cause), peerHint
@@ -469,27 +469,38 @@ func firstMessageInUpdates(updates tg.UpdatesClass, typeIDs ...uint32) (int, int
 	return 0, 0
 }
 
-// floodWaitMessage returns the deterministic retry-after guidance for a
-// Telegram FLOOD_WAIT — including the form the flood-wait middleware wraps
-// when the wait exceeds its configured max (tgerr.AsFloodWait unwraps the
-// chain) — or ok=false when err is not a flood wait. describe renders it
-// both for every tool's failure and for batch handlers (e.g. MarkAsRead) that
-// embed it in an aggregated result instead.
+// floodWaitMessage returns the deterministic retry-after guidance for a wait
+// Telegram told a call to take (tgclient.RetryAfter) — including the forms the
+// flood-wait middleware wraps when the call would wait past its maximum or
+// its context ends while it waits — or ok=false when err is no such wait.
+// describe renders it both for every tool's failure and for batch handlers
+// (e.g. MarkAsRead) that embed it in an aggregated result instead.
 //
-// FLOOD_WAIT here is an account-level limit (cumulative actions over a window,
+// A FLOOD_WAIT is an account-level limit (cumulative actions over a window,
 // not request rate), so a local rate limiter cannot prevent it — the only
 // remedy is to wait the reported duration and space the calls out, which the
-// message states so the model stops retry-spamming.
+// message states so the model stops retry-spamming. Slow mode is one chat's
+// limit on sending, and the other waits are Telegram's own, so they say only
+// how long to wait.
 func floodWaitMessage(tool string, err error) (string, bool) {
-	d, ok := tgerr.AsFloodWait(err)
+	d, ok := tgclient.RetryAfter(err)
 	if !ok {
 		return "", false
 	}
 	d = d.Round(time.Second)
-	return fmt.Sprintf(
-		"Telegram rate-limited this %s call: wait %s (%d seconds) before retrying. This is an account-level flood limit (cumulative actions, not request rate), so spacing out %s calls is the only way to avoid it — do not retry immediately.",
-		tool, d, int(d/time.Second), tool,
-	), true
+	wait := fmt.Sprintf("%s (%d seconds)", d, int(d/time.Second))
+	switch {
+	case tgclient.IsSlowMode(err):
+		return fmt.Sprintf("This chat is in slow mode: wait %s before sending to it again.", wait), true
+	case tgerr.Is(err, tgerr.ErrFloodWait, tgerr.ErrPremiumFloodWait, "FLOOD_TEST_PHONE_WAIT", "FLOOD_SKIP_FAILED_WAIT"):
+		return fmt.Sprintf(
+			"Telegram rate-limited this %s call: wait %s before retrying. This is an account-level flood limit (cumulative actions, not request rate), so spacing out %s calls is the only way to avoid it — do not retry immediately.",
+			tool, wait, tool,
+		), true
+	default:
+		rpcErr, _ := tgerr.As(err)
+		return fmt.Sprintf("Telegram told this %s call to wait %s before retrying (%s): do not retry sooner.", tool, wait, rpcErr.Type), true
+	}
 }
 
 // requireExplicitConfirmation is the sole authority gate for irreversible

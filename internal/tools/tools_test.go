@@ -41,8 +41,28 @@ func TestFailureText(t *testing.T) {
 	// The client's flood-wait middleware wraps the original error when the
 	// wait exceeds its max, so detection must unwrap.
 	t.Run("wrapped by the flood-wait middleware (too long)", func(t *testing.T) {
-		wrapped := fmt.Errorf("flood wait of 4m25s exceeds the 1m0s the client waits out: %w", flood)
+		wrapped := fmt.Errorf("telegram asked for a wait of 4m25s, which with the 0s already waited passes the 1m0s a call waits out: %w", flood)
 		assert.Contains(t, failureText("JoinChat", failed("join", wrapped)), "265 seconds")
+	})
+
+	// Every wait the flood-wait middleware takes is rendered as one, in
+	// words that fit its kind and never as a wait of nothing.
+	t.Run("every kind of wait", func(t *testing.T) {
+		for rpcErr, want := range map[*tgerr.Error]string{
+			tgerr.New(420, "FLOOD_WAIT_0"):               "Failed to join: Telegram rate-limited this JoinChat call: wait 1s (1 seconds) before retrying. This is an account-level flood limit",
+			tgerr.New(420, "FLOOD_PREMIUM_WAIT_5"):       "Failed to join: Telegram rate-limited this JoinChat call: wait 5s (5 seconds)",
+			tgerr.New(420, "SLOWMODE_WAIT_10"):           "Failed to join: This chat is in slow mode: wait 10s (10 seconds) before sending to it again.",
+			tgerr.New(500, "WORKER_BUSY_TOO_LONG_RETRY"): "Failed to join: Telegram told this JoinChat call to wait 1s (1 seconds) before retrying (WORKER_BUSY_TOO_LONG_RETRY): do not retry sooner.",
+			tgerr.New(420, "TAKEOUT_INIT_DELAY_3600"):    "Failed to join: Telegram told this JoinChat call to wait 1h0m0s (3600 seconds) before retrying (TAKEOUT_INIT_DELAY): do not retry sooner.",
+		} {
+			txt := failureText("JoinChat", failed("join", fmt.Errorf("joining: %w", rpcErr)))
+			assert.True(t, strings.HasPrefix(txt, want), txt)
+		}
+	})
+
+	t.Run("a call whose context ended while it waited", func(t *testing.T) {
+		ended := fmt.Errorf("%w while waiting out the 4m25s Telegram asked for (%w)", context.DeadlineExceeded, flood)
+		assert.True(t, strings.HasPrefix(failureText("JoinChat", failed("join", ended)), "Failed to join: Telegram rate-limited this JoinChat call: wait 4m25s (265 seconds)"))
 	})
 
 	// The server appends the transport's explanation of a dead session (see
