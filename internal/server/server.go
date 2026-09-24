@@ -497,8 +497,9 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 // A call arriving afterwards never reaches Telegram and is answered with
 // clientDownText alone. A call the client stopped under keeps its own outcome
 // — the real cause and any note, such as the partial file a backup saved, or
-// the chats a batch still marked as read — with clientDownText appended,
-// whether it failed or returned what it managed before the stop.
+// the chats a batch still marked as read — with clientDownText appended: for
+// a call that failed, as for one that never ran; for a tool call that
+// completed, saying that its result stands, so the model does not repeat it.
 //
 // Completion is left out on purpose: its suggestions go to the user's input
 // box, not to the model, and it answers an empty list on any failure by
@@ -512,11 +513,11 @@ func (s *Server) clientDownMiddleware(client telegramClient) mcp.Middleware {
 				return next(ctx, method, req)
 			}
 			if down := client.Err(); down != nil {
-				return clientDownResult(method, s.clientDownText(down))
+				return clientDownResult(method, s.clientDownText(down, false))
 			}
 			res, err := next(ctx, method, req)
 			if down := client.Err(); down != nil {
-				return withClientDown(res, err, s.clientDownText(down))
+				return withClientDown(res, err, func(completed bool) string { return s.clientDownText(down, completed) })
 			}
 			return res, err
 		}
@@ -532,42 +533,51 @@ func clientDownResult(method, text string) (mcp.Result, error) {
 	return nil, errors.New(text)
 }
 
-// withClientDown appends text to the outcome of a call the client stopped
-// under: to the error of a failed call, or as a further text block of a tool
-// result, failed or not, leaving the handler's own result untouched. A
-// resource read that succeeded has no text to append to and is kept as it is:
-// what it read is still true.
-func withClientDown(res mcp.Result, err error, text string) (mcp.Result, error) {
+// withClientDown appends text, given whether the call completed, to the
+// outcome of a call the client stopped under: to the error of a failed call,
+// or as a further text block of a tool result, leaving the handler's own
+// result untouched. A tool result completed unless it is an error. A resource
+// read that succeeded has no text to append to and is kept as it is: what it
+// read is still true.
+func withClientDown(res mcp.Result, err error, text func(completed bool) string) (mcp.Result, error) {
 	if err != nil {
-		return res, fmt.Errorf("%w %s", err, text)
+		return res, fmt.Errorf("%w %s", err, text(false))
 	}
 	tr, ok := res.(*mcp.CallToolResult)
 	if !ok {
 		return res, nil
 	}
 	appended := *tr
-	appended.Content = append(slices.Clip(tr.Content), &mcp.TextContent{Text: text})
+	appended.Content = append(slices.Clip(tr.Content), &mcp.TextContent{Text: text(!tr.IsError)})
 	return &appended, nil
 }
 
 // clientDownText says why an assembly's Telegram client stopped and what
-// recovers it on this transport. Over HTTP the pool acts on the next request:
-// a refused session is deleted and the request answered 401, which sends the
-// MCP client back through the QR login, and any other stop is rebuilt. Over
-// stdio nothing restarts the client inside this process, so the fix involves
-// the host reconnecting the server.
-func (s *Server) clientDownText(err error) string {
+// recovers it on this transport, for a call that failed or never ran or, when
+// completed, for a call that completed before the stop. Over HTTP the pool
+// acts on the next request: a refused session is deleted and the request
+// answered 401, which sends the MCP client back through the QR login, and any
+// other stop is rebuilt. Over stdio nothing restarts the client inside this
+// process, so the fix involves the host reconnecting the server.
+func (s *Server) clientDownText(err error, completed bool) string {
 	refused := errors.Is(err, tgclient.ErrSessionUnauthorized)
+	var text string
 	switch {
 	case s.opts.Transport == TransportHTTP && refused:
-		return fmt.Sprintf("Telegram refused this account's session (%v): it was logged out, revoked or expired. The server has stopped using it, and the client's next request is answered with an authorisation error that sends it through the Telegram QR login again.", err)
+		text = fmt.Sprintf("Telegram refused this account's session (%v): it was logged out, revoked or expired. The server has stopped using it, and the client's next request is answered with an authorisation error that sends it through the Telegram QR login again.", err)
+	case s.opts.Transport == TransportHTTP && completed:
+		text = fmt.Sprintf("The Telegram connection for this account stopped (%v). The next request reconnects it.", err)
 	case s.opts.Transport == TransportHTTP:
-		return fmt.Sprintf("The Telegram connection for this account stopped (%v). Retry the call: the next request reconnects it.", err)
+		text = fmt.Sprintf("The Telegram connection for this account stopped (%v). Retry the call: the next request reconnects it.", err)
 	case refused:
-		return fmt.Sprintf("Telegram refused this server's session (%v), so every Telegram tool is unavailable until the session is replaced. %s", err, notLoggedInMessage)
+		text = fmt.Sprintf("Telegram refused this server's session (%v), so every Telegram tool is unavailable until the session is replaced. %s", err, notLoggedInMessage)
 	default:
-		return fmt.Sprintf("mcp-telegram's Telegram client stopped (%v), so every Telegram tool is unavailable until this MCP server is reconnected. If it stops again, the stored session may be corrupt: `mcp-telegram logout` followed by `mcp-telegram login` recovers it.", err)
+		text = fmt.Sprintf("mcp-telegram's Telegram client stopped (%v), so every Telegram tool is unavailable until this MCP server is reconnected. If it stops again, the stored session may be corrupt: `mcp-telegram logout` followed by `mcp-telegram login` recovers it.", err)
 	}
+	if completed {
+		return "This call completed before the Telegram connection stopped: what its result reports stands, so do not repeat it. " + text
+	}
+	return text
 }
 
 // pinnedWatchExitTimeout bounds how long Close waits for the pinned-chat

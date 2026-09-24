@@ -84,7 +84,7 @@ func TestClientDownExplainsADeadSessionOnce(t *testing.T) {
 			require.Len(t, res.Content, 2)
 			assert.Equal(t, "Failed to get current user: getting current user: telegram session is not authorized: rpc error code 401: SESSION_REVOKED.",
 				res.Content[0].(*mcp.TextContent).Text, "the tool renders only its failure")
-			assert.Equal(t, srv.clientDownText(dead), res.Content[1].(*mcp.TextContent).Text, "the server explains the dead session")
+			assert.Equal(t, srv.clientDownText(dead, false), res.Content[1].(*mcp.TextContent).Text, "the server explains the dead session")
 		})
 	}
 }

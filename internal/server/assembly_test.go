@@ -232,75 +232,88 @@ func TestStdioRefusedSessionEntersLoginRequiredState(t *testing.T) {
 
 // TestClientDownMiddlewareAnswersForAStoppedClient pins both halves of the
 // middleware: a call the client stopped under keeps its own outcome, failed
-// or not, with the transport's answer appended, and later calls never reach
-// the handler.
+// or not, with the transport's answer appended — the one for a completed
+// call when it succeeded — and later calls never reach the handler.
 func TestClientDownMiddlewareAnswersForAStoppedClient(t *testing.T) {
-	refused := fmt.Errorf("%w: %w", tgclient.ErrSessionUnauthorized, tgerr.New(401, "AUTH_KEY_UNREGISTERED"))
-	for _, transport := range []string{TransportStdio, TransportHTTP} {
-		srv := &Server{opts: Options{Transport: transport}}
-		want := srv.clientDownText(refused)
-		call := &mcp.CallToolRequest{}
-
-		// A backup that stopped part-way reports the file it saved; that
-		// outcome must survive the client going down under it.
-		const backupFailure = "Failed to back up chat 5: fetching batch 2: engine was closed. The 200 messages fetched before the failure were saved to /tmp/backup.json."
-		tgClient := newFakeClient()
-		failing := srv.clientDownMiddleware(tgClient)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
-			tgClient.stop(refused)
-			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: backupFailure}}}, nil
-		})
-		res, err := failing(t.Context(), methodCallTool, call)
-		require.NoError(t, err)
-		tr := res.(*mcp.CallToolResult)
-		assert.True(t, tr.IsError)
-		require.Len(t, tr.Content, 2, transport)
-		assert.Equal(t, backupFailure, tr.Content[0].(*mcp.TextContent).Text, "the call's own outcome is kept")
-		assert.Equal(t, want, tr.Content[1].(*mcp.TextContent).Text, transport)
-
-		tgClient = newFakeClient()
-		readErr := errors.New("reading telegram://me: telegram session is not authorized")
-		failingRead := srv.clientDownMiddleware(tgClient)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
-			tgClient.stop(refused)
-			return nil, readErr
-		})
-		_, err = failingRead(t.Context(), methodReadResource, &mcp.ReadResourceRequest{})
-		require.ErrorIs(t, err, readErr, "the read's own error is kept")
-		assert.ErrorContains(t, err, want)
-
-		// A batch the stop cut short returns what it managed, with a
-		// warning; the answer is appended to it too. The handler's own
-		// Content has room to grow, which the middleware must not write
-		// into.
-		tgClient = newFakeClient()
-		var backing [4]mcp.Content
-		backing[0] = &mcp.TextContent{Text: `{"successful":2,"warning":"context canceled."}`}
-		handlerContent := backing[:1]
-		cutShort := &mcp.CallToolResult{Content: handlerContent, StructuredContent: map[string]any{"successful": 2}}
-		racing := srv.clientDownMiddleware(tgClient)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
-			tgClient.stop(refused)
-			return cutShort, nil
-		})
-		res, err = racing(t.Context(), methodCallTool, call)
-		require.NoError(t, err)
-		tr = res.(*mcp.CallToolResult)
-		assert.False(t, tr.IsError, "a call that returned what it managed stays a success")
-		assert.Equal(t, cutShort.StructuredContent, tr.StructuredContent)
-		require.Len(t, tr.Content, 2, transport)
-		assert.Same(t, handlerContent[0], tr.Content[0], "the call's own outcome is kept")
-		assert.Equal(t, want, tr.Content[1].(*mcp.TextContent).Text, transport)
-		assert.Len(t, cutShort.Content, 1, "the handler's result is not changed")
-		assert.Nil(t, backing[1], "nor is its Content's spare capacity written")
-
-		unreachable := srv.clientDownMiddleware(tgClient)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
-			t.Fatal("a call after the client stopped must not reach the handler")
-			return nil, nil
-		})
-		res, err = unreachable(t.Context(), methodCallTool, call)
-		require.NoError(t, err)
-		tr = res.(*mcp.CallToolResult)
-		require.Len(t, tr.Content, 1, "a call that never ran has only the client-down answer")
-		assert.Equal(t, want, tr.Content[0].(*mcp.TextContent).Text, transport)
+	stops := map[string]error{
+		"refused": fmt.Errorf("%w: %w", tgclient.ErrSessionUnauthorized, tgerr.New(401, "AUTH_KEY_UNREGISTERED")),
+		"dropped": errors.New("telegram client stopped: key fingerprint not found"),
 	}
+	for _, transport := range []string{TransportStdio, TransportHTTP} {
+		for name, stop := range stops {
+			t.Run(transport+"/"+name, func(t *testing.T) { testClientDownAnswers(t, transport, stop) })
+		}
+	}
+}
+
+// testClientDownAnswers is one transport and stop reason of
+// TestClientDownMiddlewareAnswersForAStoppedClient.
+func testClientDownAnswers(t *testing.T, transport string, stop error) {
+	srv := &Server{opts: Options{Transport: transport}}
+	want := srv.clientDownText(stop, false)
+	call := &mcp.CallToolRequest{}
+
+	// A backup that stopped part-way reports the file it saved; that
+	// outcome must survive the client going down under it.
+	const backupFailure = "Failed to back up chat 5: fetching batch 2: engine was closed. The 200 messages fetched before the failure were saved to /tmp/backup.json."
+	tgClient := newFakeClient()
+	failing := srv.clientDownMiddleware(tgClient)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
+		tgClient.stop(stop)
+		return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: backupFailure}}}, nil
+	})
+	res, err := failing(t.Context(), methodCallTool, call)
+	require.NoError(t, err)
+	tr := res.(*mcp.CallToolResult)
+	assert.True(t, tr.IsError)
+	require.Len(t, tr.Content, 2, transport)
+	assert.Equal(t, backupFailure, tr.Content[0].(*mcp.TextContent).Text, "the call's own outcome is kept")
+	assert.Equal(t, want, tr.Content[1].(*mcp.TextContent).Text, transport)
+
+	tgClient = newFakeClient()
+	readErr := errors.New("reading telegram://me: telegram session is not authorized")
+	failingRead := srv.clientDownMiddleware(tgClient)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
+		tgClient.stop(stop)
+		return nil, readErr
+	})
+	_, err = failingRead(t.Context(), methodReadResource, &mcp.ReadResourceRequest{})
+	require.ErrorIs(t, err, readErr, "the read's own error is kept")
+	assert.ErrorContains(t, err, want)
+
+	// A batch the stop cut short returns what it managed, with a
+	// warning; the answer for a completed call is appended to it, so
+	// the model does not repeat what it did. The handler's own Content
+	// has room to grow, which the middleware must not write into.
+	tgClient = newFakeClient()
+	var backing [4]mcp.Content
+	backing[0] = &mcp.TextContent{Text: `{"successful":2,"warning":"context canceled."}`}
+	handlerContent := backing[:1]
+	cutShort := &mcp.CallToolResult{Content: handlerContent, StructuredContent: map[string]any{"successful": 2}}
+	racing := srv.clientDownMiddleware(tgClient)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
+		tgClient.stop(stop)
+		return cutShort, nil
+	})
+	res, err = racing(t.Context(), methodCallTool, call)
+	require.NoError(t, err)
+	tr = res.(*mcp.CallToolResult)
+	assert.False(t, tr.IsError, "a call that returned what it managed stays a success")
+	assert.Equal(t, cutShort.StructuredContent, tr.StructuredContent)
+	require.Len(t, tr.Content, 2, transport)
+	assert.Same(t, handlerContent[0], tr.Content[0], "the call's own outcome is kept")
+	completed := tr.Content[1].(*mcp.TextContent).Text
+	assert.Equal(t, srv.clientDownText(stop, true), completed, transport)
+	assert.NotContains(t, completed, "Retry", "a call that completed is never to be repeated")
+	assert.Len(t, cutShort.Content, 1, "the handler's result is not changed")
+	assert.Nil(t, backing[1], "nor is its Content's spare capacity written")
+
+	unreachable := srv.clientDownMiddleware(tgClient)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
+		t.Fatal("a call after the client stopped must not reach the handler")
+		return nil, nil
+	})
+	res, err = unreachable(t.Context(), methodCallTool, call)
+	require.NoError(t, err)
+	tr = res.(*mcp.CallToolResult)
+	require.Len(t, tr.Content, 1, "a call that never ran has only the client-down answer")
+	assert.Equal(t, want, tr.Content[0].(*mcp.TextContent).Text, transport)
 }
 
 // TestClientDownTextFitsTheTransport pins that the answer names the recovery
@@ -308,16 +321,34 @@ func TestClientDownMiddlewareAnswersForAStoppedClient(t *testing.T) {
 func TestClientDownTextFitsTheTransport(t *testing.T) {
 	refused := fmt.Errorf("%w: %w", tgclient.ErrSessionUnauthorized, tgerr.New(401, "SESSION_REVOKED"))
 	dropped := errors.New("telegram client stopped: key fingerprint not found")
+	secondary := fmt.Errorf("%w (%w) while the home DC still accepts it; reconnecting restores the calls it serves", tgclient.ErrSecondaryRefusal, tgerr.New(401, "AUTH_KEY_UNREGISTERED"))
 	stdio := &Server{opts: Options{Transport: TransportStdio}}
 	httpSrv := &Server{opts: Options{Transport: TransportHTTP}}
 
-	assert.Contains(t, stdio.clientDownText(refused), notLoggedInMessage)
-	assert.Contains(t, stdio.clientDownText(dropped), "reconnected")
-	assert.NotContains(t, stdio.clientDownText(dropped), "not logged in")
-	assert.Contains(t, httpSrv.clientDownText(refused), "QR login")
-	assert.NotContains(t, httpSrv.clientDownText(refused), "mcp-telegram login")
-	assert.Contains(t, httpSrv.clientDownText(dropped), "Retry")
-	assert.NotContains(t, httpSrv.clientDownText(dropped), "QR login")
+	for _, completed := range []bool{false, true} {
+		assert.Contains(t, stdio.clientDownText(refused, completed), notLoggedInMessage)
+		assert.Contains(t, stdio.clientDownText(dropped, completed), "reconnected")
+		assert.NotContains(t, stdio.clientDownText(dropped, completed), "not logged in")
+		assert.Contains(t, stdio.clientDownText(secondary, completed), "reconnected")
+		assert.NotContains(t, stdio.clientDownText(secondary, completed), "not logged in", "the home DC still accepts the session")
+		assert.Contains(t, httpSrv.clientDownText(refused, completed), "QR login")
+		assert.NotContains(t, httpSrv.clientDownText(refused, completed), "mcp-telegram login")
+		assert.NotContains(t, httpSrv.clientDownText(dropped, completed), "QR login")
+		assert.NotContains(t, httpSrv.clientDownText(secondary, completed), "QR login", "the home DC still accepts the session")
+		assert.Contains(t, httpSrv.clientDownText(secondary, completed), "request reconnects it")
+	}
+	assert.Contains(t, httpSrv.clientDownText(dropped, false), "Retry")
+
+	// A call that completed is told its result stands, and is never asked to
+	// run again.
+	for _, srv := range []*Server{stdio, httpSrv} {
+		for _, err := range []error{refused, dropped, secondary} {
+			text := srv.clientDownText(err, true)
+			assert.True(t, strings.HasPrefix(text, "This call completed before the Telegram connection stopped: what its result reports stands, so do not repeat it."), text)
+			assert.NotContains(t, text, "Retry", text)
+			assert.NotContains(t, srv.clientDownText(err, false), "completed", "a call that failed or never ran did not complete")
+		}
+	}
 }
 
 // TestServeAssemblyTreatsHostCancelAsShutdown covers SIGINT: a cancelled ctx
