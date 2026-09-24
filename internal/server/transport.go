@@ -17,6 +17,8 @@ const (
 	mcpMaxBodyBytes           = 1 << 20
 	httpMaxConcurrentRequests = 128
 	mcpSessionTimeout         = 10 * time.Minute
+	// httpDrainTimeout bounds the graceful drain at shutdown (see serveHTTP).
+	httpDrainTimeout = 5 * time.Second
 )
 
 func streamableHTTPOptions() *mcp.StreamableHTTPOptions {
@@ -57,11 +59,11 @@ func withCrossOriginProtection(handler http.Handler) http.Handler {
 }
 
 // serveHTTP runs an http.Server with graceful shutdown on ctx cancellation.
-// The graceful drain is bounded at 5 seconds. MCP streamable clients hold
+// The graceful drain is bounded by drain (httpDrainTimeout in production). MCP streamable clients hold
 // hanging SSE GETs that never finish on their own, so hitting the bound is
 // the NORMAL shutdown path with any connected client — it is logged and the
 // remaining connections are force-closed, not reported as an error.
-func (s *Server) serveHTTP(ctx context.Context, handler http.Handler, addr string) error {
+func (s *Server) serveHTTP(ctx context.Context, handler http.Handler, addr string, drain time.Duration) error {
 	s.logger.Info("starting streamable HTTP server", "addr", addr)
 	srv := &http.Server{
 		Addr:    addr,
@@ -82,7 +84,7 @@ func (s *Server) serveHTTP(ctx context.Context, handler http.Handler, addr strin
 			// Shutdown deliberately starts from a fresh Background context: ctx
 			// is already cancelled here, so reusing it would abort the graceful
 			// drain immediately.
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), drain)
 			defer cancel()
 			err := srv.Shutdown(shutdownCtx)
 			if errors.Is(err, context.DeadlineExceeded) {

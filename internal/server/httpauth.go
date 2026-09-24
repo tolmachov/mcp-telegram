@@ -154,5 +154,5 @@ func (s *Server) runHTTPWithAuth(ctx context.Context) (retErr error) {
 
 	s.logger.Info("starting with per-user Telegram authentication", "issuer", s.opts.Auth.IssuerURL)
 	mux := buildAuthMux(as, s.opts.Auth.IssuerURL, pool)
-	return s.serveHTTP(ctx, mux, s.opts.HTTPAddr)
+	return s.serveHTTP(ctx, mux, s.opts.HTTPAddr, httpDrainTimeout)
 }

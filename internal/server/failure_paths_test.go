@@ -176,7 +176,7 @@ func TestServeHTTPReportsBindFailure(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer listener.Close() //nolint:errcheck // test cleanup
-	err = testServer(t).serveHTTP(t.Context(), http.NotFoundHandler(), listener.Addr().String())
+	err = testServer(t).serveHTTP(t.Context(), http.NotFoundHandler(), listener.Addr().String(), testDrainTimeout)
 	require.ErrorContains(t, err, "http server")
 }
 
@@ -193,7 +193,7 @@ func TestServeHTTPForcesOpenStreamClosedOnShutdown(t *testing.T) {
 		}
 		<-r.Context().Done()
 	})
-	go func() { done <- testServer(t).serveHTTP(ctx, handler, addr) }()
+	go func() { done <- testServer(t).serveHTTP(ctx, handler, addr, testDrainTimeout) }()
 	response := waitForServer(t, "http://"+addr)
 	defer response.Body.Close() //nolint:errcheck // test cleanup
 	cancel()

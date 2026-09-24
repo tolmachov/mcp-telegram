@@ -50,7 +50,7 @@ func TestRunHTTPWithAuthWiring(t *testing.T) {
 	}
 
 	// OAuth discovery must be reachable without authentication.
-	resp, err = http.Get(base + authsrv.ProtectedResourceMetadataPath) //nolint:noctx // test-local URL
+	resp, err = testClient.Get(base + authsrv.ProtectedResourceMetadataPath) //nolint:noctx // test-local URL
 	if err != nil {
 		t.Fatalf("GET protected resource metadata: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestRunHTTPWithAuthWiring(t *testing.T) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err = testClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST MCP without bearer: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestRunHTTPWithAuthWiring(t *testing.T) {
 		t.Fatalf("building cross-site request: %v", err)
 	}
 	crossSite.Header.Set("Sec-Fetch-Site", "cross-site")
-	resp, err = http.DefaultClient.Do(crossSite)
+	resp, err = testClient.Do(crossSite)
 	if err != nil {
 		t.Fatalf("cross-site MCP request: %v", err)
 	}

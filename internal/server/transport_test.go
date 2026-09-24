@@ -26,10 +26,13 @@ var testSummarize = summarize.Config{Provider: summarize.ProviderSampling, Batch
 
 func testServer(t *testing.T) *Server {
 	t.Helper()
-	return &Server{
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}
+	return &Server{logger: slog.New(slog.DiscardHandler)}
 }
+
+// testDrainTimeout is the graceful drain serveHTTP tests shut down with, far
+// shorter than production's, so a test holding a stream open does not wait
+// out httpDrainTimeout.
+const testDrainTimeout = 50 * time.Millisecond
 
 // testAuth returns a valid embedded-OAuth configuration and an in-memory
 // session store, the pair the http transport requires.
@@ -68,12 +71,16 @@ func freePort(t *testing.T) string {
 	return addr
 }
 
+// testClient talks to the servers under test without keeping connections
+// alive, so an idle client connection never holds up their shutdown.
+var testClient = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+
 // waitForServer polls until the HTTP server accepts connections.
 func waitForServer(t *testing.T, url string) *http.Response {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url) //nolint:gosec,noctx // test-local URL, bounded loop
+		resp, err := testClient.Get(url) //nolint:gosec,noctx // test-local URL, bounded loop
 		if err == nil {
 			return resp
 		}
@@ -96,7 +103,7 @@ func TestServeHTTPServesAndShutsDown(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- s.serveHTTP(ctx, handler, addr) }()
+	go func() { done <- s.serveHTTP(ctx, handler, addr, testDrainTimeout) }()
 
 	resp := waitForServer(t, fmt.Sprintf("http://%s/anything", addr))
 	_ = resp.Body.Close()
@@ -131,7 +138,7 @@ func TestServeHTTPCrossOriginProtection(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- s.serveHTTP(ctx, withCrossOriginProtection(handler), addr) }()
+	go func() { done <- s.serveHTTP(ctx, withCrossOriginProtection(handler), addr, testDrainTimeout) }()
 
 	base := fmt.Sprintf("http://%s", addr)
 	_ = waitForServer(t, base+"/").Body.Close()
@@ -141,7 +148,7 @@ func TestServeHTTPCrossOriginProtection(t *testing.T) {
 		t.Fatalf("building request: %v", err)
 	}
 	req.Header.Set("Sec-Fetch-Site", "cross-site")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient.Do(req)
 	if err != nil {
 		t.Fatalf("cross-site POST: %v", err)
 	}
@@ -156,7 +163,7 @@ func TestServeHTTPCrossOriginProtection(t *testing.T) {
 		t.Fatalf("building request: %v", err)
 	}
 	req2.Header.Set("Sec-Fetch-Site", "same-origin")
-	resp2, err := http.DefaultClient.Do(req2)
+	resp2, err := testClient.Do(req2)
 	if err != nil {
 		t.Fatalf("same-origin POST: %v", err)
 	}
