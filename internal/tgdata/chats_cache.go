@@ -62,11 +62,6 @@ type ChatsCache struct {
 	// started and numbers them.
 	flight  *chatsFlight
 	started int64
-
-	// refreshWaits, when set, is called each time a refresh starts waiting
-	// out a load that predates it. Tests use it to know the refresh has seen
-	// that load.
-	refreshWaits func()
 }
 
 // chatsFlight is one load shared by every caller waiting on it.
@@ -140,9 +135,6 @@ func (c *ChatsCache) join(ctx context.Context, refresh bool) (*chatsFlight, *Cha
 		// The running load predates this refresh: let it finish, then start
 		// or join a newer one.
 		c.mu.Unlock()
-		if c.refreshWaits != nil {
-			c.refreshWaits()
-		}
 		select {
 		case <-ctx.Done():
 			return nil, nil, fmt.Errorf("loading chats: %w", ctx.Err())

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -218,33 +219,34 @@ func TestChatsCacheLoad(t *testing.T) {
 	})
 
 	t.Run("refresh does not join a load that started before it", func(t *testing.T) {
-		l := newGatedLoader()
-		c := NewChatsCache(t.Context(), l.load)
-		waiting := make(chan struct{})
-		c.refreshWaits = func() { close(waiting) }
+		synctest.Test(t, func(t *testing.T) {
+			l := newGatedLoader()
+			c := NewChatsCache(t.Context(), l.load)
 
-		stale := make(chan *ChatsSnapshot, 1)
-		go func() {
-			snap, err := c.Load(t.Context(), nil, false)
-			assert.NoError(t, err)
-			stale <- snap
-		}()
-		<-l.entered
+			stale := make(chan *ChatsSnapshot, 1)
+			go func() {
+				snap, err := c.Load(t.Context(), nil, false)
+				assert.NoError(t, err)
+				stale <- snap
+			}()
+			<-l.entered
 
-		refreshed := make(chan *ChatsSnapshot, 1)
-		go func() {
-			snap, err := c.Load(t.Context(), nil, true)
-			assert.NoError(t, err)
-			refreshed <- snap
-		}()
-		<-waiting // the refresh has seen the running load
-		close(l.release)
+			refreshed := make(chan *ChatsSnapshot, 1)
+			go func() {
+				snap, err := c.Load(t.Context(), nil, true)
+				assert.NoError(t, err)
+				refreshed <- snap
+			}()
+			synctest.Wait() // the refresh is waiting out the running load
+			assert.Equal(t, int64(1), l.calls.Load(), "the refresh starts no load while an older one runs")
+			close(l.release)
 
-		first, second := <-stale, <-refreshed
-		require.NotNil(t, first)
-		require.NotNil(t, second)
-		assert.NotEqual(t, first.ID, second.ID, "the refresh gets a load of its own")
-		assert.Equal(t, int64(2), l.calls.Load())
+			first, second := <-stale, <-refreshed
+			require.NotNil(t, first)
+			require.NotNil(t, second)
+			assert.NotEqual(t, first.ID, second.ID, "the refresh gets a load of its own")
+			assert.Equal(t, int64(2), l.calls.Load())
+		})
 	})
 
 	t.Run("progress reaches only the callers still waiting", func(t *testing.T) {
