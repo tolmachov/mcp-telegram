@@ -64,9 +64,9 @@ func IsBeyondRequest(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, ErrClientStopped) || errors.Is(err, ErrSessionUnauthorized)
 }
 
-// ShouldRefreshPeer identifies stale-access-hash errors for which a caller may
-// invalidate and perform exactly one fresh resolve/RPC attempt.
-func ShouldRefreshPeer(err error) bool {
+// shouldRefreshPeer identifies stale-access-hash errors for which WithPeer
+// drops the cached peer and runs its call once more on a fresh resolve.
+func shouldRefreshPeer(err error) bool {
 	return tgerr.Is(err, "PEER_ID_INVALID", "CHANNEL_INVALID", "CHAT_ID_INVALID")
 }
 
@@ -90,7 +90,7 @@ func unresolvable(id int64, reason string) error {
 // batch Telegram failed as a whole may retry its peers one by one to isolate
 // the bad one. Any other error would fail each of them alike.
 func IsPeerSpecific(err error) bool {
-	return errors.Is(err, ErrUnresolvablePeer) || ShouldRefreshPeer(err) ||
+	return errors.Is(err, ErrUnresolvablePeer) || shouldRefreshPeer(err) ||
 		tgerr.Is(err, "CHANNEL_PRIVATE", "CHANNEL_PUBLIC_GROUP_NA", "PEER_ID_NOT_SUPPORTED", "USER_BANNED_IN_CHANNEL",
 			"USERNAME_NOT_OCCUPIED", "USERNAME_INVALID")
 }

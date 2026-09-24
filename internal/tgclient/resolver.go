@@ -181,7 +181,7 @@ func (r *Resolver) Invalidate(ids ...int64) {
 }
 
 // WithPeer resolves id and runs op with its peer. When op fails with a stale
-// access hash (ShouldRefreshPeer) it drops the cached peer and runs op exactly
+// access hash (shouldRefreshPeer) it drops the cached peer and runs op exactly
 // once more with a freshly resolved one. An op that pages keeps each page to
 // its own WithPeer, so a stale hash re-resolves without losing the pages
 // already fetched.
@@ -207,7 +207,7 @@ func WithPeersFrom[T any](r *Resolver, resolve func() ([]Peer, error), op func([
 		return zero, err
 	}
 	result, err := op(peers)
-	if err == nil || !ShouldRefreshPeer(err) {
+	if err == nil || !shouldRefreshPeer(err) {
 		return result, err
 	}
 	for _, peer := range peers {
