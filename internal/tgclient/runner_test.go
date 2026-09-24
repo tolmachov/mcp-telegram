@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"sync"
 	"testing"
@@ -285,11 +284,11 @@ func TestGotdLoggerKeepsWarningsOnly(t *testing.T) {
 func TestStartClientClassifiesFailuresBeforeTheCallback(t *testing.T) {
 	cfg := &Config{APIID: 1, APIHash: "hash"}
 
-	_, err := StartClient(t.Context(), cfg, sessionstoretest.FailingSession{Err: tgerr.New(401, "AUTH_KEY_UNREGISTERED")}, discardLogger())
+	_, err := StartClient(t.Context(), cfg, sessionstoretest.FailingSession{Err: tgerr.New(401, "AUTH_KEY_UNREGISTERED")}, slog.New(slog.DiscardHandler))
 	require.ErrorIs(t, err, ErrSessionUnauthorized)
 
 	storageErr := errors.New("keychain access denied")
-	_, err = StartClient(t.Context(), cfg, sessionstoretest.FailingSession{Err: storageErr}, discardLogger())
+	_, err = StartClient(t.Context(), cfg, sessionstoretest.FailingSession{Err: storageErr}, slog.New(slog.DiscardHandler))
 	require.ErrorIs(t, err, storageErr)
 	assert.NotErrorIs(t, err, ErrSessionUnauthorized)
 }
@@ -299,12 +298,10 @@ func TestStartClientClassifiesFailuresBeforeTheCallback(t *testing.T) {
 func TestStartClientCancelledIsNotAVerdict(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	_, err := StartClient(ctx, &Config{APIID: 1, APIHash: "hash"}, sessionstoretest.BlockingSession{}, discardLogger())
+	_, err := StartClient(ctx, &Config{APIID: 1, APIHash: "hash"}, sessionstoretest.BlockingSession{}, slog.New(slog.DiscardHandler))
 	require.ErrorIs(t, err, context.Canceled)
 	assert.NotErrorIs(t, err, ErrSessionUnauthorized)
 }
-
-func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 // answer is how a scripted DC answers one request.
 type answer = func(*tgtest.Server, *tgtest.Request) error
@@ -446,7 +443,7 @@ func TestStartClientDownloadsFromAnotherDC(t *testing.T) {
 			return server.SendResult(req, result) //nolint:wrapcheck // the fake server hands the send error to tgtest as is.
 		}
 	}
-	r, err := startOnCluster(t, discardLogger(), func(c *cluster.Cluster) {
+	r, err := startOnCluster(t, slog.New(slog.DiscardHandler), func(c *cluster.Cluster) {
 		c.Dispatch(homeDC, "home").
 			HandleFunc(tg.UsersGetUsersRequestTypeID, scripted(answerSelf)).
 			HandleFunc(tg.UploadGetFileRequestTypeID, scripted(answerErr(tgerr.New(303, fmt.Sprintf("FILE_MIGRATE_%d", fileDC))))).
@@ -474,7 +471,7 @@ func TestStartClientKeepsTheHomeDCsRefusal(t *testing.T) {
 	for _, code := range []string{"AUTH_KEY_UNREGISTERED", "SESSION_PASSWORD_NEEDED"} {
 		t.Run(code, func(t *testing.T) {
 			t.Parallel()
-			_, err := startOnCluster(t, discardLogger(), func(c *cluster.Cluster) {
+			_, err := startOnCluster(t, slog.New(slog.DiscardHandler), func(c *cluster.Cluster) {
 				c.Dispatch(homeDC, "home").HandleFunc(tg.UsersGetUsersRequestTypeID, scripted(answerErr(tgerr.New(401, code))))
 			})
 			require.ErrorIs(t, err, ErrSessionUnauthorized)

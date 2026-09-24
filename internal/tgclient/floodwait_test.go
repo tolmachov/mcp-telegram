@@ -190,7 +190,7 @@ func TestFloodWaitStopsSleepingWhenTheCallIsCancelled(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan error, 1)
 		start := time.Now()
-		go func() { done <- ping(ctx, floodWait(time.Minute, discardLogger()).Handle(script)) }()
+		go func() { done <- ping(ctx, floodWait(time.Minute, slog.New(slog.DiscardHandler)).Handle(script)) }()
 
 		synctest.Wait()
 		cancel()
@@ -208,7 +208,7 @@ func TestFloodWaitStopsSleepingWhenTheCallIsCancelled(t *testing.T) {
 func TestFloodWaitHoldsUpNoOtherCall(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var floodedOnce atomic.Bool
-		invoker := floodWait(time.Minute, discardLogger()).Handle(telegram.InvokeFunc(func(_ context.Context, input bin.Encoder, _ bin.Decoder) error {
+		invoker := floodWait(time.Minute, slog.New(slog.DiscardHandler)).Handle(telegram.InvokeFunc(func(_ context.Context, input bin.Encoder, _ bin.Decoder) error {
 			if _, ok := input.(*tg.HelpGetNearestDCRequest); ok && floodedOnce.CompareAndSwap(false, true) {
 				return tgerr.New(420, "FLOOD_WAIT_30")
 			}

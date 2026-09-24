@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -83,7 +84,7 @@ func TestReconnectingClientReplacesAStoppedClient(t *testing.T) {
 		first, second := accountClient("first"), accountClient("second")
 		unreachable := errors.New("dial tcp: i/o timeout")
 		script := &connects{answers: []func() (localClient, error){failedConnect(unreachable), failedConnect(unreachable), connected(second)}}
-		c := newReconnectingClient(t.Context(), first, script.connect, testLogger())
+		c := newReconnectingClient(t.Context(), first, script.connect, slog.New(slog.DiscardHandler))
 		defer c.Close()
 
 		require.NoError(t, c.Err())
@@ -121,7 +122,7 @@ func TestReconnectingClientStopsOnARefusedSession(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			first := accountClient("first")
 			script := &connects{}
-			c := newReconnectingClient(t.Context(), first, script.connect, testLogger())
+			c := newReconnectingClient(t.Context(), first, script.connect, slog.New(slog.DiscardHandler))
 			defer c.Close()
 
 			first.stop(refused)
@@ -135,7 +136,7 @@ func TestReconnectingClientStopsOnARefusedSession(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			first := accountClient("first")
 			script := &connects{answers: []func() (localClient, error){failedConnect(fmt.Errorf("starting Telegram client: %w", refused))}}
-			c := newReconnectingClient(t.Context(), first, script.connect, testLogger())
+			c := newReconnectingClient(t.Context(), first, script.connect, slog.New(slog.DiscardHandler))
 			defer c.Close()
 
 			first.stop(errors.New("a Telegram DC other than the account's home one refused the session"))
@@ -152,7 +153,7 @@ func TestReconnectingClientCloseEndsAReconnect(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		first := accountClient("first")
 		script := &connects{answers: []func() (localClient, error){failedConnect(errors.New("dial tcp: i/o timeout"))}}
-		c := newReconnectingClient(t.Context(), first, script.connect, testLogger())
+		c := newReconnectingClient(t.Context(), first, script.connect, slog.New(slog.DiscardHandler))
 
 		first.stop(errors.New("read tcp: connection reset by peer"))
 		synctest.Wait()
@@ -167,7 +168,7 @@ func TestReconnectingClientCloseEndsAReconnect(t *testing.T) {
 		}
 
 		serving := accountClient("serving")
-		c = newReconnectingClient(t.Context(), serving, script.connect, testLogger())
+		c = newReconnectingClient(t.Context(), serving, script.connect, slog.New(slog.DiscardHandler))
 		c.Close()
 		assert.True(t, serving.isClosed(), "Close disconnects the client it has")
 	})

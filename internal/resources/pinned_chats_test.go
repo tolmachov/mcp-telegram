@@ -97,10 +97,6 @@ func (s *syncBuffer) String() string {
 	return s.buf.String()
 }
 
-func quietLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
-}
-
 func newTestProvider(t *testing.T, inv *pinnedInvoker, logger *slog.Logger, nServers int) (*PinnedChatsProvider, []*mcp.Server) {
 	api := tg.NewClient(inv)
 	msgProvider := messages.NewProvider(tgclient.NewResolver(t.Context(), api), 100_000)
@@ -152,7 +148,7 @@ func listResources(t *testing.T, srv *mcp.Server) map[string]string {
 func TestPinnedChatsMirroredOntoAllServers(t *testing.T) {
 	inv := &pinnedInvoker{}
 	inv.set(fakeChat{id: 111, name: "Alice"}, fakeChat{id: 222, name: "Bob"})
-	p, servers := newTestProvider(t, inv, quietLogger(), 3)
+	p, servers := newTestProvider(t, inv, slog.New(slog.DiscardHandler), 3)
 
 	require.NoError(t, p.RefreshResources(context.Background()))
 
@@ -180,7 +176,7 @@ func TestPinnedRefreshReorderIsNoOp(t *testing.T) {
 	a := fakeChat{id: 111, name: "Alice"}
 	b := fakeChat{id: 222, name: "Bob"}
 	inv.set(a, b)
-	p, _ := newTestProvider(t, inv, quietLogger(), 1)
+	p, _ := newTestProvider(t, inv, slog.New(slog.DiscardHandler), 1)
 
 	require.NoError(t, p.RefreshResources(context.Background()))
 	firstOrder := append([]string(nil), p.currentURIs...)
@@ -202,7 +198,7 @@ func TestPinnedRefreshReorderIsNoOp(t *testing.T) {
 func TestPinnedRefreshReregistersOnRename(t *testing.T) {
 	inv := &pinnedInvoker{}
 	inv.set(fakeChat{id: 111, name: "Alice"})
-	p, servers := newTestProvider(t, inv, quietLogger(), 1)
+	p, servers := newTestProvider(t, inv, slog.New(slog.DiscardHandler), 1)
 
 	require.NoError(t, p.RefreshResources(context.Background()))
 	before := listResources(t, servers[0])
@@ -226,7 +222,7 @@ func TestPinnedRefreshUnpinRemovesResource(t *testing.T) {
 	alice := fakeChat{id: 111, name: "Alice"}
 	bob := fakeChat{id: 222, name: "Bob"}
 	inv.set(alice, bob)
-	p, servers := newTestProvider(t, inv, quietLogger(), 2)
+	p, servers := newTestProvider(t, inv, slog.New(slog.DiscardHandler), 2)
 
 	require.NoError(t, p.RefreshResources(context.Background()))
 	for i, srv := range servers {
@@ -252,7 +248,7 @@ func TestPinnedRefreshUnpinRemovesResource(t *testing.T) {
 func TestRefreshResourcesWrapsError(t *testing.T) {
 	inv := &pinnedInvoker{}
 	inv.setErr(errors.New("boom"))
-	p, _ := newTestProvider(t, inv, quietLogger(), 1)
+	p, _ := newTestProvider(t, inv, slog.New(slog.DiscardHandler), 1)
 
 	err := p.RefreshResources(context.Background())
 	require.Error(t, err)
@@ -337,7 +333,7 @@ func TestWatchInBackgroundStoppedClientLogsDebug(t *testing.T) {
 func TestWatchInBackgroundZeroIntervalDisables(t *testing.T) {
 	inv := &pinnedInvoker{}
 	inv.set(fakeChat{id: 111, name: "Alice"})
-	p, _ := newTestProvider(t, inv, quietLogger(), 1)
+	p, _ := newTestProvider(t, inv, slog.New(slog.DiscardHandler), 1)
 
 	done := p.WatchInBackground(context.Background(), 0)
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -100,7 +101,7 @@ func TestBuildAssemblyForVariantModesWithoutTelegramConnection(t *testing.T) {
 			})
 			require.NoError(t, err)
 			client := newFakeClient()
-			assembly, err := srv.buildAssembly(t.Context(), client, testLogger())
+			assembly, err := srv.buildAssembly(t.Context(), client, slog.New(slog.DiscardHandler))
 			require.NoError(t, err)
 			if variant == "" {
 				require.NotNil(t, assembly.variants)
@@ -135,7 +136,7 @@ func TestClientStopEndsAssemblyLifetime(t *testing.T) {
 	})
 	require.NoError(t, err)
 	client := newFakeClient()
-	asm, err := srv.buildAssembly(t.Context(), client, testLogger())
+	asm, err := srv.buildAssembly(t.Context(), client, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = asm.Close() })
 
@@ -433,7 +434,7 @@ func TestServerAuxiliaryLifecycleBranches(t *testing.T) {
 
 	srv.opts.Variant = "unknown"
 	client := newFakeClient()
-	_, err = srv.buildAssembly(t.Context(), client, testLogger())
+	_, err = srv.buildAssembly(t.Context(), client, slog.New(slog.DiscardHandler))
 	require.ErrorContains(t, err, "variant")
 	assert.True(t, client.isClosed(), "a failed build disconnects the client it was handed")
 }
@@ -460,7 +461,7 @@ func TestBuildAssemblyPanicClosesClient(t *testing.T) {
 	require.NoError(t, err)
 	client := panickingClient{newFakeClient()}
 	assert.PanicsWithValue(t, "wiring bug", func() {
-		_, _ = srv.buildAssembly(t.Context(), client, testLogger())
+		_, _ = srv.buildAssembly(t.Context(), client, slog.New(slog.DiscardHandler))
 	})
 	assert.True(t, client.isClosed(), "a panicking build disconnects the client it was handed")
 }
