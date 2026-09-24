@@ -3,7 +3,7 @@ module github.com/tolmachov/mcp-telegram
 go 1.26.0
 
 require (
-	cloud.google.com/go/storage v1.65.0
+	cloud.google.com/go/storage v1.68.0
 	github.com/fsouza/fake-gcs-server v1.56.1
 	github.com/google/jsonschema-go v0.4.3
 	github.com/gotd/log v0.1.0
