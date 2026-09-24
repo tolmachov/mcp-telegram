@@ -94,3 +94,21 @@ func TestNewRejectsNonPositiveSettings(t *testing.T) {
 	assert.Panics(t, func() { New[int](-1, 1) })
 	assert.Panics(t, func() { New[int](1, 0) })
 }
+
+func TestLimiterCapRecyclesByRecencyNotInsertion(t *testing.T) {
+	l := New[int](1, 1)
+	base := time.Now()
+	for i := range maxKeys {
+		l.now = func() time.Time { return base.Add(time.Duration(i) * time.Microsecond) }
+		require.True(t, l.Allow(i))
+	}
+	// Key 0 was inserted first but is seen again last, so key 1 is now the
+	// stalest.
+	l.now = func() time.Time { return base.Add(time.Duration(maxKeys) * time.Microsecond) }
+	l.Allow(0)
+
+	l.now = func() time.Time { return base.Add(time.Duration(maxKeys+1) * time.Microsecond) }
+	require.True(t, l.Allow(-1))
+	assert.Contains(t, l.buckets, 0)
+	assert.NotContains(t, l.buckets, 1)
+}

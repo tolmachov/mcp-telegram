@@ -3,6 +3,7 @@
 package keyedlimit
 
 import (
+	"container/list"
 	"fmt"
 	"sync"
 	"time"
@@ -16,7 +17,8 @@ import (
 // instead.
 const maxKeys = 4096
 
-type bucket struct {
+type bucket[K comparable] struct {
+	key      K
 	limiter  *rate.Limiter
 	lastSeen time.Time
 }
@@ -24,9 +26,13 @@ type bucket struct {
 // Limiter is a token-bucket limiter keyed by K.
 type Limiter[K comparable] struct {
 	mu      sync.Mutex
-	buckets map[K]*bucket
-	rps     rate.Limit
-	burst   int
+	buckets map[K]*list.Element
+	// bySeen holds the *bucket[K] values ordered by lastSeen, least recent at
+	// the front: every Allow moves its bucket to the back, so eviction takes
+	// from the front without scanning the map.
+	bySeen *list.List
+	rps    rate.Limit
+	burst  int
 	// refill is how long an untouched bucket takes to fill back up to burst.
 	// Past it a bucket is indistinguishable from a fresh one, so dropping it
 	// loses nothing.
@@ -43,7 +49,8 @@ func New[K comparable](rps rate.Limit, burst int) *Limiter[K] {
 		panic(fmt.Sprintf("keyedlimit: rps (%v) and burst (%d) must be positive", rps, burst))
 	}
 	return &Limiter[K]{
-		buckets: map[K]*bucket{},
+		buckets: map[K]*list.Element{},
+		bySeen:  list.New(),
 		rps:     rps,
 		burst:   burst,
 		refill:  time.Duration(float64(burst) / float64(rps) * float64(time.Second)),
@@ -56,37 +63,47 @@ func (l *Limiter[K]) Allow(key K) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now()
-	b, ok := l.buckets[key]
-	if !ok {
+	var b *bucket[K]
+	if el, ok := l.buckets[key]; ok {
+		l.bySeen.MoveToBack(el)
+		b = bucketOf[K](el)
+	} else {
 		if len(l.buckets) >= maxKeys {
 			l.evictLocked(now)
 		}
-		b = &bucket{limiter: rate.NewLimiter(l.rps, l.burst)}
-		l.buckets[key] = b
+		b = &bucket[K]{key: key, limiter: rate.NewLimiter(l.rps, l.burst)}
+		l.buckets[key] = l.bySeen.PushBack(b)
 	}
 	b.lastSeen = now
 	return b.limiter.AllowN(now, 1)
 }
 
-// evictLocked makes room for a new key in a full map in one pass: it drops
-// every bucket that has refilled completely and, if none has, the
-// least-recently-seen one. Called only when a new key meets a full map, so
-// traffic below the cap pays nothing. Under a flood of fresh keys the cap
-// bounds memory while keeping the buckets of active callers (they refresh
-// lastSeen constantly).
+// bucketOf returns the bucket an element of bySeen holds; the list stores
+// nothing else.
+func bucketOf[K comparable](el *list.Element) *bucket[K] {
+	return el.Value.(*bucket[K])
+}
+
+// evictLocked makes room for a new key in a full map: it drops every bucket
+// that has refilled completely and, if none has, the least-recently-seen one.
+// Buckets leave from the front of bySeen, where the least recently seen sit,
+// so each removal is O(1) and the refilled ones are exactly a prefix. Called
+// only when a new key meets a full map, so traffic below the cap pays
+// nothing. Under a flood of fresh keys the cap bounds memory while keeping the
+// buckets of active callers (they refresh lastSeen constantly).
 func (l *Limiter[K]) evictLocked(now time.Time) {
-	var stalestKey K
-	var stalest time.Time
-	found := false
-	for key, b := range l.buckets {
-		switch {
-		case now.Sub(b.lastSeen) > l.refill:
-			delete(l.buckets, key)
-		case !found || b.lastSeen.Before(stalest):
-			stalestKey, stalest, found = key, b.lastSeen, true
+	for front := l.bySeen.Front(); front != nil; front = l.bySeen.Front() {
+		if now.Sub(bucketOf[K](front).lastSeen) <= l.refill {
+			break
 		}
+		l.removeLocked(front)
 	}
 	if len(l.buckets) >= maxKeys {
-		delete(l.buckets, stalestKey)
+		l.removeLocked(l.bySeen.Front())
 	}
+}
+
+func (l *Limiter[K]) removeLocked(el *list.Element) {
+	delete(l.buckets, bucketOf[K](el).key)
+	l.bySeen.Remove(el)
 }
