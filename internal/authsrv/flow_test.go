@@ -1114,6 +1114,34 @@ func TestRevoke(t *testing.T) {
 		assert.True(t, exists, "a client_id mismatch must not delete the session")
 	})
 
+	t.Run("token issued in the future by a skewed instance is revoked", func(t *testing.T) {
+		const sid = "0123456789abcdef0123456789abcdef"
+		const family = "fedcba9876543210fedcba9876543210"
+		store := sessionstoretest.New(t)
+		a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
+		ctx := context.Background()
+		now := a.now()
+		redeemed, err := store.RedeemCode(ctx, family, now.Add(time.Hour))
+		require.NoError(t, err)
+		require.True(t, redeemed)
+		issued := now.Add(maxIssueSkew + time.Minute)
+		refresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
+			Subject: allowedUser, ClientID: "cid",
+			grantClaims: grantClaims{Resource: a.cfg.IssuerURL, SessionID: sid, SessionKey: make([]byte, 32), Family: family},
+			IssuedAt:    issued.Unix(), LoginAt: issued.Unix(),
+		})
+		require.NoError(t, err)
+		_, err = openBlob(a.sealer, refreshBlob, refresh, now)
+		require.ErrorIs(t, err, errIssuedInFuture, "precondition: this instance's clock sees the token as issued in the future")
+
+		require.Equal(t, http.StatusOK, revokeToken(t, ts, url.Values{"token": {refresh}}))
+		revoked, err := store.Revoked(ctx, allowedUser, sid)
+		require.NoError(t, err)
+		assert.True(t, revoked, "an authentic token must be revoked whatever its issue time")
+		rotation, err := store.RotateGrant(ctx, family, 0, now)
+		require.NoError(t, err)
+		assert.Equal(t, sessionstore.GrantReplay, rotation, "revocation must kill the token's grant")
+	})
 }
 
 // failRevokeStore fails every Revoke, to exercise the /revoke store-error path.

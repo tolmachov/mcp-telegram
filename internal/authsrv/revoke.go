@@ -20,8 +20,9 @@ import (
 //     listed in Settings → Devices until Telegram expires it); a full
 //     auth.LogOut on revoke is a possible follow-up.
 //
-// Possession of a decryptable token is sufficient authorization to revoke it
-// (§2.1 — all our clients are public); expiry does not block revocation. A
+// Possession of an authentic token is sufficient authorization to revoke it
+// (§2.1 — all our clients are public); no time check blocks revocation, be it
+// expiry or an issue time ahead of this instance's clock. A
 // recognised token whose tombstone cannot be written answers 503
 // temporarily_unavailable (§2.2.1) so the client retries instead of assuming
 // the grant is dead; every other outcome — including an unrecognised/invalid
@@ -87,11 +88,13 @@ func (a *AuthServer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 // openRevocationTarget opens a token presented for revocation and returns its
 // subject, session id, family and client id. Per RFC 7009 §2.1 token_type_hint
 // only orders the attempts: the hinted kind is tried first, then the other
-// kind. A token with malformed claims (forged or corrupt) does not open, so it
+// kind. It opens with openAuthentic, so a token a clock-skewed instance issued
+// "in the future" is still revocable. A token with malformed claims (forged or
+// corrupt) does not open, so it
 // counts as unrecognised and revocation never touches storage with it.
 func (a *AuthServer) openRevocationTarget(token, hint string) (userID tgid.UserID, sid, family, clientID string, ok bool) {
 	tryRefresh := func() bool {
-		rc, err := openBlob(a.sealer, refreshBlob, token, a.now())
+		rc, err := openAuthentic(a.sealer, refreshBlob, token)
 		if err != nil {
 			return false
 		}
@@ -99,7 +102,7 @@ func (a *AuthServer) openRevocationTarget(token, hint string) (userID tgid.UserI
 		return true
 	}
 	tryAccess := func() bool {
-		ac, err := openBlob(a.sealer, accessBlob, token, a.now())
+		ac, err := openAuthentic(a.sealer, accessBlob, token)
 		if err != nil {
 			return false
 		}

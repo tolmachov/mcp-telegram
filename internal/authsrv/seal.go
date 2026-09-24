@@ -118,23 +118,35 @@ func encryptBlob[T claims](s *sealer, spec blobSpec[T], v T) (string, error) {
 	return spec.prefix + base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-// openBlob reverses sealBlob: it decrypts the blob, checks the claims are
-// valid for this issuer and not issued in the future, and enforces the spec's
-// TTL. Every failure unwraps to errInvalidBlob; the concrete reason is for
-// server-side logs only.
+// openBlob reverses sealBlob: it opens the blob as openAuthentic does, then
+// checks it was not issued in the future and enforces the spec's TTL. Every
+// failure unwraps to errInvalidBlob; the concrete reason is for server-side
+// logs only.
 func openBlob[T claims](s *sealer, spec blobSpec[T], blob string, now time.Time) (T, error) {
-	v, err := decryptBlob(s, spec, blob)
+	v, err := openAuthentic(s, spec, blob)
 	if err != nil {
 		return v, err
-	}
-	if !v.valid(s.issuer) {
-		return v, errInvalidClaims
 	}
 	if v.issuedAt() > now.Add(maxIssueSkew).Unix() {
 		return v, errIssuedInFuture
 	}
 	if spec.ttl > 0 && expired(v.issuedAt(), spec.ttl, now) {
 		return v, errBlobExpired
+	}
+	return v, nil
+}
+
+// openAuthentic decrypts the blob and checks its claims are valid for this
+// issuer, and checks no time: it answers only whether this deployment sealed
+// these claims. Revocation needs exactly that — an authentic token is
+// revocable however its times compare with this instance's clock.
+func openAuthentic[T claims](s *sealer, spec blobSpec[T], blob string) (T, error) {
+	v, err := decryptBlob(s, spec, blob)
+	if err != nil {
+		return v, err
+	}
+	if !v.valid(s.issuer) {
+		return v, errInvalidClaims
 	}
 	return v, nil
 }
