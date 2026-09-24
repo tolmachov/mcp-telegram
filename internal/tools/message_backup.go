@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -18,19 +17,9 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/xdg"
 )
 
-// backupProgress state constants
-const (
-	progressStateCreated uint32 = iota
-	progressStateRunning
-	progressStateStopped
-)
-
 // telegramLaunchDate is the date when Telegram was launched (used as fallback
 // for date range calculations).
 var telegramLaunchDate = time.Date(2013, 8, 14, 0, 0, 0, 0, time.UTC)
-
-// (Path-sandbox helpers — DefaultBackupDir, sanitizeFilename, isPathAllowed,
-// resolveSymlinks — live in backup_path.go.)
 
 // partialNote describes the partial messages a failed save was carrying, or
 // is empty when the fetch completed.
@@ -101,177 +90,98 @@ func (h *MessageBackupHandler) Register(s *mcp.Server) {
 	}, h.handle)
 }
 
-// parseDate accepts three formats:
-//
-//	YYYY-MM-DD                 → interpreted as midnight UTC
-//	YYYY-MM-DD HH:MM:SS        → interpreted as UTC
-//	RFC3339 (2006-01-02T15:04:05Z07:00) → with explicit zone
-//
-// UTC is the default (not time.Local) because distributed MCP agents —
-// Claude Desktop on one machine, Claude Code CLI on another, or a remote
-// container — can live in different timezones than the user issuing the
-// prompt. Defaulting to Local would silently shift windows by hours
-// depending on where the server happens to run. Callers that want a
-// specific local window should pass RFC3339 with an explicit offset.
-// backupProgress handles progress tracking and notifications for message backup.
+// backupProgressInterval spaces a backup's progress notifications.
+const backupProgressInterval = 5 * time.Second
+
+// backupProgress reports a running backup's progress to the client of its
+// call every backupProgressInterval, as the percentage of the date window
+// covered when dates alone bound the backup, or of the count limit.
 type backupProgress struct {
-	ctx           context.Context
-	session       *mcp.ServerSession
-	progressToken any
+	ctx context.Context
+	req *mcp.CallToolRequest
+	// windowEnd and windowSeconds describe the date window when dates alone
+	// bound the backup (windowSeconds > 0); countLimit is the count limit,
+	// or 0 for none.
+	windowEnd     time.Time
+	windowSeconds int64
+	countLimit    int
 
-	// Progress mode (immutable after creation).
-	useDateProgress bool
-	totalSeconds    int64
-	endTime         time.Time
-	countLimit      int
-
-	// Mutable state protected by mutex.
-	mu              sync.Mutex
-	earliestMsgTime time.Time
-	messageCount    int
-	lastMsg         string
-
-	// Lifecycle state protected by stateMu.
-	stateMu sync.Mutex
-	ticker  *time.Ticker
-	done    chan struct{}
-	state   uint32 // progressStateCreated -> progressStateRunning -> progressStateStopped
+	mu        sync.Mutex
+	message   string
+	collected int
+	earliest  time.Time
 }
 
-func newBackupProgress(
-	ctx context.Context,
-	session *mcp.ServerSession,
-	token any,
-	fromDate, toDate time.Time,
-	countLimit int,
-) *backupProgress {
-	hasDateFilter := !fromDate.IsZero() || !toDate.IsZero()
-
-	bp := &backupProgress{
-		ctx:             ctx,
-		session:         session,
-		progressToken:   token,
-		countLimit:      countLimit,
-		useDateProgress: hasDateFilter && countLimit == 0,
-		done:            make(chan struct{}),
-	}
-
-	if bp.useDateProgress {
-		var startTime time.Time
-		if !fromDate.IsZero() {
-			startTime = fromDate
-		} else {
-			// If only "to" is specified, use Telegram launch date as start.
-			startTime = telegramLaunchDate
+// startBackupProgress starts reporting progress for the call req; stop ends
+// the reports and returns once none is in flight.
+func startBackupProgress(ctx context.Context, req *mcp.CallToolRequest, fromDate, toDate time.Time, countLimit int) (bp *backupProgress, stop func()) {
+	bp = &backupProgress{ctx: ctx, req: req, countLimit: countLimit}
+	if countLimit == 0 && (!fromDate.IsZero() || !toDate.IsZero()) {
+		start, end := fromDate, toDate
+		if start.IsZero() {
+			start = telegramLaunchDate
 		}
-		if !toDate.IsZero() {
-			bp.endTime = toDate
-		} else {
-			bp.endTime = time.Now()
+		if end.IsZero() {
+			end = time.Now()
 		}
-		bp.totalSeconds = max(int64(bp.endTime.Sub(startTime).Seconds()), 1)
+		bp.windowEnd = end
+		bp.windowSeconds = max(int64(end.Sub(start).Seconds()), 1)
 	}
-
-	return bp
-}
-
-func (bp *backupProgress) Start() error {
-	bp.stateMu.Lock()
-	defer bp.stateMu.Unlock()
-
-	if bp.state != progressStateCreated {
-		return fmt.Errorf("backupProgress already started")
-	}
-	bp.state = progressStateRunning
-	bp.ticker = time.NewTicker(5 * time.Second)
-
+	done, finished := make(chan struct{}), make(chan struct{})
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Error("backupProgress goroutine panicked", "panic", r)
-			}
-		}()
+		defer close(finished)
+		ticker := time.NewTicker(backupProgressInterval)
+		defer ticker.Stop()
 		for {
 			select {
-			case <-bp.done:
+			case <-done:
 				return
-			case <-bp.ticker.C:
+			case <-ticker.C:
 				bp.mu.Lock()
-				msg := bp.lastMsg
+				message := bp.message
 				bp.mu.Unlock()
-				if msg != "" {
-					bp.Send(msg)
+				if message != "" {
+					bp.send(message)
 				}
 			}
 		}
 	}()
-
-	return nil
-}
-
-func (bp *backupProgress) Stop() error {
-	bp.stateMu.Lock()
-	defer bp.stateMu.Unlock()
-
-	if bp.state != progressStateRunning {
-		return fmt.Errorf("backupProgress is not running")
+	return bp, func() {
+		close(done)
+		<-finished
 	}
-	bp.state = progressStateStopped
-	bp.ticker.Stop()
-	close(bp.done)
-
-	return nil
 }
 
-func (bp *backupProgress) SetMessage(msg string) {
-	bp.mu.Lock()
-	bp.lastMsg = msg
-	bp.mu.Unlock()
-}
-
-func (bp *backupProgress) SetMessageCount(count int) {
-	bp.mu.Lock()
-	bp.messageCount = count
-	bp.mu.Unlock()
-}
-
-func (bp *backupProgress) UpdateEarliestTime(t time.Time) {
-	bp.mu.Lock()
-	if bp.earliestMsgTime.IsZero() || t.Before(bp.earliestMsgTime) {
-		bp.earliestMsgTime = t
-	}
-	bp.mu.Unlock()
-}
-
-func (bp *backupProgress) getProgress() (progress float64, total int) {
+// update records the fetch's progress after batch: the messages collected so
+// far and the earliest date the batch held (zero when it held none).
+func (bp *backupProgress) update(batch, collected int, earliest time.Time) {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
-
-	total = 100
-	if bp.useDateProgress {
-		if bp.earliestMsgTime.IsZero() {
-			progress = 0
-		} else {
-			coveredSeconds := max(int64(bp.endTime.Sub(bp.earliestMsgTime).Seconds()), 0)
-			progress = float64(coveredSeconds) / float64(bp.totalSeconds) * 100
-			if progress > 100 {
-				progress = 100
-			}
-		}
-	} else {
-		if bp.countLimit > 0 {
-			progress = float64(bp.messageCount) / float64(bp.countLimit) * 100
-			if progress > 100 {
-				progress = 100
-			}
-		}
+	bp.message = fmt.Sprintf("Fetching messages (batch %d, %d messages so far)...", batch, collected)
+	bp.collected = collected
+	if !earliest.IsZero() && (bp.earliest.IsZero() || earliest.Before(bp.earliest)) {
+		bp.earliest = earliest
 	}
-	return
 }
 
-func (bp *backupProgress) Send(message string) {
-	progress, total := bp.getProgress()
-	sendProgressWithToken(bp.ctx, bp.session, bp.progressToken, progress, float64(total), message)
+// percent returns how far the backup has got, from 0 to 100.
+func (bp *backupProgress) percent() float64 {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+	switch {
+	case bp.windowSeconds > 0 && !bp.earliest.IsZero():
+		covered := max(int64(bp.windowEnd.Sub(bp.earliest).Seconds()), 0)
+		return min(float64(covered)/float64(bp.windowSeconds)*100, 100)
+	case bp.windowSeconds == 0 && bp.countLimit > 0:
+		return min(float64(bp.collected)/float64(bp.countLimit)*100, 100)
+	default:
+		return 0
+	}
+}
+
+// send reports the current progress with message.
+func (bp *backupProgress) send(message string) {
+	sendProgress(bp.ctx, bp.req, bp.percent(), 100, message)
 }
 
 func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in BackupMessagesInput) (*mcp.CallToolResult, *BackupMessagesResult, error) {
@@ -323,29 +233,8 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 		return errResult(err.Error()), nil, nil
 	}
 
-	// Initialise the progress tracker. Token may be nil if the client did not
-	// request progress; in that case backupProgress.Send becomes a no-op via
-	// sendProgressWithToken.
-	progress := newBackupProgress(
-		ctx,
-		req.Session,
-		requestProgressToken(req),
-		fromDate, toDate,
-		count,
-	)
-	if err := progress.Start(); err != nil {
-		return nil, nil, failed(op, fmt.Errorf("starting progress: %w", err))
-	}
-	defer func() {
-		// Use slog directly: the request context is likely already cancelled
-		// at defer time, so mcpLog(ctx, ...) would attempt a session write on
-		// a dead context before falling back to slog — direct slog is simpler.
-		// Stop() fails only when the state machine is in an unexpected state,
-		// which indicates a bug in the progress lifecycle — use Error.
-		if err := progress.Stop(); err != nil {
-			slog.Error("BackupMessages: progress stop failed", "err", err)
-		}
-	}()
+	progress, stopProgress := startBackupProgress(ctx, req, fromDate, toDate, count)
+	defer stopProgress()
 
 	mcpLog(ctx, req.Session, logLevelInfo, "BackupMessages", map[string]any{
 		"chat_id":     in.ChatID,
@@ -364,13 +253,7 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	}
 
 	// Fetch messages using the provider with a progress callback.
-	result, err := h.provider.FetchAll(ctx, in.ChatID, opts, func(batch int, collected int, earliestTime time.Time) {
-		progress.SetMessage(fmt.Sprintf("Fetching messages (batch %d, %d messages so far)...", batch, collected))
-		progress.SetMessageCount(collected)
-		if !earliestTime.IsZero() {
-			progress.UpdateEarliestTime(earliestTime)
-		}
-	})
+	result, err := h.provider.FetchAll(ctx, in.ChatID, opts, progress.update)
 	// FetchAll returns partial results (non-nil result alongside err) when
 	// the context is cancelled or a mid-pagination batch fetch fails. When we
 	// have something to save, persist it and report the partial state instead
@@ -390,7 +273,7 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 		})
 	}
 
-	progress.Send(fmt.Sprintf("Collected %d messages", len(result.Messages)))
+	progress.send(fmt.Sprintf("Collected %d messages", len(result.Messages)))
 
 	// Format messages for backup using the messages package.
 	content := messages.FormatBatchForBackup(result.Messages)

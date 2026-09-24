@@ -71,7 +71,7 @@ func TestChatsCacheLoad(t *testing.T) {
 		snap, err := c.Load(t.Context(), nil, false)
 		require.NoError(t, err)
 
-		snap.loadedAt = time.Now().Add(-ChatsMaxAge)
+		snap.loadedAt = time.Now().Add(-chatsMaxAge)
 		fresh, err := c.Load(t.Context(), nil, false)
 		require.NoError(t, err)
 		assert.Equal(t, int64(2), l.calls.Load())

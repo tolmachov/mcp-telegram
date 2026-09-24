@@ -2,20 +2,20 @@ package tgdata
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/binary"
 	"fmt"
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 const (
-	// ChatsMaxAge bounds how old the newest snapshot may be before a
+	// chatsMaxAge bounds how old the newest snapshot may be before a
 	// non-refreshing read fetches a new one. Completion reads on every
 	// keystroke, so the listing must be cached, yet a chat joined a minute ago
 	// should still be suggested.
-	ChatsMaxAge = 30 * time.Second
+	chatsMaxAge = 30 * time.Second
 	// chatsCursorTTL bounds how long after its load a snapshot stays readable
 	// through a GetChats cursor.
 	chatsCursorTTL = 30 * time.Minute
@@ -95,7 +95,7 @@ func NewChatsCache(life context.Context, load ChatsLoader) *ChatsCache {
 }
 
 // Load returns the newest snapshot. It fetches a new one when the cache is
-// empty, when the newest snapshot is older than ChatsMaxAge, or when refresh
+// empty, when the newest snapshot is older than chatsMaxAge, or when refresh
 // is true; a refresh is only satisfied by a load that starts after the call,
 // never by one already running.
 //
@@ -124,7 +124,7 @@ func (c *ChatsCache) join(ctx context.Context, refresh bool) (*chatsFlight, *Cha
 		minSeq = c.started + 1
 	}
 	for {
-		if snap := c.newest(); !refresh && snap != nil && time.Since(snap.loadedAt) < ChatsMaxAge {
+		if snap := c.newest(); !refresh && snap != nil && time.Since(snap.loadedAt) < chatsMaxAge {
 			c.mu.Unlock()
 			return nil, snap, nil
 		}
@@ -192,7 +192,7 @@ func (c *ChatsCache) run(f *chatsFlight) {
 		f.err = err
 	} else {
 		f.snap = &ChatsSnapshot{
-			ID:        randomSnapshotID(),
+			ID:        tgclient.RandomID(),
 			Chats:     result.Chats,
 			Truncated: result.Truncated,
 			loadedAt:  time.Now(),
@@ -268,13 +268,4 @@ func (f *chatsFlight) wait(ctx context.Context) (*ChatsSnapshot, error) {
 	case <-f.done:
 		return f.snap, f.err
 	}
-}
-
-// randomSnapshotID returns a random non-zero ID, so a cursor from before a
-// server restart cannot match a new snapshot.
-func randomSnapshotID() int64 {
-	var b [8]byte
-	_, _ = rand.Read(b[:]) // crypto/rand.Read never errors on supported platforms
-	//nolint:gosec // G115: intentional full-width uint64→int64 reinterpretation for a random id; every bit pattern is a valid id.
-	return int64(binary.LittleEndian.Uint64(b[:])) | 1
 }

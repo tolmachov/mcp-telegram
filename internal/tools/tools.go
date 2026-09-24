@@ -2,8 +2,6 @@ package tools
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -73,6 +71,13 @@ func RegisterTools(s *mcp.Server, handlers []Handler) {
 // parseDate parses a date filter value (e.g. "from_date"): RFC3339, or
 // "YYYY-MM-DD[ HH:MM:SS]" read as UTC. An empty value yields the zero time,
 // meaning no bound.
+//
+// UTC is the default (not time.Local) because distributed MCP agents —
+// Claude Desktop on one machine, Claude Code CLI on another, or a remote
+// container — can live in different timezones than the user issuing the
+// prompt. Defaulting to Local would silently shift windows by hours
+// depending on where the server happens to run. Callers that want a
+// specific local window should pass RFC3339 with an explicit offset.
 func parseDate(value string) (time.Time, error) {
 	if value == "" {
 		return time.Time{}, nil
@@ -104,24 +109,14 @@ func parseDateWindow(from, to string) (time.Time, time.Time, *mcp.CallToolResult
 // No-op when the request has no progress token. The token is set by the client
 // in _meta.progressToken; the SDK exposes it via req.Params.GetProgressToken().
 func sendProgress(ctx context.Context, req *mcp.CallToolRequest, progress, total float64, message string) {
-	sendProgressWithToken(ctx, req.Session, requestProgressToken(req), progress, total, message)
-}
-
-func requestProgressToken(req *mcp.CallToolRequest) any {
-	if req.Params == nil {
-		return nil
-	}
-	return req.Params.GetProgressToken()
-}
-
-// sendProgressWithToken sends a single progress notification using an explicit
-// session + token captured at request time. Use this from long-lived progress
-// trackers (e.g. backupProgress) that don't carry the request around.
-func sendProgressWithToken(ctx context.Context, ss *mcp.ServerSession, token any, progress, total float64, message string) {
-	if ss == nil || token == nil {
+	if req.Session == nil || req.Params == nil {
 		return
 	}
-	if err := ss.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
+	token := req.Params.GetProgressToken()
+	if token == nil {
+		return
+	}
+	if err := req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
 		ProgressToken: token,
 		Progress:      progress,
 		Total:         total,
@@ -141,36 +136,28 @@ func sendProgressWithToken(ctx context.Context, ss *mcp.ServerSession, token any
 // are silently dropped in that case — they are not operational signals.
 // On delivery failure, errors and warnings are forwarded to slog.
 func mcpLog(ctx context.Context, ss *mcp.ServerSession, level mcp.LoggingLevel, logger string, data any) {
-	if ss == nil {
-		switch level {
-		case logLevelError:
-			slog.Error("mcp log (no session)", "logger", logger, "data", data)
-		case logLevelWarning:
-			slog.Warn("mcp log (no session)", "logger", logger, "data", data)
+	msg := "mcp log (no session)"
+	var err error
+	if ss != nil {
+		if err = ss.Log(ctx, &mcp.LoggingMessageParams{Level: level, Logger: logger, Data: data}); err == nil {
+			return
 		}
+		msg = "mcp log delivery failed"
+	}
+	var slogLevel slog.Level
+	switch level {
+	case logLevelError:
+		slogLevel = slog.LevelError
+	case logLevelWarning:
+		slogLevel = slog.LevelWarn
+	default:
 		return
 	}
-	if err := ss.Log(ctx, &mcp.LoggingMessageParams{
-		Level:  level,
-		Logger: logger,
-		Data:   data,
-	}); err != nil {
-		switch level {
-		case logLevelError:
-			slog.Error("mcp log delivery failed", "logger", logger, "data", data, "err", err)
-		case logLevelWarning:
-			slog.Warn("mcp log delivery failed", "logger", logger, "data", data, "err", err)
-		}
+	attrs := []any{"logger", logger, "data", data}
+	if err != nil {
+		attrs = append(attrs, "err", err)
 	}
-}
-
-// cryptoRandInt64 returns a cryptographically random int64 for use as
-// Telegram's random_id message deduplication field.
-func cryptoRandInt64() int64 {
-	var b [8]byte
-	_, _ = rand.Read(b[:]) // crypto/rand.Read never errors on supported platforms
-	//nolint:gosec // G115: intentional full-width uint64→int64 reinterpretation for a random id; every bit pattern is a valid id.
-	return int64(binary.LittleEndian.Uint64(b[:]))
+	slog.Log(ctx, slogLevel, msg, attrs...)
 }
 
 // AddTool registers a typed tool so that a non-success outcome can never reach

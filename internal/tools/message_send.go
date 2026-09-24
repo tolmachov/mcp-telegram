@@ -185,7 +185,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	// Send or schedule path.
 	sendReq := &tg.MessagesSendMessageRequest{
 		Message:  in.Message,
-		RandomID: cryptoRandInt64(),
+		RandomID: tgclient.RandomID(),
 	}
 	if replyToID > 0 {
 		sendReq.ReplyTo = &tg.InputReplyToMessage{ReplyToMsgID: replyToID}
@@ -224,47 +224,38 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 			return nil, res, nil
 		}
 		// Fell through to immediate send.
-		msgID, date = extractSentMessageID(updates)
-		if msgID == 0 {
-			mcpLog(ctx, req.Session, logLevelWarning, "SendMessage", map[string]any{
-				"action": "message_id_extraction_failed",
-				"note":   "Telegram returned an unrecognised update type; message_id in response is unreliable",
-			})
-		}
-		res.Status = "sent_immediate"
-		if msgID > 0 {
-			res.MessageID = presentation.FormatRegularRef(msgID)
-		} else {
-			res.Note = "message_id unavailable: Telegram returned an unrecognised update type. The message was delivered but cannot be referenced for edits or deletes until fetched via GetMessages."
-		}
+		fillSent(ctx, req, res, "sent_immediate", updates)
 		res.ScheduleAt = scheduleAtOut
 		if res.Note == "" {
 			res.Note = "schedule_at was under ~10 seconds away — Telegram delivered the message immediately instead of queueing it."
-		}
-		if date > 0 {
-			res.Date = formatUnixRFC3339(date)
 		}
 		return nil, res, nil
 	}
 
 	// Regular immediate send (mode=send or default).
+	fillSent(ctx, req, res, "sent", updates)
+	return nil, res, nil
+}
+
+// fillSent records in res, under status, the regular message updates says a
+// send delivered. When Telegram answered with an update the extractor cannot
+// read, the message was delivered but its ID is unknown: the note says so and
+// the operator hears of it.
+func fillSent(ctx context.Context, req *mcp.CallToolRequest, res *SendMessageResult, status string, updates tg.UpdatesClass) {
+	res.Status = status
 	msgID, date := extractSentMessageID(updates)
-	if msgID == 0 {
+	if msgID > 0 {
+		res.MessageID = presentation.FormatRegularRef(msgID)
+	} else {
 		mcpLog(ctx, req.Session, logLevelWarning, "SendMessage", map[string]any{
 			"action": "message_id_extraction_failed",
 			"note":   "Telegram returned an unrecognised update type; message_id in response is unreliable",
 		})
-	}
-	res.Status = "sent"
-	if msgID > 0 {
-		res.MessageID = presentation.FormatRegularRef(msgID)
-	} else {
 		res.Note = "message_id unavailable: Telegram returned an unrecognised update type. The message was delivered but cannot be referenced for edits or deletes until fetched via GetMessages."
 	}
 	if date > 0 {
 		res.Date = formatUnixRFC3339(date)
 	}
-	return nil, res, nil
 }
 
 // extractSentMessageID pulls the new message ID + date out of an UpdatesClass

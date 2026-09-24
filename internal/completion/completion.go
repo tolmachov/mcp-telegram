@@ -66,7 +66,7 @@ func Handler(chats *tgdata.ChatsCache) func(context.Context, *mcp.CompleteReques
 
 func (c *completer) handle(ctx context.Context, req *mcp.CompleteRequest) (*mcp.CompleteResult, error) {
 	if req == nil || req.Params == nil {
-		return emptyResult(), nil
+		return result(nil), nil
 	}
 	value := req.Params.Argument.Value
 	switch req.Params.Argument.Name {
@@ -77,7 +77,7 @@ func (c *completer) handle(ctx context.Context, req *mcp.CompleteRequest) (*mcp.
 	case "chat_id":
 		return result(c.completeChats(ctx, value, true)), nil
 	default:
-		return emptyResult(), nil
+		return result(nil), nil
 	}
 }
 
@@ -198,8 +198,4 @@ func result(values []string) *mcp.CompleteResult {
 			Total:  len(values),
 		},
 	}
-}
-
-func emptyResult() *mcp.CompleteResult {
-	return &mcp.CompleteResult{Completion: mcp.CompletionResultDetails{Values: []string{}}}
 }

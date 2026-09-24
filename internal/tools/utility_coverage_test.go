@@ -41,27 +41,23 @@ func TestLimitedAndProgressWriters(t *testing.T) {
 	assert.Equal(t, []int64{3}, reports)
 }
 
-func TestBackupProgressLifecycleAndBounds(t *testing.T) {
+func TestBackupProgressBounds(t *testing.T) {
 	from := time.Unix(100, 0)
 	to := time.Unix(200, 0)
-	bp := newBackupProgress(t.Context(), nil, nil, from, to, 0)
-	require.NoError(t, bp.Start())
-	assert.Error(t, bp.Start())
-	bp.SetMessage("working")
-	bp.SetMessageCount(5)
-	bp.UpdateEarliestTime(time.Unix(150, 0))
-	bp.UpdateEarliestTime(time.Unix(50, 0))
-	progress, total := bp.getProgress()
-	assert.Equal(t, 100, total)
-	assert.Equal(t, float64(100), progress)
-	bp.Send("done")
-	require.NoError(t, bp.Stop())
-	assert.Error(t, bp.Stop())
+	dated, stop := startBackupProgress(t.Context(), &mcp.CallToolRequest{}, from, to, 0)
+	assert.Zero(t, dated.percent(), "no message dated yet")
+	dated.update(1, 5, time.Unix(150, 0))
+	assert.Equal(t, float64(50), dated.percent())
+	dated.update(2, 9, time.Unix(50, 0))
+	dated.update(3, 9, time.Time{})
+	assert.Equal(t, float64(100), dated.percent(), "an earlier message before the window caps at 100")
+	dated.send("done")
+	stop()
 
-	counted := newBackupProgress(t.Context(), nil, nil, time.Time{}, time.Time{}, 2)
-	counted.SetMessageCount(3)
-	progress, _ = counted.getProgress()
-	assert.Equal(t, float64(100), progress)
+	counted, stop := startBackupProgress(t.Context(), &mcp.CallToolRequest{}, time.Time{}, time.Time{}, 2)
+	counted.update(1, 3, time.Unix(50, 0))
+	assert.Equal(t, float64(100), counted.percent())
+	stop()
 }
 
 func TestMessagePageCursorRoundTripAndRejection(t *testing.T) {

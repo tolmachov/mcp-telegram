@@ -163,21 +163,18 @@ func (h *MediaGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest, 
 	// Total size is unknown until the download completes, so report total=0 (indeterminate).
 	dl := downloader.NewDownloader()
 	var buf bytes.Buffer
-	token := requestProgressToken(req)
-	session := req.Session
-
-	mcpLog(ctx, session, logLevelInfo, "GetMedia", map[string]any{
+	mcpLog(ctx, req.Session, logLevelInfo, "GetMedia", map[string]any{
 		"media_id":   mediaID,
 		"thumb_size": thumbSize,
 	})
 
-	sendProgressWithToken(ctx, session, token, 0, 0, "Starting media download")
+	sendProgress(ctx, req, 0, 0, "Starting media download")
 	// Cap → progress → buffer. The cap aborts the download early if the file
 	// is larger than configured; without it a multi-GB attachment would OOM
 	// the process before base64-encoding.
 	limited := newLimitedWriter(&buf, int64(h.maxBytes))
 	pw := newProgressWriter(limited, 500*time.Millisecond, func(written int64) {
-		sendProgressWithToken(ctx, session, token, float64(written), 0, fmt.Sprintf("Downloaded %d bytes", written))
+		sendProgress(ctx, req, float64(written), 0, fmt.Sprintf("Downloaded %d bytes", written))
 	})
 
 	if _, err := dl.Download(h.client, location).Stream(ctx, pw); err != nil {
@@ -190,7 +187,7 @@ func (h *MediaGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest, 
 		}
 		return nil, nil, failed(op, err)
 	}
-	sendProgressWithToken(ctx, session, token, float64(buf.Len()), float64(buf.Len()), fmt.Sprintf("Downloaded %d bytes", buf.Len()))
+	sendProgress(ctx, req, float64(buf.Len()), float64(buf.Len()), fmt.Sprintf("Downloaded %d bytes", buf.Len()))
 
 	// Return as image content. The SDK marshals []byte to base64 in JSON, so
 	// pass raw bytes here — DO NOT base64-encode upfront.
