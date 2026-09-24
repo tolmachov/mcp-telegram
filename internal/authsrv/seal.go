@@ -43,7 +43,15 @@ var (
 	errUnknownKeyID  = fmt.Errorf("%w: sealed with a key not in the ring (rotated away or foreign deployment)", errInvalidBlob)
 	errBlobExpired   = fmt.Errorf("%w: expired", errInvalidBlob)
 	errInvalidClaims = fmt.Errorf("%w: malformed claims or foreign resource", errInvalidBlob)
+	// errIssuedInFuture marks an authentic blob (it decrypted with a ring key)
+	// whose issue time is ahead of this instance's clock: skew between
+	// instances, not tampering.
+	errIssuedInFuture = fmt.Errorf("%w: issued in the future beyond the allowed clock skew", errInvalidBlob)
 )
+
+// maxIssueSkew is how far a blob's issue time may run ahead of this
+// instance's clock, to absorb skew between the instances that seal and open it.
+const maxIssueSkew = 30 * time.Second
 
 // blobSpec fuses everything that must agree for one artifact type: the AAD
 // kind, the public prefix, and (via the type parameter) the claims struct.
@@ -122,8 +130,8 @@ func openBlob[T claims](s *sealer, spec blobSpec[T], blob string, now time.Time)
 	if !v.valid(s.issuer) {
 		return v, errInvalidClaims
 	}
-	if v.issuedAt() > now.Add(30*time.Second).Unix() {
-		return v, errInvalidBlob
+	if v.issuedAt() > now.Add(maxIssueSkew).Unix() {
+		return v, errIssuedInFuture
 	}
 	if spec.ttl > 0 && expired(v.issuedAt(), spec.ttl, now) {
 		return v, errBlobExpired

@@ -143,9 +143,10 @@ func TestOpenRejects(t *testing.T) {
 		assert.ErrorIs(t, err, errInvalidBlob)
 	})
 	t.Run("future issued-at beyond clock skew rejected", func(t *testing.T) {
-		future, err := sealBlob(s, accessBlob, accessClaims{Subject: 1, grantClaims: testGrant(), IssuedAt: now.Add(31 * time.Second).Unix()})
+		future, err := sealBlob(s, accessBlob, accessClaims{Subject: 1, grantClaims: testGrant(), IssuedAt: now.Add(maxIssueSkew + time.Second).Unix()})
 		require.NoError(t, err)
 		_, err = openBlob(s, accessBlob, future, now)
+		assert.ErrorIs(t, err, errIssuedInFuture)
 		assert.ErrorIs(t, err, errInvalidBlob)
 	})
 }
