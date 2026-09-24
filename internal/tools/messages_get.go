@@ -42,7 +42,7 @@ type GetMessagesInput struct {
 type getMessagesOutput struct {
 	ChatID            int64                  `json:"chat_id"`
 	Messages          []presentation.Message `json:"messages"`
-	ScheduledMessages []presentation.Message `json:"scheduled_messages,omitempty"`
+	ScheduledMessages []presentation.Message `json:"scheduled_messages,omitzero"`
 	Count             int                    `json:"count"`
 	HasMore           bool                   `json:"has_more"`
 	NextCursor        string                 `json:"next_cursor,omitempty"`
@@ -120,9 +120,9 @@ func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	// should not fail the whole tool: the caller still gets the regular
 	// history, with a warning that the scheduled list is missing.
 	if in.IncludeScheduled {
-		// Always initialise as a non-nil empty slice so JSON emits "[]" rather
-		// than omitting the field — clients/LLMs then see an unambiguous
-		// "no pending scheduled messages" signal.
+		// A non-nil empty slice is no zero value, so JSON emits "[]" rather
+		// than omitting the field (omitzero) — clients/LLMs then see an
+		// unambiguous "no pending scheduled messages" signal.
 		out.ScheduledMessages = make([]presentation.Message, 0)
 		scheduled, err := h.provider.FetchScheduled(ctx, in.ChatID)
 		if err != nil {

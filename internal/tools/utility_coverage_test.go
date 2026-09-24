@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -217,6 +218,9 @@ func TestGetMessagesWarnsWhenScheduledFetchFails(t *testing.T) {
 	require.Nil(t, errRes)
 	require.Len(t, out.Messages, 1)
 	assert.Empty(t, out.ScheduledMessages)
+	encoded, err := json.Marshal(out)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"scheduled_messages":[]`, "an asked-for scheduled list is present even when empty")
 	assert.Equal(t, "The scheduled messages could not be fetched, so scheduled_messages says nothing about them: getting scheduled messages: boom.", out.Warning)
 	assert.Zero(t, inv.Remaining())
 }
