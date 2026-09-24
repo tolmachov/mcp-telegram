@@ -284,12 +284,7 @@ func toolFailure(ctx context.Context, req *mcp.CallToolRequest, tool string, err
 }
 
 // failureText renders a handler error as "Failed to <op>: <what happened>",
-// followed by the failure's note and then its hint. A refusal the home DC did
-// not confirm shows the error with what it means for the session instead of
-// any hint; a systemic error gets its fixed guidance as what happened
-// (systemicText) and no hint; anything else shows the error itself, followed
-// by the failure's own hint or, lacking one, the peer hint when the failure is
-// about the chat the call named.
+// followed by the failure's note and then the hint describe picks.
 func failureText(tool string, err error) string {
 	// The outermost op names what failed; the outermost note and hint win.
 	op, note, hint, cause := "run "+tool, "", "", err
@@ -310,18 +305,7 @@ func failureText(tool string, err error) string {
 		}
 		e = f.err
 	}
-	var what string
-	var unconfirmed *tgclient.UnconfirmedRefusalError
-	switch {
-	case errors.As(cause, &unconfirmed):
-		what, hint = sentence(cause), unconfirmedRefusalHint(unconfirmed)
-	case tgclient.IsSystemic(cause):
-		what, hint = systemicText(tool, cause), ""
-	case hint == "" && tgclient.IsPeerSpecific(cause):
-		what, hint = sentence(cause), peerHint
-	default:
-		what = sentence(cause)
-	}
+	what, hint := describe(tool, cause, hint)
 	text := fmt.Sprintf("Failed to %s: %s", op, what)
 	for _, s := range []string{note, hint} {
 		if s != "" {
@@ -331,28 +315,37 @@ func failureText(tool string, err error) string {
 	return text
 }
 
-// unconfirmedRefusalHint says what a refusal the home DC did not confirm means
-// for the session, so the model does not send the user through a login the
-// session does not need.
-func unconfirmedRefusalHint(err *tgclient.UnconfirmedRefusalError) string {
-	if err.Check == nil {
-		return "The session itself is still valid, so do not ask the user to sign in again: the Telegram server this call was routed to (such as the one storing a file) refused the authorisation the server handed it, and keeps refusing such calls until the server reconnects to Telegram. Other tools keep working."
+// describe is the one rendering of an error a tool reports, whether as its
+// failure (failureText) or as the warning of a batch the error cut short: it
+// returns what happened and the hint to follow it, given hint, the one the
+// failure carries. A refusal by a DC other than the home one gets what it
+// means for the session instead of any hint. A systemic error gets no hint: a
+// flood wait gets its fixed guidance as what happened, and a dead session is
+// explained by the server, not here, because how to recover it depends on
+// the transport — the client stops on it, and the server appends its
+// explanation to the call the client stopped under and answers every later
+// one with it. Anything else shows the error itself, followed by hint or,
+// lacking one, the peer hint when the error is about the chat the call named.
+func describe(tool string, cause error, hint string) (what, next string) {
+	switch {
+	case errors.Is(cause, tgclient.ErrSecondaryRefusal):
+		return sentence(cause), secondaryRefusalHint
+	case tgclient.IsSystemic(cause):
+		if flood, ok := floodWaitMessage(tool, cause); ok {
+			return flood, ""
+		}
+		return sentence(cause), ""
+	case hint == "" && tgclient.IsPeerSpecific(cause):
+		return sentence(cause), peerHint
+	default:
+		return sentence(cause), hint
 	}
-	return "Whether the session is still valid is unknown: retry shortly, and ask the user to sign in again only if a later call reports that Telegram refused the session."
 }
 
-// systemicText renders err, for which tgclient.IsSystemic holds: a flood wait
-// gets its fixed guidance, and anything else shows the error itself. A dead
-// session is explained by the server, not here, because how to recover it
-// depends on the transport: once the home DC confirms Telegram refuses the
-// session the client stops, and the server appends its explanation to the
-// call the client stopped under and answers every later one with it.
-func systemicText(tool string, err error) string {
-	if flood, ok := floodWaitMessage(tool, err); ok {
-		return flood
-	}
-	return sentence(err)
-}
+// secondaryRefusalHint says what a refusal by a DC other than the home one
+// means while the home DC is asked about the session, so the model does not
+// send the user through a login the session may not need.
+const secondaryRefusalHint = "Do not ask the user to sign in again because of this error: it says nothing about the session itself. If the home DC still accepts the session, the server drops its Telegram connection so that reconnecting restores such calls, and later calls say what reconnecting takes; if the home DC refuses the session too, later calls report that."
 
 // sentence renders err as a sentence ending in a full stop, so a hint can
 // follow it.
@@ -479,7 +472,7 @@ func firstMessageInUpdates(updates tg.UpdatesClass, typeIDs ...uint32) (int, int
 // floodWaitMessage returns the deterministic retry-after guidance for a
 // Telegram FLOOD_WAIT — including the form the flood-wait middleware wraps
 // when the wait exceeds its configured max (tgerr.AsFloodWait unwraps the
-// chain) — or ok=false when err is not a flood wait. systemicText renders it
+// chain) — or ok=false when err is not a flood wait. describe renders it
 // both for every tool's failure and for batch handlers (e.g. MarkAsRead) that
 // embed it in an aggregated result instead.
 //

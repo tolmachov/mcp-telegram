@@ -344,7 +344,7 @@ func TestMarkAsReadDeadSessionStopsBatch(t *testing.T) {
 	script := []telegramfake.InvokeFunc{notUserStep(t, channelID), resolveChannelStep(t, channelID, 1)}
 	script = append(script, basicGroupSteps(t, groupID)...)
 	script = append(script, telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetPeerDialogsRequest, _ *tg.MessagesPeerDialogs) error {
-		// The verdict a confirmed refusal reaches the call as.
+		// The verdict a refusal by the home DC reaches the call as.
 		return fmt.Errorf("%w: %w", tgclient.ErrSessionUnauthorized, tgerr.New(401, "AUTH_KEY_UNREGISTERED"))
 	}))
 	inv := telegramfake.New(script...)
@@ -356,6 +356,7 @@ func TestMarkAsReadDeadSessionStopsBatch(t *testing.T) {
 	require.NotNil(t, out)
 	assert.Zero(t, out.TotalChats)
 	assert.Equal(t, []int64{channelID, groupID}, out.SkippedIDs)
-	assert.Contains(t, out.Warning, "AUTH_KEY_UNREGISTERED", "the server explains the dead session; the warning names the cause")
+	assert.Equal(t, "getting channel top messages: telegram session is not authorized: rpc error code 401: AUTH_KEY_UNREGISTERED.", out.Warning,
+		"the warning renders the cause as a tool failure does; the server explains the dead session")
 	assert.Len(t, inv.RequestTypes(), len(script), "no call follows the systemic failure")
 }

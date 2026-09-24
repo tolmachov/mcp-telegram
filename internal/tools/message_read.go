@@ -116,7 +116,8 @@ func (h *MessageReadHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	stopped := func(pending []int64, err error) (*mcp.CallToolResult, *MarkAsReadResult, error) {
 		out := h.buildResult(results)
 		out.SkippedIDs = append([]int64(nil), pending...)
-		out.Warning = systemicText("MarkAsRead", err)
+		what, hint := describe("MarkAsRead", err, "")
+		out.Warning = strings.TrimSpace(what + " " + hint)
 		return nil, out, nil
 	}
 

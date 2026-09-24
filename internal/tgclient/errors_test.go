@@ -19,8 +19,8 @@ func TestIsSystemic(t *testing.T) {
 	assert.True(t, IsSystemic(context.Canceled))
 	assert.True(t, IsSystemic(context.DeadlineExceeded))
 	assert.True(t, IsSystemic(&tgerr.Error{Code: 420, Type: "FLOOD_WAIT", Message: "FLOOD_WAIT_5", Argument: 5}))
-	// A dead session is systemic once confirmed; Telegram's bare reply to one
-	// call is not (see Running.confirmRefusal).
+	// A dead session is systemic once it is the verdict; Telegram's bare
+	// reply to one call is not (see Running.refusalWatch).
 	assert.True(t, IsSystemic(fmt.Errorf("%w: %w", ErrSessionUnauthorized, tgerr.New(401, "SESSION_REVOKED"))))
 	assert.False(t, IsSystemic(tgerr.New(401, "AUTH_KEY_UNREGISTERED")))
 	// A wrapped systemic error stays systemic.
