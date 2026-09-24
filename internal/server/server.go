@@ -385,11 +385,14 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 		}
 	}()
 	api := client.API()
+	// One peer resolver — cache and stale-hash retry — shared by every tool,
+	// resource and the message provider.
+	peers := tgclient.NewResolver(life, api)
 	// One chat-list cache shared by GetChats, SearchChats, the chats
 	// resource and completion, so none of them re-paginates every dialog on
 	// its own.
 	chatsCache := tgdata.NewChatsCache(life, func(ctx context.Context, onProgress tgdata.ProgressFunc) (*tgdata.ChatsList, error) {
-		return tgdata.GetChats(ctx, api, onProgress)
+		return tgdata.GetChats(ctx, peers, onProgress)
 	})
 
 	impl := &mcp.Implementation{Name: "mcp-telegram", Version: s.opts.Version}
@@ -401,9 +404,6 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 		CompletionHandler: completion.Handler(chatsCache),
 	}
 
-	// One peer resolver — cache and stale-hash retry — shared by every tool,
-	// resource and the message provider.
-	peers := tgclient.NewResolver(life, api)
 	// The message provider owns the rate limiter its fetches wait on. The
 	// RPS ceiling is configurable (--tg-rate-limit-rps) so operators can
 	// loosen it when fetches bottleneck on it. Raising it too high will trip
@@ -587,7 +587,7 @@ func (s *Server) buildHandlers(api *tg.Client, peers *tgclient.Resolver, msgProv
 	research = []tools.Handler{
 		tools.NewMeGetHandler(api),
 		tools.NewChatsGetHandler(chatsCache),
-		tools.NewChatsSearchHandler(api, chatsCache),
+		tools.NewChatsSearchHandler(peers, chatsCache),
 		tools.NewChatInfoGetHandler(peers),
 		tools.NewMessagesGetHandler(msgProvider),
 		tools.NewMessagesSearchHandler(msgProvider),
@@ -595,8 +595,8 @@ func (s *Server) buildHandlers(api *tg.Client, peers *tgclient.Resolver, msgProv
 		tools.NewMessageContextGetHandler(msgProvider),
 		tools.NewGetRepliesHandler(msgProvider),
 		tools.NewGetForumTopicsHandler(msgProvider),
-		tools.NewUsernameResolveHandler(api),
-		tools.NewMessageLinkResolveHandler(api),
+		tools.NewUsernameResolveHandler(peers),
+		tools.NewMessageLinkResolveHandler(peers),
 		tools.NewChatSummarizeHandler(msgProvider, s.summarizer),
 		tools.NewMediaGetHandler(api, s.opts.MediaMaxBytes),
 		tools.NewGetFoldersHandler(api),

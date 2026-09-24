@@ -134,7 +134,7 @@ func (h *JoinChatHandler) joinByInvite(ctx context.Context, chat, hash string) (
 
 // joinByUsername resolves a public @username to a channel and joins it.
 func (h *JoinChatHandler) joinByUsername(ctx context.Context, chat, username string) (*mcp.CallToolResult, *JoinChatResult, error) {
-	input, channel, err := resolveChannelByUsername(ctx, h.client, username)
+	input, channel, err := resolveChannelByUsername(ctx, h.peers, username)
 	if err != nil {
 		return nil, nil, failedHint("resolve @"+username, err, "You can only join channels and supergroups by username; for a private chat use its invite link instead.")
 	}
@@ -336,7 +336,7 @@ func resolveChatRef(ctx context.Context, peers *tgclient.Resolver, ref string) (
 	case chatRefInvite:
 		return tgclient.Peer{}, errInviteChatRef
 	case chatRefUsername:
-		resolved, err := resolvePublicUsername(ctx, peers.Client(), value)
+		resolved, err := resolvePublicUsername(ctx, peers, value)
 		if err != nil {
 			return tgclient.Peer{}, err
 		}
@@ -403,8 +403,8 @@ func chatRefFromURL(s string) (kind, value string, ok bool) {
 // it names, returning both the InputChannel needed for join/leave and the full
 // *tg.Channel for metadata. Users and basic chats are rejected — only
 // channels/supergroups have a public username you can act on this way.
-func resolveChannelByUsername(ctx context.Context, client *tg.Client, username string) (*tg.InputChannel, *tg.Channel, error) {
-	resolved, err := resolvePublicUsername(ctx, client, username)
+func resolveChannelByUsername(ctx context.Context, peers *tgclient.Resolver, username string) (*tg.InputChannel, *tg.Channel, error) {
+	resolved, err := resolvePublicUsername(ctx, peers, username)
 	if err != nil {
 		return nil, nil, err
 	}

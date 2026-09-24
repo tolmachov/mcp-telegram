@@ -23,16 +23,19 @@ import (
 
 // resolvePublicUsername normalises a public username (with or without a leading
 // @), rejects empty input as a reference that names no chat
-// (tgclient.ErrUnresolvablePeer), and calls contacts.resolveUsername.
-func resolvePublicUsername(ctx context.Context, client *tg.Client, username string) (*tg.ContactsResolvedPeer, error) {
+// (tgclient.ErrUnresolvablePeer), and calls contacts.resolveUsername. The
+// entities of the answer feed peers' cache, so the IDs it hands out resolve
+// without a probe.
+func resolvePublicUsername(ctx context.Context, peers *tgclient.Resolver, username string) (*tg.ContactsResolvedPeer, error) {
 	username = strings.TrimPrefix(strings.TrimSpace(username), "@")
 	if username == "" {
 		return nil, fmt.Errorf("%w: empty username", tgclient.ErrUnresolvablePeer)
 	}
-	resolved, err := client.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{Username: username})
+	resolved, err := peers.Client().ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{Username: username})
 	if err != nil {
 		return nil, fmt.Errorf("resolving @%s: %w", username, err)
 	}
+	peers.Remember(resolved.Users, resolved.Chats)
 	return resolved, nil
 }
 

@@ -7,10 +7,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/presentation"
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // MessageLinkResolveHandler handles the ResolveMessageLink tool. It turns a
@@ -18,12 +18,12 @@ import (
 // rest of the toolbox expects, saving the model a two-step dance of
 // ResolveUsername → GetMessages when it already has a direct link.
 type MessageLinkResolveHandler struct {
-	client *tg.Client
+	peers *tgclient.Resolver
 }
 
 // NewMessageLinkResolveHandler creates a new MessageLinkResolveHandler.
-func NewMessageLinkResolveHandler(client *tg.Client) *MessageLinkResolveHandler {
-	return &MessageLinkResolveHandler{client: client}
+func NewMessageLinkResolveHandler(peers *tgclient.Resolver) *MessageLinkResolveHandler {
+	return &MessageLinkResolveHandler{peers: peers}
 }
 
 // ResolveMessageLinkInput is the input for the ResolveMessageLink tool.
@@ -85,7 +85,7 @@ func (h *MessageLinkResolveHandler) handle(ctx context.Context, _ *mcp.CallToolR
 	}
 
 	if parsed.Username != "" {
-		resolved, err := resolvePublicUsername(ctx, h.client, parsed.Username)
+		resolved, err := resolvePublicUsername(ctx, h.peers, parsed.Username)
 		if err != nil {
 			return nil, nil, failed("resolve the link's username", err)
 		}

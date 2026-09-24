@@ -8,17 +8,18 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
 // UsernameResolveHandler handles the ResolveUsername tool.
 type UsernameResolveHandler struct {
-	client *tg.Client
+	peers *tgclient.Resolver
 }
 
 // NewUsernameResolveHandler creates a new UsernameResolveHandler.
-func NewUsernameResolveHandler(client *tg.Client) *UsernameResolveHandler {
-	return &UsernameResolveHandler{client: client}
+func NewUsernameResolveHandler(peers *tgclient.Resolver) *UsernameResolveHandler {
+	return &UsernameResolveHandler{peers: peers}
 }
 
 // ResolveUsernameInput is the input for the ResolveUsername tool.
@@ -65,7 +66,7 @@ func (h *UsernameResolveHandler) handle(ctx context.Context, _ *mcp.CallToolRequ
 		return errResult("username is required (e.g. '@durov' or 'durov'). For chats without a public @username, use SearchChats by title instead."), nil, nil
 	}
 
-	resolved, err := resolvePublicUsername(ctx, h.client, username)
+	resolved, err := resolvePublicUsername(ctx, h.peers, username)
 	if err != nil {
 		return nil, nil, failedHint("resolve @"+username, err, "The user/chat may not exist, may be private, or may not have a public @username. Try SearchChats with a partial title instead.")
 	}

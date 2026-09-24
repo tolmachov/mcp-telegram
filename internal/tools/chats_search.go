@@ -12,20 +12,22 @@ import (
 	"github.com/lithammer/fuzzysearch/fuzzy"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 	"github.com/tolmachov/mcp-telegram/internal/tgdata"
 )
 
 // ChatsSearchHandler handles the SearchChats tool.
 type ChatsSearchHandler struct {
-	client *tg.Client
-	cache  *tgdata.ChatsCache
+	peers *tgclient.Resolver
+	cache *tgdata.ChatsCache
 }
 
 // NewChatsSearchHandler creates a new ChatsSearchHandler. It shares the chat
 // snapshot held by cache with GetChats, so a local search reuses an already
-// loaded listing instead of re-paginating every dialog.
-func NewChatsSearchHandler(client *tg.Client, cache *tgdata.ChatsCache) *ChatsSearchHandler {
-	return &ChatsSearchHandler{client: client, cache: cache}
+// loaded listing instead of re-paginating every dialog; the chats a global
+// search finds feed peers' cache, so their IDs resolve without a probe.
+func NewChatsSearchHandler(peers *tgclient.Resolver, cache *tgdata.ChatsCache) *ChatsSearchHandler {
+	return &ChatsSearchHandler{peers: peers, cache: cache}
 }
 
 // SearchChatsInput is the input for the SearchChats tool.
@@ -87,7 +89,7 @@ func (h *ChatsSearchHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	}
 	var globalResults []tgdata.ChatInfo
 	var globalErr error
-	if h.client != nil {
+	if h.peers != nil {
 		globalResults, globalErr = h.searchGlobal(ctx, query)
 	}
 	if globalErr != nil {
@@ -114,13 +116,14 @@ func (h *ChatsSearchHandler) handle(ctx context.Context, req *mcp.CallToolReques
 
 // searchGlobal performs Telegram's global search by username.
 func (h *ChatsSearchHandler) searchGlobal(ctx context.Context, query string) ([]tgdata.ChatInfo, error) {
-	found, err := h.client.ContactsSearch(ctx, &tg.ContactsSearchRequest{
+	found, err := h.peers.Client().ContactsSearch(ctx, &tg.ContactsSearchRequest{
 		Q:     query,
 		Limit: 20,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("searching contacts: %w", err)
 	}
+	h.peers.Remember(found.Users, found.Chats)
 
 	var results []tgdata.ChatInfo
 

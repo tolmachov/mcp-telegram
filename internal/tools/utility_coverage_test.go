@@ -95,16 +95,22 @@ func TestReadOnlyHandlersUseExpectedRPCs(t *testing.T) {
 		inv := telegramfake.New(
 			telegramfake.Typed(func(_ context.Context, req *tg.ContactsResolveUsernameRequest, out *tg.ContactsResolvedPeer) error {
 				assert.Equal(t, "public", req.Username)
-				out.Users = []tg.UserClass{&tg.User{ID: 1, Username: "public", FirstName: "A", Self: true}}
-				out.Chats = []tg.ChatClass{&tg.Channel{ID: 2, Username: "public", Title: "Public", Megagroup: true}}
+				out.Users = []tg.UserClass{&tg.User{ID: 1, AccessHash: 11, Username: "public", FirstName: "A", Self: true}}
+				out.Chats = []tg.ChatClass{&tg.Channel{ID: 2, AccessHash: 22, Username: "public", Title: "Public", Megagroup: true}}
 				return nil
 			}),
 		)
-		errRes, out, err := NewUsernameResolveHandler(tg.NewClient(inv)).handle(t.Context(), &mcp.CallToolRequest{}, ResolveUsernameInput{Username: "@public"})
+		peers := tgclient.NewResolver(t.Context(), tg.NewClient(inv))
+		errRes, out, err := NewUsernameResolveHandler(peers).handle(t.Context(), &mcp.CallToolRequest{}, ResolveUsernameInput{Username: "@public"})
 		require.NoError(t, err)
 		require.Nil(t, errRes)
 		require.Len(t, out.Entities, 2)
 		assert.Equal(t, tgdata.ChatTypeSupergroup, out.Entities[1].Kind)
+		// Both entities resolve from the cache: the script has no probe left.
+		for _, entity := range out.Entities {
+			_, err := peers.Resolve(t.Context(), entity.ID)
+			require.NoError(t, err)
+		}
 		assert.Zero(t, inv.Remaining())
 	})
 

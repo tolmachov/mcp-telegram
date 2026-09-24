@@ -1,6 +1,7 @@
 package tgclient
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"strconv"
@@ -21,6 +22,7 @@ const (
 )
 
 type peerCacheEntry struct {
+	id        int64
 	peer      Peer
 	expiresAt time.Time
 }
@@ -29,16 +31,21 @@ type peerCacheEntry struct {
 // that turns a chat ID into a peer goes through it. It caches resolved peers
 // in a bounded, expiring map, collapses concurrent cold resolves of the same
 // ID into one Telegram probe, and owns the stale-access-hash retry (WithPeer
-// and its variants).
+// and its variants). Entities Telegram returns alongside other answers — a
+// username resolution, a dialog listing, a contact search — feed the cache
+// too (Remember), so an ID the model got from them resolves without a probe.
 type Resolver struct {
 	// life is the lifetime of the resolver's owner; probes run on it.
 	life   context.Context
 	client *tg.Client
 
 	mu   sync.RWMutex
-	byID map[int64]peerCacheEntry
-	load singleflight.Group
-	now  func() time.Time
+	byID map[int64]*list.Element
+	// order holds the cached entries (*peerCacheEntry) oldest store first.
+	// Every entry lives peerCacheTTL, so this is also expiry order: the
+	// front is the first to expire, and the one a full cache drops.
+	order *list.List
+	load  singleflight.Group
 }
 
 // NewResolver creates a resolver over client. life is the lifetime of the
@@ -48,8 +55,8 @@ func NewResolver(life context.Context, client *tg.Client) *Resolver {
 	return &Resolver{
 		life:   life,
 		client: client,
-		byID:   make(map[int64]peerCacheEntry),
-		now:    time.Now,
+		byID:   make(map[int64]*list.Element),
+		order:  list.New(),
 	}
 }
 
@@ -96,43 +103,76 @@ func (r *Resolver) Resolve(ctx context.Context, id int64) (Peer, error) {
 
 func (r *Resolver) cached(id int64) (Peer, bool) {
 	r.mu.RLock()
-	entry, ok := r.byID[id]
-	r.mu.RUnlock()
-	if !ok || !r.now().Before(entry.expiresAt) {
+	defer r.mu.RUnlock()
+	el, ok := r.byID[id]
+	if !ok {
+		return Peer{}, false
+	}
+	entry := el.Value.(*peerCacheEntry)
+	if !time.Now().Before(entry.expiresAt) {
 		return Peer{}, false
 	}
 	return entry.peer, true
 }
 
-// store caches peer under id. Only a full cache is swept: expired entries go
-// first and, if none had expired, one arbitrary entry makes room.
+// store caches peer under id for peerCacheTTL. A full cache drops its oldest
+// entry, which is the first to expire: an expired one when there is any.
 func (r *Resolver) store(id int64, peer Peer) {
-	now := r.now()
+	entry := &peerCacheEntry{id: id, peer: peer, expiresAt: time.Now().Add(peerCacheTTL)}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.byID[id]; !ok && len(r.byID) >= peerCacheMaxEntries {
-		for victim, entry := range r.byID {
-			if !now.Before(entry.expiresAt) {
-				delete(r.byID, victim)
-			}
+	if el, ok := r.byID[id]; ok {
+		el.Value = entry
+		r.order.MoveToBack(el)
+		return
+	}
+	if r.order.Len() >= peerCacheMaxEntries {
+		oldest := r.order.Front()
+		delete(r.byID, oldest.Value.(*peerCacheEntry).id)
+		r.order.Remove(oldest)
+	}
+	r.byID[id] = r.order.PushBack(entry)
+}
+
+// Remember caches the peers of the users and chats Telegram returned with an
+// answer. An entity no InputPeer can be built from is skipped: one without
+// its access hash (see PeerFromEntity), a min entity, whose access hash is
+// valid only alongside the message it came with, and a forbidden chat.
+func (r *Resolver) Remember(users []tg.UserClass, chats []tg.ChatClass) {
+	for _, u := range users {
+		if user, ok := u.(*tg.User); ok && !user.Min {
+			r.remember(PeerFromEntity(user))
 		}
-		if len(r.byID) >= peerCacheMaxEntries {
-			for victim := range r.byID {
-				delete(r.byID, victim)
-				break
+	}
+	for _, c := range chats {
+		switch chat := c.(type) {
+		case *tg.Chat:
+			r.remember(PeerFromEntity(chat))
+		case *tg.Channel:
+			if !chat.Min {
+				r.remember(PeerFromEntity(chat))
 			}
 		}
 	}
-	r.byID[id] = peerCacheEntry{peer: peer, expiresAt: now.Add(peerCacheTTL)}
+}
+
+// remember caches peer unless building it failed.
+func (r *Resolver) remember(peer Peer, err error) {
+	if err == nil {
+		r.store(peer.ID(), peer)
+	}
 }
 
 // Invalidate drops the cached peers for ids.
 func (r *Resolver) Invalidate(ids ...int64) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	for _, id := range ids {
-		delete(r.byID, id)
+		if el, ok := r.byID[id]; ok {
+			delete(r.byID, id)
+			r.order.Remove(el)
+		}
 	}
-	r.mu.Unlock()
 }
 
 // WithPeer resolves id and runs op with its peer. When op fails with a stale

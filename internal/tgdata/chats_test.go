@@ -10,6 +10,8 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 type dialogsInvoker struct{ err error }
@@ -27,10 +29,10 @@ func (d dialogsInvoker) Invoke(_ context.Context, input bin.Encoder, output bin.
 			&tg.Dialog{Peer: &tg.PeerChat{ChatID: 2}},
 			&tg.Dialog{Peer: &tg.PeerChannel{ChannelID: 3}, FolderID: 1},
 		},
-		Users: []tg.UserClass{&tg.User{ID: 1, FirstName: "Alice", Username: "alice", Bot: true}},
+		Users: []tg.UserClass{&tg.User{ID: 1, AccessHash: 11, FirstName: "Alice", Username: "alice", Bot: true}},
 		Chats: []tg.ChatClass{
 			&tg.Chat{ID: 2, Title: "Group"},
-			&tg.Channel{ID: 3, Title: "Channel", Username: "channel"},
+			&tg.Channel{ID: 3, AccessHash: 33, Title: "Channel", Username: "channel"},
 		},
 	}
 	return nil
@@ -129,9 +131,9 @@ func TestDialogToChatInfoAllPeerTypesAndFlags(t *testing.T) {
 }
 
 func TestGetChatsOnePageAndError(t *testing.T) {
-	client := tg.NewClient(dialogsInvoker{})
+	peers := tgclient.NewResolver(t.Context(), tg.NewClient(dialogsInvoker{}))
 	var progressCalls int
-	result, err := GetChats(t.Context(), client, func(int, string) { progressCalls++ })
+	result, err := GetChats(t.Context(), peers, func(int, string) { progressCalls++ })
 	require.NoError(t, err)
 	require.Len(t, result.Chats, 3)
 	assert.Equal(t, 3, result.Count)
@@ -140,7 +142,13 @@ func TestGetChatsOnePageAndError(t *testing.T) {
 	assert.Equal(t, ChatTypeBot, result.Chats[0].Type)
 	assert.Equal(t, ChatTypeGroup, result.Chats[1].Type)
 	assert.Equal(t, ChatTypeChannel, result.Chats[2].Type)
+	// The listing's entities fed the resolver: its fake answers nothing but
+	// messages.getDialogs, so a probe would fail.
+	for _, chat := range result.Chats {
+		_, err := peers.Resolve(t.Context(), chat.ID)
+		require.NoError(t, err, "chat %d must resolve from the cache", chat.ID)
+	}
 
-	_, err = GetChats(t.Context(), tg.NewClient(dialogsInvoker{err: fmt.Errorf("boom")}), nil)
+	_, err = GetChats(t.Context(), tgclient.NewResolver(t.Context(), tg.NewClient(dialogsInvoker{err: fmt.Errorf("boom")})), nil)
 	assert.ErrorContains(t, err, "listing chats")
 }

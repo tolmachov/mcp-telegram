@@ -214,45 +214,86 @@ func TestResolverDoesNotCacheErrors(t *testing.T) {
 
 // TestResolverExpiresAndEvicts covers the TTL and the bound on the cache.
 func TestResolverExpiresAndEvicts(t *testing.T) {
-	var calls atomic.Int32
-	r := NewResolver(t.Context(), channelClient(&calls, func() int64 { return 1 }))
-	now := time.Unix(0, 0)
-	r.now = func() time.Time { return now }
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int32
+		r := NewResolver(t.Context(), channelClient(&calls, func() int64 { return 1 }))
 
-	_, err := r.Resolve(t.Context(), 1)
-	require.NoError(t, err)
-	now = now.Add(peerCacheTTL)
-	_, err = r.Resolve(t.Context(), 1)
-	require.NoError(t, err)
-	assert.Equal(t, int32(2), calls.Load(), "an expired entry must be resolved afresh")
+		_, err := r.Resolve(t.Context(), 1)
+		require.NoError(t, err)
+		time.Sleep(peerCacheTTL)
+		_, err = r.Resolve(t.Context(), 1)
+		require.NoError(t, err)
+		assert.Equal(t, int32(2), calls.Load(), "an expired entry must be resolved afresh")
 
-	for id := int64(2); id <= peerCacheMaxEntries+1; id++ {
-		r.store(id, Peer{Input: &tg.InputPeerChat{ChatID: id}})
-	}
-	assert.Len(t, r.byID, peerCacheMaxEntries)
+		for id := int64(2); id <= peerCacheMaxEntries+1; id++ {
+			r.store(id, Peer{Input: &tg.InputPeerChat{ChatID: id}})
+		}
+		assert.Len(t, r.byID, peerCacheMaxEntries)
+		assert.Equal(t, peerCacheMaxEntries, r.order.Len())
+	})
 }
 
 // TestResolverEvictionPrefersExpired verifies a full cache makes room by
-// dropping expired entries, keeping every live one.
+// dropping the entry that expires first — an expired one when there is any —
+// keeping every live one.
 func TestResolverEvictionPrefersExpired(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		r := NewResolver(t.Context(), nil)
+
+		const expired = int64(1)
+		r.store(expired, Peer{Input: &tg.InputPeerChat{ChatID: expired}})
+		time.Sleep(peerCacheTTL / 2)
+		for id := expired + 1; id <= peerCacheMaxEntries; id++ {
+			r.store(id, Peer{Input: &tg.InputPeerChat{ChatID: id}})
+		}
+		// Storing a cached ID again renews it rather than taking a slot.
+		r.store(expired+1, Peer{Input: &tg.InputPeerChat{ChatID: expired + 1}})
+		require.Len(t, r.byID, peerCacheMaxEntries)
+
+		time.Sleep(peerCacheTTL / 2) // only the first entry has expired
+		r.store(peerCacheMaxEntries+1, Peer{Input: &tg.InputPeerChat{ChatID: peerCacheMaxEntries + 1}})
+		assert.Len(t, r.byID, peerCacheMaxEntries)
+		_, kept := r.byID[expired]
+		assert.False(t, kept, "the expired entry makes room")
+		for id := expired + 1; id <= peerCacheMaxEntries+1; id++ {
+			if _, ok := r.byID[id]; !ok {
+				t.Fatalf("live entry %d was evicted while an expired one existed", id)
+			}
+		}
+	})
+}
+
+// TestResolverRemember verifies the entities of another answer feed the cache,
+// skipping those no InputPeer can be built from.
+func TestResolverRemember(t *testing.T) {
 	r := NewResolver(t.Context(), nil)
-	now := time.Unix(0, 0)
-	r.now = func() time.Time { return now }
+	r.Remember(
+		[]tg.UserClass{
+			&tg.User{ID: 1, AccessHash: 11},
+			&tg.User{ID: 2, AccessHash: 22, Min: true},
+			&tg.User{ID: 3},
+			&tg.UserEmpty{ID: 4},
+		},
+		[]tg.ChatClass{
+			&tg.Chat{ID: 5},
+			&tg.Channel{ID: 6, AccessHash: 66},
+			&tg.Channel{ID: 7, AccessHash: 77, Min: true},
+			&tg.ChannelForbidden{ID: 8, AccessHash: 88},
+		},
+	)
 
-	const expired = int64(1)
-	r.store(expired, Peer{Input: &tg.InputPeerChat{ChatID: expired}})
-	now = now.Add(peerCacheTTL / 2)
-	for id := expired + 1; id <= peerCacheMaxEntries; id++ {
-		r.store(id, Peer{Input: &tg.InputPeerChat{ChatID: id}})
+	for id, want := range map[int64]tg.InputPeerClass{
+		1: &tg.InputPeerUser{UserID: 1, AccessHash: 11},
+		5: &tg.InputPeerChat{ChatID: 5},
+		6: &tg.InputPeerChannel{ChannelID: 6, AccessHash: 66},
+	} {
+		peer, err := r.Resolve(t.Context(), id)
+		require.NoError(t, err, "chat %d must resolve from the cache: the resolver has no client", id)
+		assert.Equal(t, want, peer.Input)
 	}
-	require.Len(t, r.byID, peerCacheMaxEntries)
-
-	now = now.Add(peerCacheTTL / 2) // only the first entry has expired
-	r.store(peerCacheMaxEntries+1, Peer{Input: &tg.InputPeerChat{ChatID: peerCacheMaxEntries + 1}})
-	assert.Len(t, r.byID, peerCacheMaxEntries)
-	assert.NotContains(t, r.byID, expired, "the expired entry makes room")
-	for id := expired + 1; id <= peerCacheMaxEntries+1; id++ {
-		assert.Contains(t, r.byID, id, "no live entry is evicted while an expired one exists")
+	for _, id := range []int64{2, 3, 4, 7, 8} {
+		_, ok := r.cached(id)
+		assert.False(t, ok, "chat %d must not be remembered", id)
 	}
 }
 

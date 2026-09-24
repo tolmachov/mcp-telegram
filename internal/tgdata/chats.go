@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
+
+	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
 // ProgressFunc is a callback for reporting progress
@@ -144,7 +146,10 @@ type dialogPeer interface {
 // hand lets us recover the offset for legacy groups (which need no access
 // hash) and tolerate the rest, so a single phantom dialog can no longer break
 // the whole chat list.
-func GetChats(ctx context.Context, client *tg.Client, onProgress ProgressFunc) (*ChatsList, error) {
+//
+// The entities of every page feed peers' cache, so the chat IDs the listing
+// hands out resolve without a probe.
+func GetChats(ctx context.Context, peers *tgclient.Resolver, onProgress ProgressFunc) (*ChatsList, error) {
 	var chatsList []ChatInfo
 	truncated := false
 
@@ -171,7 +176,7 @@ func GetChats(ctx context.Context, client *tg.Client, onProgress ProgressFunc) (
 	var prevOffset offsetKey
 
 	for {
-		resp, err := client.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+		resp, err := peers.Client().MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
 			OffsetID:   offsetID,
 			OffsetDate: offsetDate,
 			OffsetPeer: offset,
@@ -200,6 +205,7 @@ func GetChats(ctx context.Context, client *tg.Client, onProgress ProgressFunc) (
 			lastPage = true
 		}
 
+		peers.Remember(users, chats)
 		em := newEntityMaps(users, chats)
 
 		// Index each peer's top message so we can read the offset date/id from
