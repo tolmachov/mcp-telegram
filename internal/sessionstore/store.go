@@ -23,7 +23,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 	"time"
 
@@ -197,7 +196,8 @@ type Store interface {
 // Store's grant rules are built on: LoadGrant returns family's record and an
 // opaque non-zero version (0: no record), and StoreGrant writes a record only
 // if the stored version still equals version (0: only if none exists),
-// returning ErrGrantConflict otherwise.
+// returning ErrGrantConflict otherwise — a *GrantConflictError when the
+// backend knows its write did not land.
 type backend interface {
 	Session(userID tgid.UserID, sid string) session.Storage
 	Exists(ctx context.Context, userID tgid.UserID, sid string) (bool, error)
@@ -271,8 +271,25 @@ func (g GrantRecord) rotate(expected int64) (GrantRecord, GrantRotation) {
 var errUndecodableGrant = errors.New("sessionstore: parsing grant")
 
 // ErrGrantConflict is returned by a backend's StoreGrant when the record
-// changed since it was loaded (or already exists, for a create).
+// changed since it was loaded (or already exists, for a create). A backend
+// that cannot compare and write in one step may also return it for a write
+// that landed after all (a GCS retry of a request whose response was lost
+// answers 412), so on its own it does not say the write failed.
 var ErrGrantConflict = errors.New("sessionstore: grant changed concurrently")
+
+// GrantConflictError is the ErrGrantConflict of a backend that compared and
+// refused in one step, so its write definitely did not land. It carries the
+// record the write was compared against (Version 0: none), which the grant
+// rules retry on without reading it again.
+type GrantConflictError struct {
+	Current GrantRecord
+	Version int64
+}
+
+func (e *GrantConflictError) Error() string { return ErrGrantConflict.Error() }
+
+// Is makes a GrantConflictError match ErrGrantConflict.
+func (e *GrantConflictError) Is(target error) bool { return target == ErrGrantConflict }
 
 // grantCASAttempts bounds the load/compare-and-swap retries of one grant update.
 const grantCASAttempts = 4
@@ -281,7 +298,7 @@ func (s *encryptedStore) RedeemCode(ctx context.Context, family string, expiresA
 	if !ValidSID(family) {
 		return false, ErrInvalidSID
 	}
-	created, err := writeGrant(ctx, s.inner, family, GrantRecord{ExpiresAt: expiresAt}, 0)
+	created, _, _, err := writeGrant(ctx, s.inner, family, GrantRecord{ExpiresAt: expiresAt}, 0)
 	if err != nil {
 		return false, fmt.Errorf("creating grant: %w", err)
 	}
@@ -331,24 +348,23 @@ var errGrantAbsent = errors.New("sessionstore: grant not found")
 
 // updateGrant is the one compare-and-swap loop over a grant record: it loads
 // the record, applies change, and stores the result unless another writer got
-// there first, in which case it retries on the fresh record. change reports
-// whether anything should be written; its last call is the one whose record
-// was stored.
+// there first, in which case it retries on the record that writer left, as
+// writeGrant saw it. change reports whether anything should be written; its
+// last call is the one whose record was stored.
 //
 // A record that does not decode is dead, exactly like an absent one: nothing
 // can read its generation, so none of its refresh tokens can ever rotate, and
 // retrying cannot change that. It yields errGrantAbsent and is left as it is
-// for SweepAuthState to delete.
+// for SweepAuthState to delete, which reports it.
 func updateGrant(ctx context.Context, b backend, family string, change func(GrantRecord) (GrantRecord, bool)) error {
+	grant, version, err := b.LoadGrant(ctx, family)
+	if errors.Is(err, errUndecodableGrant) {
+		return errGrantAbsent
+	}
+	if err != nil {
+		return fmt.Errorf("loading grant: %w", err)
+	}
 	for range grantCASAttempts {
-		grant, version, err := b.LoadGrant(ctx, family)
-		if errors.Is(err, errUndecodableGrant) {
-			slog.Warn("grant record does not decode; treating its family as dead", "family", family, "err", err)
-			return errGrantAbsent
-		}
-		if err != nil {
-			return fmt.Errorf("loading grant: %w", err)
-		}
 		if version == 0 {
 			return errGrantAbsent
 		}
@@ -356,7 +372,8 @@ func updateGrant(ctx context.Context, b backend, family string, change func(Gran
 		if !write {
 			return nil
 		}
-		stored, err := writeGrant(ctx, b, family, next, version)
+		var stored bool
+		stored, grant, version, err = writeGrant(ctx, b, family, next, version)
 		if err != nil {
 			return err
 		}
@@ -368,27 +385,32 @@ func updateGrant(ctx context.Context, b backend, family string, change func(Gran
 }
 
 // writeGrant stores grant at version under a fresh WriteID and reports
-// whether it is now the stored record; false means another writer got there
-// first. A failed write is settled by re-reading: a write can land and still
-// report failure (a GCS retry of a request whose response was lost answers
-// 412, a transport error can follow a committed upload), and finding its own
-// WriteID in the store is what tells that apart from a lost race. When the
-// re-read fails too, the outcome is unknown and the error carries both.
-func writeGrant(ctx context.Context, b backend, family string, grant GrantRecord, version int64) (bool, error) {
+// whether it is now the stored record; when it is not, another writer got
+// there first and current/currentVersion are the record that writer left. A
+// *GrantConflictError settles the outcome by itself. Any other failed write
+// is settled by re-reading: a write can land and still report failure (a GCS
+// retry of a request whose response was lost answers 412, a transport error
+// can follow a committed upload), and finding its own WriteID in the store is
+// what tells that apart from a lost race. When the re-read fails too, the
+// outcome is unknown and the error carries both.
+func writeGrant(ctx context.Context, b backend, family string, grant GrantRecord, version int64) (stored bool, current GrantRecord, currentVersion int64, err error) {
 	grant.WriteID = rand.Text()
-	err := b.StoreGrant(ctx, family, grant, version)
+	err = b.StoreGrant(ctx, family, grant, version)
 	if err == nil {
-		return true, nil
+		return true, GrantRecord{}, 0, nil
 	}
-	stored, _, loadErr := b.LoadGrant(ctx, family)
+	if conflict, ok := errors.AsType[*GrantConflictError](err); ok {
+		return false, conflict.Current, conflict.Version, nil
+	}
+	current, currentVersion, loadErr := b.LoadGrant(ctx, family)
 	if loadErr != nil {
-		return false, fmt.Errorf("storing grant: outcome unknown, as re-reading it failed too: %w", errors.Join(err, loadErr))
+		return false, GrantRecord{}, 0, fmt.Errorf("storing grant: outcome unknown, as re-reading it failed too: %w", errors.Join(err, loadErr))
 	}
-	if stored.WriteID == grant.WriteID {
-		return true, nil
+	if current.WriteID == grant.WriteID {
+		return true, GrantRecord{}, 0, nil
 	}
 	if errors.Is(err, ErrGrantConflict) {
-		return false, nil
+		return false, current, currentVersion, nil
 	}
-	return false, fmt.Errorf("storing grant: %w", err)
+	return false, GrantRecord{}, 0, fmt.Errorf("storing grant: %w", err)
 }

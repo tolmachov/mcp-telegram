@@ -289,6 +289,42 @@ func TestGCSGrantSweepStopsMidListingKeepingFailures(t *testing.T) {
 	assert.NotZero(t, version, "the sweep must stop at the cancellation")
 }
 
+// endsAfter is a context whose Err reports context.Canceled from its checks
+// call onwards, so a test can end it between two entries of a sweep.
+type endsAfter struct {
+	context.Context
+	checks int
+}
+
+func (c *endsAfter) Err() error {
+	c.checks--
+	if c.checks < 0 {
+		return context.Canceled
+	}
+	return nil
+}
+
+// TestFSGrantSweepStopsMidListingKeepingFailures pins that a context ending
+// part-way through an FS sweep stops it without dropping what it already
+// collected: a real failure before the cancellation comes back joined with
+// the context's error.
+func TestFSGrantSweepStopsMidListingKeepingFailures(t *testing.T) {
+	fs := newTestFS(t)
+	now := time.Now()
+	store := Encrypted(fs, newCipher(t, testIssuer, newKey(t)))
+	redeemExpired(t, store, badFamily, now)
+	redeemExpired(t, store, testGrantFamily, now)
+	require.NoError(t, os.Chmod(fs.grantPath(badFamily), 0))
+	t.Cleanup(func() { _ = os.Chmod(fs.grantPath(badFamily), 0o600) })
+
+	_, err := fs.SweepAuthState(&endsAfter{Context: t.Context(), checks: 1}, now)
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorContains(t, err, "sweeping grant "+badFamily, "a failure before the cancellation must be kept")
+	_, version, err := fs.LoadGrant(t.Context(), testGrantFamily)
+	require.NoError(t, err)
+	assert.NotZero(t, version, "the sweep must stop at the cancellation")
+}
+
 // TestGrantRotationZeroIsRefusal pins that an outcome nobody set cannot pass
 // the token endpoint's success check.
 func TestGrantRotationZeroIsRefusal(t *testing.T) {
@@ -313,9 +349,10 @@ func (s *alwaysConflicting) StoreGrant(context.Context, string, GrantRecord, int
 }
 
 // TestUpdateGrantGivesUp pins that a grant under constant contention fails
-// with ErrGrantConflict after four rounds instead of spinning. Each round
-// loads once to compute the write and once to check whether the refused write
-// landed after all.
+// with ErrGrantConflict after four rounds instead of spinning. It loads once
+// to compute the first write; each refused write is re-read once to check
+// whether it landed after all, and that read is what the next round writes
+// over.
 func TestUpdateGrantGivesUp(t *testing.T) {
 	ctx := t.Context()
 	fs := newTestFS(t)
@@ -327,8 +364,58 @@ func TestUpdateGrantGivesUp(t *testing.T) {
 	b := &alwaysConflicting{backend: fs}
 	_, err = Encrypted(b, cipher).RotateGrant(ctx, testGrantFamily, 0, time.Now())
 	require.ErrorIs(t, err, ErrGrantConflict)
-	assert.Equal(t, 8, b.loads)
+	assert.Equal(t, 5, b.loads)
 	assert.Equal(t, 4, b.stores)
+}
+
+// racedOnce lets a concurrent writer advance the grant's generation just
+// before the first write it is given, and counts the reads and writes the
+// grant rules make.
+type racedOnce struct {
+	backend
+	loads, stores int
+}
+
+func (s *racedOnce) LoadGrant(ctx context.Context, family string) (GrantRecord, int64, error) {
+	s.loads++
+	return s.backend.LoadGrant(ctx, family)
+}
+
+func (s *racedOnce) StoreGrant(ctx context.Context, family string, grant GrantRecord, version int64) error {
+	s.stores++
+	if s.stores == 1 {
+		current, currentVersion, err := s.backend.LoadGrant(ctx, family)
+		if err != nil {
+			return err
+		}
+		current.Generation++
+		if err := s.backend.StoreGrant(ctx, family, current, currentVersion); err != nil {
+			return err
+		}
+	}
+	return s.backend.StoreGrant(ctx, family, grant, version)
+}
+
+// TestFSGrantConflictRetriesWithoutRereading pins that a write the FS backend
+// refused, which it knows did not land, is retried on the record the refusal
+// carries: the grant rules read the record once, however the race went.
+func TestFSGrantConflictRetriesWithoutRereading(t *testing.T) {
+	ctx := t.Context()
+	fs := newTestFS(t)
+	cipher := newCipher(t, testIssuer, newKey(t))
+	created, err := Encrypted(fs, cipher).RedeemCode(ctx, testGrantFamily, time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	require.True(t, created)
+
+	b := &racedOnce{backend: fs}
+	require.NoError(t, Encrypted(b, cipher).RevokeGrant(ctx, testGrantFamily))
+	assert.Equal(t, 1, b.loads)
+	assert.Equal(t, 2, b.stores)
+
+	grant, _, err := fs.LoadGrant(ctx, testGrantFamily)
+	require.NoError(t, err)
+	assert.True(t, grant.Revoked)
+	assert.Equal(t, int64(1), grant.Generation, "the retry keeps the concurrent writer's generation")
 }
 
 // unreadableAfterWrite fails a grant write, and every read after it, with

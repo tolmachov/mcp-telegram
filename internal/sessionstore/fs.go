@@ -83,17 +83,18 @@ func (f *FS) LoadGrant(_ context.Context, family string) (GrantRecord, int64, er
 
 // StoreGrant atomically replaces family's grant record if its version still
 // matches. Holding family's lock stripe makes the compare and the write one
-// step.
+// step, so a refused write definitely did not land: it is reported as a
+// *GrantConflictError carrying the record it was compared against.
 func (f *FS) StoreGrant(ctx context.Context, family string, grant GrantRecord, version int64) error {
 	lock := f.grantLock(family)
 	lock.Lock()
 	defer lock.Unlock()
-	_, current, err := f.LoadGrant(ctx, family)
+	current, currentVersion, err := f.LoadGrant(ctx, family)
 	if err != nil {
 		return err
 	}
-	if current != version {
-		return ErrGrantConflict
+	if currentVersion != version {
+		return &GrantConflictError{Current: current, Version: currentVersion}
 	}
 	data, err := json.Marshal(grant)
 	if err != nil {

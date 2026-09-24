@@ -164,7 +164,7 @@ func (m *memory) StoreGrant(_ context.Context, family string, grant sessionstore
 	defer m.mu.Unlock()
 	current := m.grants[family]
 	if current.version != version {
-		return sessionstore.ErrGrantConflict
+		return &sessionstore.GrantConflictError{Current: current.record, Version: current.version}
 	}
 	m.grants[family] = memGrant{record: grant, version: current.version + 1}
 	return nil
