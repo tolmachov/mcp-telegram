@@ -13,13 +13,12 @@ import (
 
 // MessageEditHandler handles the EditMessage tool.
 type MessageEditHandler struct {
-	client *tg.Client
-	peers  *tgclient.Resolver
+	peers *tgclient.Resolver
 }
 
 // NewMessageEditHandler creates a new MessageEditHandler.
 func NewMessageEditHandler(peers *tgclient.Resolver) *MessageEditHandler {
-	return &MessageEditHandler{client: peers.Client(), peers: peers}
+	return &MessageEditHandler{peers: peers}
 }
 
 // EditMessageInput is the input for the EditMessage tool.
@@ -102,7 +101,7 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 
 	updates, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, func(p tgclient.Peer) (tg.UpdatesClass, error) {
 		editReq.Peer = p.Input
-		return h.client.MessagesEditMessage(ctx, editReq)
+		return h.peers.Client().MessagesEditMessage(ctx, editReq)
 	})
 	if err != nil {
 		return nil, nil, failed(fmt.Sprintf("edit message %s in chat %d", in.MessageID, in.ChatID), err)

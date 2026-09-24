@@ -12,7 +12,7 @@ import (
 )
 
 // This file is the single username-resolution seam for the tool handlers.
-// Several tools (AddChatsToFolder, ResolveMessageLink, JoinChat/LeaveChat) turn
+// Several tools (the folder edits, ResolveMessageLink, JoinChat/LeaveChat) turn
 // a public @username into a peer, and each used to hand-roll the
 // contacts.resolveUsername call and then guess which returned entity was the
 // answer — one taking the first user, another the first chat. Because a single
@@ -89,20 +89,4 @@ func resolvedPeerInfo(r *tg.ContactsResolvedPeer) (id int64, title string, ok bo
 		return e.ID, e.Title, true
 	}
 	return 0, "", false
-}
-
-// resolvedChannel returns the canonical resolved peer as a channel/supergroup,
-// erroring for users and basic groups (which have no InputChannel form). Used
-// by JoinChat, which acts only on channels.
-func resolvedChannel(r *tg.ContactsResolvedPeer) (*tg.InputChannel, *tg.Channel, error) {
-	switch e := resolvedEntity(r).(type) {
-	case *tg.Channel:
-		if _, err := tgclient.PeerFromEntity(e); err != nil {
-			return nil, nil, err
-		}
-		return &tg.InputChannel{ChannelID: e.ID, AccessHash: e.AccessHash}, e, nil
-	case nil:
-		return nil, nil, errResolvedNotPresent
-	}
-	return nil, nil, fmt.Errorf("not a channel or supergroup")
 }

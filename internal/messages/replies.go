@@ -48,7 +48,7 @@ func (p *Provider) fetchRepliesWithPeer(ctx context.Context, peer tg.InputPeerCl
 		return nil, err
 	}
 
-	history, err := p.client.MessagesGetReplies(ctx, req)
+	history, err := p.peers.Client().MessagesGetReplies(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("getting replies: %w", err)
 	}

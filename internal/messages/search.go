@@ -90,7 +90,7 @@ func (p *Provider) searchWithPeer(ctx context.Context, chatID int64, peer tg.Inp
 		return nil, err
 	}
 
-	history, err := p.client.MessagesSearch(ctx, req)
+	history, err := p.peers.Client().MessagesSearch(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("searching messages: %w", err)
 	}
@@ -140,7 +140,7 @@ func (p *Provider) SearchGlobal(ctx context.Context, opts GlobalSearchOptions) (
 		return nil, err
 	}
 
-	history, err := p.client.MessagesSearchGlobal(ctx, req)
+	history, err := p.peers.Client().MessagesSearchGlobal(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("global searching messages: %w", err)
 	}

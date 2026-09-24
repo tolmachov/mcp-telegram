@@ -17,7 +17,6 @@ import (
 
 // Provider fetches messages from Telegram with a unified interface.
 type Provider struct {
-	client  *tg.Client
 	peers   *tgclient.Resolver
 	limiter *rate.Limiter
 }
@@ -26,7 +25,7 @@ type Provider struct {
 // assembly's shared resolver and paces its message requests to rps per second
 // (the default lives on --tg-rate-limit-rps).
 func NewProvider(peers *tgclient.Resolver, rps int) *Provider {
-	return &Provider{client: peers.Client(), peers: peers, limiter: rate.NewLimiter(rate.Limit(rps), 1)}
+	return &Provider{peers: peers, limiter: rate.NewLimiter(rate.Limit(rps), 1)}
 }
 
 // wait blocks until the rate limiter admits one Telegram request.
@@ -103,7 +102,7 @@ func (p *Provider) fetchWithPeer(ctx context.Context, peer tg.InputPeerClass, op
 		return nil, err
 	}
 
-	history, err := p.client.MessagesGetHistory(ctx, historyRequest)
+	history, err := p.peers.Client().MessagesGetHistory(ctx, historyRequest)
 	if err != nil {
 		return nil, fmt.Errorf("getting messages: %w", err)
 	}
@@ -217,7 +216,7 @@ func (p *Provider) fetchContextWithPeer(ctx context.Context, peer tg.InputPeerCl
 	if err := p.wait(ctx); err != nil {
 		return nil, err
 	}
-	history, err := p.client.MessagesGetHistory(ctx, req)
+	history, err := p.peers.Client().MessagesGetHistory(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("getting message context: %w", err)
 	}
@@ -279,7 +278,7 @@ func (p *Provider) fetchScheduledWithPeer(ctx context.Context, peer tg.InputPeer
 	if err := p.wait(ctx); err != nil {
 		return nil, err
 	}
-	history, err := p.client.MessagesGetScheduledHistory(ctx, &tg.MessagesGetScheduledHistoryRequest{
+	history, err := p.peers.Client().MessagesGetScheduledHistory(ctx, &tg.MessagesGetScheduledHistoryRequest{
 		Peer: peer,
 	})
 	if err != nil {
@@ -543,7 +542,7 @@ func extractURLEntities(msg *tg.Message) []string {
 }
 
 func (p *Provider) getReadInboxMaxID(ctx context.Context, peer tg.InputPeerClass) (int, error) {
-	result, err := p.client.MessagesGetPeerDialogs(ctx, []tg.InputDialogPeerClass{
+	result, err := p.peers.Client().MessagesGetPeerDialogs(ctx, []tg.InputDialogPeerClass{
 		&tg.InputDialogPeer{Peer: peer},
 	})
 	if err != nil {

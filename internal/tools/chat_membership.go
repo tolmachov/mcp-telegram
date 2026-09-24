@@ -35,24 +35,22 @@ const (
 
 // JoinChatHandler handles the JoinChat tool.
 type JoinChatHandler struct {
-	client *tg.Client
-	peers  *tgclient.Resolver
+	peers *tgclient.Resolver
 }
 
 // NewJoinChatHandler creates a new JoinChatHandler.
 func NewJoinChatHandler(peers *tgclient.Resolver) *JoinChatHandler {
-	return &JoinChatHandler{client: peers.Client(), peers: peers}
+	return &JoinChatHandler{peers: peers}
 }
 
 // LeaveChatHandler handles the LeaveChat tool.
 type LeaveChatHandler struct {
-	client *tg.Client
-	peers  *tgclient.Resolver
+	peers *tgclient.Resolver
 }
 
 // NewLeaveChatHandler creates a new LeaveChatHandler.
 func NewLeaveChatHandler(peers *tgclient.Resolver) *LeaveChatHandler {
-	return &LeaveChatHandler{client: peers.Client(), peers: peers}
+	return &LeaveChatHandler{peers: peers}
 }
 
 // JoinChatInput is the input for the JoinChat tool.
@@ -112,70 +110,43 @@ func (h *JoinChatHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in
 		return errResult("chat is required: pass a public @username, a numeric chat ID, or an invite link (t.me/+hash)."), nil, nil
 	}
 
-	kind, value := classifyChatRef(chat)
-	switch kind {
-	case chatRefInvite:
-		return h.joinByInvite(ctx, chat, value)
-	case chatRefUsername:
-		return h.joinByUsername(ctx, chat, value)
-	default: // chatRefID
-		return h.joinByID(ctx, chat, value)
+	if kind, hash := classifyChatRef(chat); kind == chatRefInvite {
+		return h.joinByInvite(ctx, chat, hash)
 	}
+	return h.joinKnown(ctx, chat)
 }
 
 // joinByInvite imports a private invite hash via messages.importChatInvite.
 func (h *JoinChatHandler) joinByInvite(ctx context.Context, chat, hash string) (*mcp.CallToolResult, *JoinChatResult, error) {
-	res, err := h.client.MessagesImportChatInvite(ctx, hash)
+	res, err := h.peers.Client().MessagesImportChatInvite(ctx, hash)
 	if err != nil {
 		return joinError(chat, &JoinChatResult{Status: statusAlreadyMember, Chat: chat}, err)
 	}
 	return nil, joinResultFrom(chat, statusJoined, res), nil
 }
 
-// joinByUsername resolves a public @username to a channel and joins it.
-func (h *JoinChatHandler) joinByUsername(ctx context.Context, chat, username string) (*mcp.CallToolResult, *JoinChatResult, error) {
-	input, channel, err := resolveChannelByUsername(ctx, h.peers, username)
-	if err != nil {
-		return nil, nil, failedHint("resolve @"+username, err, "You can only join channels and supergroups by username; for a private chat use its invite link instead.")
-	}
-	known := &JoinChatResult{Status: statusAlreadyMember, Chat: chat}
-	fillJoinResultFromChannel(known, channel)
-
-	res, err := h.client.ChannelsJoinChannel(ctx, input)
-	if err != nil {
-		return joinError(chat, known, err)
-	}
-	out := joinResultFrom(chat, statusJoined, res)
-	if out.ChatID == 0 {
-		fillJoinResultFromChannel(out, channel)
-	}
-	return nil, out, nil
-}
-
-// joinByID resolves a numeric ID to a peer and joins it (channels/supergroups
-// only — basic groups and users cannot be joined by ID).
-func (h *JoinChatHandler) joinByID(ctx context.Context, chat, value string) (*mcp.CallToolResult, *JoinChatResult, error) {
-	id, err := strconv.ParseInt(value, 10, 64)
-	if err != nil {
-		return errResult(fmt.Sprintf("invalid chat reference %q: expected a public @username, a numeric chat ID, or an invite link.", chat)), nil, nil
-	}
-	peer, err := h.peers.Resolve(ctx, id)
+// joinKnown joins the channel or supergroup chat names by public @username
+// or numeric ID. Basic groups and users cannot be joined that way.
+func (h *JoinChatHandler) joinKnown(ctx context.Context, chat string) (*mcp.CallToolResult, *JoinChatResult, error) {
+	peer, err := resolveChatRef(ctx, h.peers, chat)
 	if err != nil {
 		return nil, nil, failed(fmt.Sprintf("join %q", chat), err)
 	}
 	channel, ok := peer.Chat.(*tg.Channel)
 	if !ok {
-		return errResult(fmt.Sprintf("chat %d is not a channel or supergroup. Only channels/supergroups can be joined by ID; basic groups and private chats require an invite link.", id)), nil, nil
+		return errResult(fmt.Sprintf("%q is not a channel or supergroup. Only channels and supergroups can be joined by @username or ID; basic groups and private chats require an invite link.", chat)), nil, nil
 	}
 	known := &JoinChatResult{Status: statusAlreadyMember, Chat: chat}
 	fillJoinResultFromChannel(known, channel)
 
-	res, err := tgclient.WithPeer(ctx, h.peers, id, func(p tgclient.Peer) (tg.MessagesChatInviteJoinResultClass, error) {
+	// Resolving put the channel in the resolver's cache, so this finds it
+	// there, and a stale access hash is re-resolved by ID.
+	res, err := tgclient.WithPeer(ctx, h.peers, channel.ID, func(p tgclient.Peer) (tg.MessagesChatInviteJoinResultClass, error) {
 		ch, ok := p.Input.(*tg.InputPeerChannel)
 		if !ok {
-			return nil, fmt.Errorf("chat %d no longer resolves to a channel", id)
+			return nil, fmt.Errorf("chat %d no longer resolves to a channel", channel.ID)
 		}
-		return h.client.ChannelsJoinChannel(ctx, &tg.InputChannel{ChannelID: ch.ChannelID, AccessHash: ch.AccessHash})
+		return h.peers.Client().ChannelsJoinChannel(ctx, &tg.InputChannel{ChannelID: ch.ChannelID, AccessHash: ch.AccessHash})
 	})
 	if err != nil {
 		return joinError(chat, known, err)
@@ -255,7 +226,7 @@ func (h *LeaveChatHandler) leaveChannel(ctx context.Context, chat string, input 
 	if channel, ok := entity.(*tg.Channel); ok {
 		kind = tgdata.ChannelType(channel)
 	}
-	_, err := h.client.ChannelsLeaveChannel(ctx, &tg.InputChannel{ChannelID: input.ChannelID, AccessHash: input.AccessHash})
+	_, err := h.peers.Client().ChannelsLeaveChannel(ctx, &tg.InputChannel{ChannelID: input.ChannelID, AccessHash: input.AccessHash})
 	if err != nil {
 		if tgerr.Is(err, "USER_NOT_PARTICIPANT") {
 			return &LeaveChatResult{Status: statusNotMember, Chat: chat, ChatID: input.ChannelID, Kind: kind}, nil
@@ -269,7 +240,7 @@ func (h *LeaveChatHandler) leaveChannel(ctx context.Context, chat string, input 
 }
 
 func (h *LeaveChatHandler) leaveBasicChat(ctx context.Context, chat string, p *tg.InputPeerChat) (*LeaveChatResult, error) {
-	_, err := h.client.MessagesDeleteChatUser(ctx, &tg.MessagesDeleteChatUserRequest{
+	_, err := h.peers.Client().MessagesDeleteChatUser(ctx, &tg.MessagesDeleteChatUserRequest{
 		ChatID: p.ChatID,
 		UserID: &tg.InputUserSelf{},
 	})
@@ -399,22 +370,6 @@ func chatRefFromURL(s string) (kind, value string, ok bool) {
 	return chatRefUsername, segments[0], true
 }
 
-// resolveChannelByUsername resolves a public @username to the channel/supergroup
-// it names, returning both the InputChannel needed for join/leave and the full
-// *tg.Channel for metadata. Users and basic chats are rejected — only
-// channels/supergroups have a public username you can act on this way.
-func resolveChannelByUsername(ctx context.Context, peers *tgclient.Resolver, username string) (*tg.InputChannel, *tg.Channel, error) {
-	resolved, err := resolvePublicUsername(ctx, peers, username)
-	if err != nil {
-		return nil, nil, err
-	}
-	input, channel, err := resolvedChannel(resolved)
-	if err != nil {
-		return nil, nil, fmt.Errorf("@%s: %w", strings.TrimPrefix(strings.TrimSpace(username), "@"), err)
-	}
-	return input, channel, nil
-}
-
 // joinResultFrom builds a JoinChatResult from the join response. The Ok variant
 // carries chat updates we mine for metadata. The WebView variant means the join
 // did NOT complete — Telegram requires the user to finish an in-app web view
@@ -439,9 +394,6 @@ func joinResultFrom(chat, status string, res tg.MessagesChatInviteJoinResultClas
 
 // fillJoinResultFromChannel populates chat metadata from a resolved *tg.Channel.
 func fillJoinResultFromChannel(out *JoinChatResult, channel *tg.Channel) {
-	if channel == nil {
-		return
-	}
 	out.ChatID = channel.ID
 	out.Title = channel.Title
 	out.Kind = tgdata.ChannelType(channel)

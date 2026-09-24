@@ -189,18 +189,35 @@ func TestApplyRemovals(t *testing.T) {
 	assert.Empty(t, filter.PinnedPeers)
 }
 
-// TestResolvePeerRefLocalBranches covers the branches that return before any
-// network call, so a nil *tg.Client is safe.
-func TestResolvePeerRefLocalBranches(t *testing.T) {
-	ctx := context.Background()
+// resolveFolderChat runs resolveFolderChats over the one reference ref and
+// returns why it was skipped, or the failure that aborted the edit.
+func resolveFolderChat(t *testing.T, peers *tgclient.Resolver, ref string) (reason string, fatal error) {
+	t.Helper()
+	var skipped []FolderSkippedChat
+	resolved, fatal := resolveFolderChats(t.Context(), peers, []string{ref}, "update folder 2", &skipped)()
+	if fatal != nil {
+		return "", fatal
+	}
+	if len(skipped) == 0 {
+		require.Len(t, resolved, 1)
+		return "", nil
+	}
+	require.Len(t, skipped, 1)
+	assert.Equal(t, ref, skipped[0].Chat)
+	assert.Empty(t, resolved)
+	return skipped[0].Reason, nil
+}
 
-	peer, reason, fatal := resolvePeerRef(ctx, nil, "   ")
-	assert.Zero(t, peer)
+// TestResolveFolderChatsLocalBranches covers the branches that return before
+// any network call, so a resolver without a client is safe.
+func TestResolveFolderChatsLocalBranches(t *testing.T) {
+	peers := tgclient.NewResolver(t.Context(), nil)
+
+	reason, fatal := resolveFolderChat(t, peers, "   ")
 	assert.NoError(t, fatal)
 	assert.Equal(t, "empty chat reference", reason)
 
-	peer, reason, fatal = resolvePeerRef(ctx, nil, "https://t.me/+AbCdEf")
-	assert.Zero(t, peer)
+	reason, fatal = resolveFolderChat(t, peers, "https://t.me/+AbCdEf")
 	assert.NoError(t, fatal)
 	assert.Contains(t, reason, "invite link")
 }
@@ -293,10 +310,10 @@ func TestDeleteFolderValidation(t *testing.T) {
 	assert.Contains(t, toolResultText(errRes), "folder_id is required")
 }
 
-// TestResolvePeerRefSkipsOnlyChatProblems pins that a folder edit skips a
+// TestResolveFolderChatsSkipsOnlyChatProblems pins that a folder edit skips a
 // reference only for a problem with the reference itself, and fails on any
 // other resolve failure so the model retries instead of losing a good chat.
-func TestResolvePeerRefSkipsOnlyChatProblems(t *testing.T) {
+func TestResolveFolderChatsSkipsOnlyChatProblems(t *testing.T) {
 	resolveUsername := func(err error) telegramfake.InvokeFunc {
 		return telegramfake.Typed(func(context.Context, *tg.ContactsResolveUsernameRequest, *tg.ContactsResolvedPeer) error { return err })
 	}
@@ -306,28 +323,28 @@ func TestResolvePeerRefSkipsOnlyChatProblems(t *testing.T) {
 	)
 	peers := tgclient.NewResolver(t.Context(), tg.NewClient(inv))
 
-	_, reason, fatal := resolvePeerRef(t.Context(), peers, "@nobody")
+	reason, fatal := resolveFolderChat(t, peers, "@nobody")
 	require.NoError(t, fatal)
 	assert.Contains(t, reason, "USERNAME_NOT_OCCUPIED")
 
-	_, reason, fatal = resolvePeerRef(t.Context(), peers, "@flaky")
+	_, fatal = resolveFolderChat(t, peers, "@flaky")
 	require.Error(t, fatal, "a server error says nothing about the chat")
-	assert.Empty(t, reason)
+	assert.Contains(t, failureText("AddChatsToFolder", fatal), "Failed to update folder 2")
 
-	_, reason, fatal = resolvePeerRef(t.Context(), peers, "-1001555091578")
+	reason, fatal = resolveFolderChat(t, peers, "-1001555091578")
 	require.NoError(t, fatal)
 	assert.Contains(t, reason, "positive ID")
 
-	_, reason, fatal = resolvePeerRef(t.Context(), peers, "@")
+	reason, fatal = resolveFolderChat(t, peers, "@")
 	require.NoError(t, fatal, "a lone @ is a bad reference, not a reason to abort the batch")
 	assert.Contains(t, reason, "empty username")
 	assert.Zero(t, inv.Remaining())
 }
 
-// TestResolvePeerRefSkipsUnusableResolution pins that a @username Telegram
+// TestResolveFolderChatsSkipsUnusableResolution pins that a @username Telegram
 // resolves to nothing usable — a response without the entity its peer names,
 // or a user without an access hash — is skipped as a bad reference.
-func TestResolvePeerRefSkipsUnusableResolution(t *testing.T) {
+func TestResolveFolderChatsSkipsUnusableResolution(t *testing.T) {
 	resolveTo := func(resolved tg.ContactsResolvedPeer) telegramfake.InvokeFunc {
 		return telegramfake.Typed(func(_ context.Context, _ *tg.ContactsResolveUsernameRequest, out *tg.ContactsResolvedPeer) error {
 			*out = resolved
@@ -343,11 +360,11 @@ func TestResolvePeerRefSkipsUnusableResolution(t *testing.T) {
 	)
 	peers := tgclient.NewResolver(t.Context(), tg.NewClient(inv))
 
-	_, reason, fatal := resolvePeerRef(t.Context(), peers, "@missing")
+	reason, fatal := resolveFolderChat(t, peers, "@missing")
 	require.NoError(t, fatal)
 	assert.Contains(t, reason, "not present")
 
-	_, reason, fatal = resolvePeerRef(t.Context(), peers, "@nohash")
+	reason, fatal = resolveFolderChat(t, peers, "@nohash")
 	require.NoError(t, fatal)
 	assert.Contains(t, reason, "access hash")
 	assert.Zero(t, inv.Remaining())

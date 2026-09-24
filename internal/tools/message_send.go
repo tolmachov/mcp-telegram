@@ -44,13 +44,12 @@ const (
 
 // MessageSendHandler handles the SendMessage tool.
 type MessageSendHandler struct {
-	client *tg.Client
-	peers  *tgclient.Resolver
+	peers *tgclient.Resolver
 }
 
 // NewMessageSendHandler creates a new MessageSendHandler.
 func NewMessageSendHandler(peers *tgclient.Resolver) *MessageSendHandler {
-	return &MessageSendHandler{client: peers.Client(), peers: peers}
+	return &MessageSendHandler{peers: peers}
 }
 
 // SendMessageInput is the input for the SendMessage tool.
@@ -170,7 +169,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		}
 		if _, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, func(p tgclient.Peer) (bool, error) {
 			draftReq.Peer = p.Input
-			return h.client.MessagesSaveDraft(ctx, draftReq)
+			return h.peers.Client().MessagesSaveDraft(ctx, draftReq)
 		}); err != nil {
 			return nil, nil, failed(fmt.Sprintf("save draft in chat %d", in.ChatID), err)
 		}
@@ -196,7 +195,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 
 	updates, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, func(p tgclient.Peer) (tg.UpdatesClass, error) {
 		sendReq.Peer = p.Input
-		return h.client.MessagesSendMessage(ctx, sendReq)
+		return h.peers.Client().MessagesSendMessage(ctx, sendReq)
 	})
 	if err != nil {
 		return nil, nil, failed(fmt.Sprintf("send message to chat %d", in.ChatID), err)

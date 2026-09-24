@@ -83,7 +83,7 @@ func (p *Provider) fetchForumTopicsWithPeer(ctx context.Context, peer tg.InputPe
 		return nil, err
 	}
 
-	resp, err := p.client.MessagesGetForumTopics(ctx, req)
+	resp, err := p.peers.Client().MessagesGetForumTopics(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("getting forum topics: %w", err)
 	}

@@ -19,13 +19,12 @@ const muteForeverUntil = 2147483647
 
 // ChatMuteHandler handles the SetChatMute tool.
 type ChatMuteHandler struct {
-	client *tg.Client
-	peers  *tgclient.Resolver
+	peers *tgclient.Resolver
 }
 
 // NewChatMuteHandler creates a new ChatMuteHandler.
 func NewChatMuteHandler(peers *tgclient.Resolver) *ChatMuteHandler {
-	return &ChatMuteHandler{client: peers.Client(), peers: peers}
+	return &ChatMuteHandler{peers: peers}
 }
 
 // SetChatMuteInput is the input for the SetChatMute tool. Muted selects
@@ -80,7 +79,7 @@ func (h *ChatMuteHandler) handle(ctx context.Context, _ *mcp.CallToolRequest, in
 		muteUntil = int(time.Now().Unix()) + in.DurationSeconds
 	}
 	if _, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, func(p tgclient.Peer) (bool, error) {
-		return h.client.AccountUpdateNotifySettings(ctx, &tg.AccountUpdateNotifySettingsRequest{
+		return h.peers.Client().AccountUpdateNotifySettings(ctx, &tg.AccountUpdateNotifySettingsRequest{
 			Peer:     &tg.InputNotifyPeer{Peer: p.Input},
 			Settings: tg.InputPeerNotifySettings{MuteUntil: muteUntil},
 		})

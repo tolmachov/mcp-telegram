@@ -13,13 +13,12 @@ import (
 
 // MessageReactionHandler handles the SetReaction tool.
 type MessageReactionHandler struct {
-	client *tg.Client
-	peers  *tgclient.Resolver
+	peers *tgclient.Resolver
 }
 
 // NewSetReactionHandler creates a new MessageReactionHandler.
 func NewSetReactionHandler(peers *tgclient.Resolver) *MessageReactionHandler {
-	return &MessageReactionHandler{client: peers.Client(), peers: peers}
+	return &MessageReactionHandler{peers: peers}
 }
 
 // SetReactionInput is the input for the SetReaction tool.
@@ -94,7 +93,7 @@ func (h *MessageReactionHandler) handle(ctx context.Context, _ *mcp.CallToolRequ
 
 	if _, err := tgclient.WithPeer(ctx, h.peers, in.ChatID, func(p tgclient.Peer) (tg.UpdatesClass, error) {
 		sendReq.Peer = p.Input
-		return h.client.MessagesSendReaction(ctx, sendReq)
+		return h.peers.Client().MessagesSendReaction(ctx, sendReq)
 	}); err != nil {
 		return nil, nil, failed(fmt.Sprintf("set reaction on message %s in chat %d", in.MessageID, in.ChatID), err)
 	}

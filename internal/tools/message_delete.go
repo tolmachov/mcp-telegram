@@ -36,13 +36,12 @@ const deleteRightsHint = "Deleting other members' messages needs admin rights wi
 
 // MessageDeleteHandler handles the DeleteMessages tool.
 type MessageDeleteHandler struct {
-	client *tg.Client
-	peers  *tgclient.Resolver
+	peers *tgclient.Resolver
 }
 
 // NewMessageDeleteHandler creates a new MessageDeleteHandler.
 func NewMessageDeleteHandler(peers *tgclient.Resolver) *MessageDeleteHandler {
-	return &MessageDeleteHandler{client: peers.Client(), peers: peers}
+	return &MessageDeleteHandler{peers: peers}
 }
 
 // DeleteMessagesInput is the input for the DeleteMessages tool.
@@ -188,12 +187,12 @@ func (h *MessageDeleteHandler) deleteRegular(ctx context.Context, peer tg.InputP
 	}
 
 	if ch, ok := peer.(*tg.InputPeerChannel); ok {
-		_, err = h.client.ChannelsDeleteMessages(ctx, &tg.ChannelsDeleteMessagesRequest{
+		_, err = h.peers.Client().ChannelsDeleteMessages(ctx, &tg.ChannelsDeleteMessagesRequest{
 			Channel: &tg.InputChannel{ChannelID: ch.ChannelID, AccessHash: ch.AccessHash},
 			ID:      toDelete,
 		})
 	} else {
-		_, err = h.client.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{Revoke: true, ID: toDelete})
+		_, err = h.peers.Client().MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{Revoke: true, ID: toDelete})
 	}
 	if err != nil {
 		return deleteOutcome{}, deleteFailure(err)
@@ -223,7 +222,7 @@ func (h *MessageDeleteHandler) deleteScheduled(ctx context.Context, peer tg.Inpu
 		return deleteOutcome{statuses: statuses}, nil
 	}
 
-	if _, err := h.client.MessagesDeleteScheduledMessages(ctx, &tg.MessagesDeleteScheduledMessagesRequest{Peer: peer, ID: toDelete}); err != nil {
+	if _, err := h.peers.Client().MessagesDeleteScheduledMessages(ctx, &tg.MessagesDeleteScheduledMessagesRequest{Peer: peer, ID: toDelete}); err != nil {
 		return deleteOutcome{}, deleteFailure(err)
 	}
 
@@ -261,12 +260,12 @@ func (h *MessageDeleteHandler) getRegular(ctx context.Context, peer tg.InputPeer
 	var resp tg.MessagesMessagesClass
 	var err error
 	if ch, ok := peer.(*tg.InputPeerChannel); ok {
-		resp, err = h.client.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+		resp, err = h.peers.Client().ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
 			Channel: &tg.InputChannel{ChannelID: ch.ChannelID, AccessHash: ch.AccessHash},
 			ID:      inputIDs,
 		})
 	} else {
-		resp, err = h.client.MessagesGetMessages(ctx, inputIDs)
+		resp, err = h.peers.Client().MessagesGetMessages(ctx, inputIDs)
 	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("get messages: %w", err)
@@ -280,7 +279,7 @@ func (h *MessageDeleteHandler) getRegular(ctx context.Context, peer tg.InputPeer
 
 // getScheduled reads scheduled messages by ID from this chat's queue.
 func (h *MessageDeleteHandler) getScheduled(ctx context.Context, peer tg.InputPeerClass, ids []int) (map[int]tg.NotEmptyMessage, error) {
-	resp, err := h.client.MessagesGetScheduledMessages(ctx, &tg.MessagesGetScheduledMessagesRequest{Peer: peer, ID: ids})
+	resp, err := h.peers.Client().MessagesGetScheduledMessages(ctx, &tg.MessagesGetScheduledMessagesRequest{Peer: peer, ID: ids})
 	if err != nil {
 		return nil, fmt.Errorf("get scheduled messages: %w", err)
 	}

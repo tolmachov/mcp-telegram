@@ -355,6 +355,46 @@ func TestForwardAndMembershipMutationsUseExpectedRPCs(t *testing.T) {
 		assert.Equal(t, statusJoined, out.Status)
 		assert.Zero(t, inv.Remaining())
 	})
+
+	t.Run("join by username and by ID take one path", func(t *testing.T) {
+		const channelID, hash = int64(71), int64(171)
+		join := telegramfake.Typed(func(_ context.Context, rpc *tg.ChannelsJoinChannelRequest, out *tg.MessagesChatInviteJoinResultBox) error {
+			assert.Equal(t, &tg.InputChannel{ChannelID: channelID, AccessHash: hash}, rpc.Channel)
+			out.ChatInviteJoinResult = &tg.MessagesChatInviteJoinResultOk{Updates: &tg.Updates{}}
+			return nil
+		})
+		inv := telegramfake.New(
+			telegramfake.Typed(func(_ context.Context, _ *tg.ContactsResolveUsernameRequest, out *tg.ContactsResolvedPeer) error {
+				out.Peer = &tg.PeerChannel{ChannelID: channelID}
+				out.Chats = []tg.ChatClass{&tg.Channel{ID: channelID, AccessHash: hash, Title: "News", Broadcast: true}}
+				return nil
+			}),
+			join,
+			// The username resolution fed the cache: joining by ID needs no probe.
+			join,
+		)
+		h := NewJoinChatHandler(tgclient.NewResolver(t.Context(), tg.NewClient(inv)))
+		for _, chat := range []string{"@news", strconv.FormatInt(channelID, 10)} {
+			errRes, out, err := h.handle(t.Context(), &mcp.CallToolRequest{}, JoinChatInput{Chat: chat})
+			require.NoError(t, err)
+			require.Nil(t, errRes)
+			assert.Equal(t, statusJoined, out.Status)
+			assert.Equal(t, channelID, out.ChatID)
+			assert.Equal(t, "News", out.Title)
+		}
+		assert.Zero(t, inv.Remaining())
+	})
+
+	t.Run("join refuses a basic group by ID", func(t *testing.T) {
+		const groupID = int64(72)
+		inv := telegramfake.New(basicGroupSteps(t, groupID)...)
+		errRes, out, err := NewJoinChatHandler(tgclient.NewResolver(t.Context(), tg.NewClient(inv))).handle(t.Context(), &mcp.CallToolRequest{}, JoinChatInput{Chat: strconv.FormatInt(groupID, 10)})
+		require.NoError(t, err)
+		require.Nil(t, out)
+		require.NotNil(t, errRes)
+		assert.Contains(t, toolResultText(errRes), "not a channel or supergroup")
+		assert.Zero(t, inv.Remaining())
+	})
 }
 
 func dialogFiltersStep(t *testing.T, filters ...tg.DialogFilterClass) telegramfake.InvokeFunc {
