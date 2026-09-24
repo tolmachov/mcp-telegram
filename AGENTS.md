@@ -46,8 +46,9 @@ context loading); admin and posting features are secondary. Two transports:
    a stale access hash is dropped from the cache and the call retried.
 4. Return `errResult` only for input validation. Return every other failure as
    the handler's Go error via `failed(op, err)` / `failedHint`: the registration
-   helpers classify it (dead session, flood wait, unresolved chat), render the
-   text the model sees and log it under the tool's name.
+   helpers classify it (dead session, unconfirmed refusal, flood wait, a problem
+   with the chat named — `tgclient.IsPeerSpecific`), render the text the model
+   sees and log it under the tool's name.
 5. Add the handler to `buildHandlers` in `internal/server/server.go`: `research`
    for read-only tools, `mutating` for anything that changes state. The split
    drives the server variants (see README "Server Variants").
@@ -75,17 +76,11 @@ make fmt               # golangci-lint fmt
   golangci-lint v2.12.2).
 - **Manual `run` can hang silently.** A zero-log hang usually means another
   process holds the same Telegram session — kill strays before blaming the change.
-- **Startup failures don't exit over stdio.** Missing API credentials or a
-  refused session go through `startBlocked` (`internal/server/server.go`):
-  over stdio it serves a login-required server whose tool explains the
-  problem; over HTTP or on a TTY it exits with the message. Route a new
-  startup check the same way — unless it only disables an optional feature:
-  an invalid summarisation setting is logged at startup and reported by
-  `SummarizeChat` alone, while every other tool works. Once running, a client
-  whose session Telegram refuses stops itself once the home DC confirms the
-  refusal (a single reply is no verdict: a secondary DC can refuse a live
-  session): over stdio every tool call then says why, over HTTP the pool
-  deletes the session and forces a re-login.
+- **Startup failures don't exit over stdio.** They go through `startBlocked`
+  (`internal/server/server.go`): a login-required server over stdio, an exit
+  with the message over HTTP or on a TTY. Route a new startup check there unless
+  it only disables an optional feature (as summarisation does). A client that
+  stops mid-run is explained in one place, `clientDownText`.
 
 ## Conventions
 

@@ -77,9 +77,8 @@ func resolvePeerRef(ctx context.Context, peers *tgclient.Resolver, ref string) (
 // per-chat skips. It aborts with a non-nil fatal error on a cancelled context
 // or the first resolution failure that is not about the chat (see
 // resolvePeerRef), so the caller surfaces it rather than masking it as a
-// skipped chat. Peers that
-// resolve to a form without a bare ID are skipped, so every returned peer's
-// Input is safe to identify with peerBareID.
+// skipped chat. Peers that resolve to a form without a bare ID are skipped,
+// so every returned peer's Input is safe to identify with peerBareID.
 func resolveChatRefs(ctx context.Context, resolver *tgclient.Resolver, refs []string) (peers []tgclient.Peer, skipped []FolderSkippedChat, fatal error) {
 	for _, ref := range refs {
 		if err := ctx.Err(); err != nil {

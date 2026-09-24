@@ -18,9 +18,9 @@
 
 ## Features
 
-- **Chat Management**: List, search, mute/unmute chats, organize into folders
+- **Chat Management**: List, search, mute/unmute chats, organise into folders
 - **Messages**: Read, search, inspect context, send, draft, schedule, link-resolve, and backup messages
-- **AI Summarization**: Summarize chat conversations using multiple LLM providers
+- **AI Summarisation**: Summarise chat conversations using multiple LLM providers
 - **Secure storage**: separate versioned Keychain items on macOS; atomic `0600`
   session/config files in a `0700` state directory on Linux and Windows
 - **Two transports**: local **stdio** (single account) or remote **streamable HTTP** with an embedded OAuth 2.1 server and per-user Telegram QR login — multi-user and deployable to Cloud Run (see [Remote (HTTP) Mode](#remote-http-mode))
@@ -119,7 +119,7 @@ the tools below, the server is up but Telegram is not authorized — see
 |------|-------------|
 | `GetMe` | Get current user information |
 | `GetChats` | List all chats, groups, and channels |
-| `SearchChats` | Search local/global chats by title, username, or numeric ID, ranked with one normalized distance score |
+| `SearchChats` | Search local/global chats by title, username, or numeric ID, ranked with one normalised distance score |
 | `GetChatInfo` | Get detailed information about a chat |
 | `GetMessages` | Get messages from a chat (set `include_scheduled=true` to also list pending scheduled messages in a separate field) |
 | `SearchMessages` | Search within one chat by substring, with optional date / sender / media / thread filters |
@@ -135,17 +135,22 @@ the tools below, the server is up but Telegram is not authorized — see
 | `JoinChat` | Join a channel/group/supergroup by @username, numeric ID, or invite link (`t.me/+hash`) |
 | `LeaveChat` | Leave a channel/group/supergroup by @username or numeric ID (requires `confirm: true`) |
 | `ResolveMessageLink` | Parse `t.me` / `tg://` message links into `chat_id`, `message_id`, and `topic_message_id` for forum links |
-| `MarkAsRead` | Mark one or more chats as read |
+| `MarkAsRead` | Mark up to 100 chats as read; reports `success_ids`, `nothing_to_read_ids` (channels with no unread badge to clear), per-chat `failures`, and `skipped_ids` when a flood wait or dead session stops the batch |
 | `BackupMessages` | Local stdio only: atomically export messages under a server-configured path. Never exposed over HTTP |
 | `ResolveUsername` | Resolve @username to user/chat info |
 | `SetChatMute` | Mute or unmute chat notifications (`muted` bool + optional `duration_seconds`) |
-| `SummarizeChat` | AI-powered summarization via sampling / Gemini / Ollama / Anthropic; processes at most `max_messages` (default 2000, hard maximum 10000) and reports truncation/partial status |
+| `SummarizeChat` | AI-powered summarisation via sampling / Gemini / Ollama / Anthropic; processes at most `max_messages` (default 2000, hard maximum 10000) and reports truncation/partial status |
 | `GetMedia` | Download photo media from a media resource URI; returns MCP image content |
 | `GetFolders` | List chat folders (dialog filters) with their ID, title, flags, and included/excluded/pinned chat IDs |
 | `CreateFolder` | Create a folder from a title plus chats and/or category flags (e.g. `include_groups`) |
 | `DeleteFolder` | Delete a folder by ID; chats are untouched (requires `confirm: true`) |
 | `AddChatsToFolder` | Add chats/groups/channels to a folder by ID (@username or numeric ID) |
 | `RemoveChatsFromFolder` | Remove chats/groups/channels from a folder by ID |
+
+The folder edits (`CreateFolder`, `AddChatsToFolder`, `RemoveChatsFromFolder`)
+report chats that cannot be resolved in `skipped` and apply the rest; any other
+resolve failure, such as a flood wait or a network error, fails the whole call
+so it can be retried.
 
 ### Pagination, dates, and identifiers
 
@@ -175,7 +180,7 @@ picks one. Clients that don't understand the extension transparently get the
 |---------|--------|-------|-----|
 | `full` | stable (default) | all available tools (29 over stdio, 28 over HTTP), full descriptions | interactive research + administration with a human |
 | `compact` | stable | all available tools (29 over stdio, 28 over HTTP), descriptions trimmed to the first sentence (~50% smaller) | autonomous agents on a tight context budget |
-| `research` | experimental | Telegram read-only tools, descriptions trimmed like `compact` (search, fetch, summarize — no filesystem backup or Telegram mutations) | read-heavy context-loading agents; summarization may send chat data to the configured external LLM |
+| `research` | experimental | Telegram read-only tools, descriptions trimmed like `compact` (search, fetch, summarise — no filesystem backup or Telegram mutations) | read-heavy context-loading agents; summarisation may send chat data to the configured external LLM |
 
 Pin a single variant with `--variant` (or `MCP_VARIANT`) for clients that
 can't negotiate — e.g. `--variant research` exposes only the read-only subset:
@@ -212,7 +217,7 @@ Pinned chat resources are created dynamically for each pinned chat and refreshed
 | Prompt | Arguments | Description |
 |--------|-----------|-------------|
 | `daily-digest` | `period` — `day` (default) / `week` / `month` | Walks active chats and produces a per-chat digest of key updates and action items. Read-only. |
-| `chat-catchup` | `chat` (required) — ID / @username / title; `period` — `day` / `week` (default) / `month` | Summarizes a specific chat and lists messages that look like they need a reply. Read-only. |
+| `chat-catchup` | `chat` (required) — ID / @username / title; `period` — `day` / `week` (default) / `month` | Summarises a specific chat and lists messages that look like they need a reply. Read-only. |
 | `find-and-reply` | `chat` (required), `query` (required) — what to search for, `reply` (required) — reply text or instruction | Searches for a message, shows a draft reply, and sends **only after explicit user confirmation**. |
 
 ## Prompt Examples
@@ -221,16 +226,16 @@ Here are some example prompts you can use with AI assistants:
 
 ### Message Management
 - "Check for any unread important messages in my Telegram"
-- "Summarize all my unread Telegram messages"
-- "Read and analyze my unread messages, prepare draft responses where needed"
+- "Summarise all my unread Telegram messages"
+- "Read and analyse my unread messages, prepare draft responses where needed"
 - "Check non-critical unread messages and give me a brief overview"
 - "Find messages mentioning 'invoice' in my work chat from last week"
 - "Open the context around this Telegram link: https://t.me/example/123"
 
-### Organization
-- "Analyze my Telegram dialogs and suggest a folder structure"
-- "Help me categorize my Telegram chats by importance"
-- "Find all work-related conversations and suggest how to organize them"
+### Organisation
+- "Analyse my Telegram dialogs and suggest a folder structure"
+- "Help me categorise my Telegram chats by importance"
+- "Find all work-related conversations and suggest how to organise them"
 
 ### Communication
 - "Monitor specific chat for updates about [topic]"
@@ -247,7 +252,7 @@ These examples apply only to local stdio `full`/`compact` mode; HTTP and the
 - "Export the last week of messages from [group]"
 - "Backup media-only updates too so nothing is silently skipped"
 
-## Chat Summarization
+## Chat Summarisation
 
 The `SummarizeChat` tool supports multiple LLM providers:
 
@@ -257,12 +262,12 @@ The `SummarizeChat` tool supports multiple LLM providers:
 - **anthropic**: Anthropic Claude API
 
 `max_messages` defaults to 2000 and cannot exceed 10000. Fetching is bounded
-and paged in batches of 100; if a later Telegram page fails, the tool summarizes
+and paged in batches of 100; if a later Telegram page fails, the tool summarises
 the messages already fetched and marks the result as degraded. Every response
 includes `messages_processed` and `truncated`, with `partial` and `warning` when
 applicable.
 
-Chat messages are serialized as untrusted JSON data, separate from the system
+Chat messages are serialised as untrusted JSON data, separate from the system
 instructions, goal, and previous rolling summary. The server explicitly marks
 Telegram content as untrusted and tells the provider not to execute instructions
 found inside it. Sampling sends selected text to the MCP client's LLM; Gemini
@@ -280,10 +285,10 @@ MCP_SUMMARIZE_MODEL=           # provider-specific model name
 ```
 
 Summarisation is optional, so invalid settings — an unknown provider, a missing
-Ollama URL, an API key that is not set or cannot be read from the Keychain /
-config store — never stop the server: they are logged as a warning at startup,
-every other tool works, and `SummarizeChat` answers each call with the exact
-startup error and the fix. The settings are read once, so after fixing them
+Ollama URL, a non-positive batch size, an API key that is not set or cannot be
+read from the Keychain / config store — never stop the server: they are logged
+as a warning at startup, every other tool works, and `SummarizeChat` answers
+each call with the exact startup error and the fix. The settings are read once, so after fixing them
 reconnect the server (stdio) or restart it (HTTP).
 
 ## Commands
@@ -327,9 +332,9 @@ resolve as CLI flags → process environment → defaults. The binary never read
 | `MCP_TELEGRAM_API_ID` | Telegram API ID | Required for login/HTTP; missing stdio credentials expose login-required mode |
 | `MCP_TELEGRAM_API_HASH` | Telegram API Hash | Required for login/HTTP; missing stdio credentials expose login-required mode |
 | `MCP_TELEGRAM_ALLOWED_PATHS` | Server-owned backup roots; client MCP roots are ignored | OS state backup dir in stdio `full`/`compact`; unused in HTTP/research |
-| `MCP_SUMMARIZE_PROVIDER` | LLM provider for summarization | `sampling` |
+| `MCP_SUMMARIZE_PROVIDER` | LLM provider for summarisation | `sampling` |
 | `MCP_SUMMARIZE_MODEL` | Model name | Provider default |
-| `MCP_SUMMARIZE_BATCH_TOKENS` | Tokens per summarization batch (must be positive) | `8000` |
+| `MCP_SUMMARIZE_BATCH_TOKENS` | Tokens per summarisation batch (must be positive) | `8000` |
 | `MCP_SUMMARIZE_OLLAMA_URL` | Ollama API URL | `http://localhost:11434` |
 | `MCP_SUMMARIZE_GEMINI_API_KEY` | Google Gemini API key | - |
 | `MCP_SUMMARIZE_ANTHROPIC_API_KEY` | Anthropic API key | - |
@@ -509,9 +514,9 @@ This is deliberate. A stdio server that refuses its MCP connection is rendered b
 
 Note the boundary is the TTY, not "a human started it": with stdin piped or redirected from a file, `mcp-telegram run` serves login-required mode and exits **0** on EOF. Scripted health checks should call `mcp-telegram login`/`config list`, or assert on the tool list, rather than on `run`'s exit status.
 
-If Telegram revokes the session while the server is running, the first refused call makes the server ask Telegram (on the account's home data centre) whether the session still stands; once that confirms the refusal the client stops, and from then on every tool call answers with the same login-required reason and fix instead of reaching Telegram; the host stays connected, and after `mcp-telegram login` a reconnect loads the tools again.
+If Telegram revokes the session while the server is running, the first refused call makes the server ask Telegram (on the account's home data centre) whether the session still stands. Once that confirms the refusal, the client stops. From then on every tool call answers with the login-required reason and fix instead of reaching Telegram, and a call the stop cut short gets them appended to its own result. The host stays connected, and after `mcp-telegram login` a reconnect loads the tools again. A client that stops for any other reason, such as a permanent connection failure, is reported the same way, and reconnecting the server recovers it.
 
-In **remote (HTTP) mode** none of this applies: a dead per-user session — whether Telegram refuses it at connect time or in reply to a call, confirmed on the home data centre — is deleted and the next request is answered with `401` plus a `WWW-Authenticate` challenge, which sends the MCP client back through OAuth and its QR login to mint a fresh session — no restart, no CLI. A client that stops for any other reason, such as a dropped connection, is reconnected on the same session at the next request.
+In **remote (HTTP) mode** none of this applies: a dead per-user session — whether Telegram refuses it at connect time or in reply to a call, confirmed on the home data centre — is deleted by the request that finds it dead. That request is answered with `401` plus a `WWW-Authenticate` challenge, which sends the MCP client back through OAuth and its QR login to mint a fresh session — no restart, no CLI. A client that stops for any other reason, such as a dropped connection, is reconnected on the same session at the next request.
 
 ## Session, Config, and Backup Storage
 
@@ -532,7 +537,7 @@ formats:
   operator may replace it with `--allowed-paths` or
   `MCP_TELEGRAM_ALLOWED_PATHS`. Client-provided MCP roots never expand the
   filesystem allowlist. Targets are checked after symlink resolution and files
-  are atomically replaced. HTTP and `research` do not initialize or expose this
+  are atomically replaced. HTTP and `research` do not initialise or expose this
   facility.
 
 The Linux/Windows local session and config files are **plaintext** despite their
