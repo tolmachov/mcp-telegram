@@ -323,3 +323,32 @@ func TestResolvePeerRefSkipsOnlyChatProblems(t *testing.T) {
 	assert.Contains(t, reason, "empty username")
 	assert.Zero(t, inv.Remaining())
 }
+
+// TestResolvePeerRefSkipsUnusableResolution pins that a @username Telegram
+// resolves to nothing usable — a response without the entity its peer names,
+// or a user without an access hash — is skipped as a bad reference.
+func TestResolvePeerRefSkipsUnusableResolution(t *testing.T) {
+	resolveTo := func(resolved tg.ContactsResolvedPeer) telegramfake.InvokeFunc {
+		return telegramfake.Typed(func(_ context.Context, _ *tg.ContactsResolveUsernameRequest, out *tg.ContactsResolvedPeer) error {
+			*out = resolved
+			return nil
+		})
+	}
+	inv := telegramfake.New(
+		resolveTo(tg.ContactsResolvedPeer{Peer: &tg.PeerUser{UserID: 7}}),
+		resolveTo(tg.ContactsResolvedPeer{
+			Peer:  &tg.PeerUser{UserID: 8},
+			Users: []tg.UserClass{&tg.User{ID: 8, FirstName: "No Hash"}},
+		}),
+	)
+	peers := tgclient.NewResolver(t.Context(), tg.NewClient(inv))
+
+	_, reason, fatal := resolvePeerRef(t.Context(), peers, "@missing")
+	require.NoError(t, fatal)
+	assert.Contains(t, reason, "not present")
+
+	_, reason, fatal = resolvePeerRef(t.Context(), peers, "@nohash")
+	require.NoError(t, fatal)
+	assert.Contains(t, reason, "access hash")
+	assert.Zero(t, inv.Remaining())
+}
