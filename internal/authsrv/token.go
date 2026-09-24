@@ -105,7 +105,19 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "this Telegram account is not allowed")
 		return
 	}
+	// The two probes are independent store round trips, so they run at once;
+	// their answers are still judged revocation first.
+	type probe struct {
+		ok  bool
+		err error
+	}
+	existsDone := make(chan probe, 1)
+	go func() {
+		ok, err := a.store.Exists(r.Context(), userID, rc.SessionID)
+		existsDone <- probe{ok, err}
+	}()
 	revoked, err := a.store.Revoked(r.Context(), userID, rc.SessionID)
+	exists := <-existsDone
 	if err != nil {
 		a.logger.Error("revocation check failed on refresh", "user_id", userID, "err", err)
 		a.tokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "session check failed, try again")
@@ -115,13 +127,12 @@ func (a *AuthServer) tokenFromRefresh(w http.ResponseWriter, r *http.Request, fo
 		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "session revoked, log in again")
 		return
 	}
-	exists, err := a.store.Exists(r.Context(), userID, rc.SessionID)
-	if err != nil {
-		a.logger.Error("session existence check failed on refresh", "user_id", userID, "err", err)
+	if exists.err != nil {
+		a.logger.Error("session existence check failed on refresh", "user_id", userID, "err", exists.err)
 		a.tokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "session check failed, try again")
 		return
 	}
-	if !exists {
+	if !exists.ok {
 		a.tokenError(w, http.StatusBadRequest, "invalid_grant", "telegram session is gone, log in again")
 		return
 	}

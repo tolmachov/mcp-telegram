@@ -1114,34 +1114,52 @@ func TestRevoke(t *testing.T) {
 		assert.True(t, exists, "a client_id mismatch must not delete the session")
 	})
 
-	t.Run("token issued in the future by a skewed instance is revoked", func(t *testing.T) {
-		const sid = "0123456789abcdef0123456789abcdef"
-		const family = "fedcba9876543210fedcba9876543210"
-		store := sessionstoretest.New(t)
-		a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
-		ctx := context.Background()
-		now := a.now()
-		redeemed, err := store.RedeemCode(ctx, family, now.Add(time.Hour))
-		require.NoError(t, err)
-		require.True(t, redeemed)
-		issued := now.Add(maxIssueSkew + time.Minute)
-		refresh, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
-			Subject: allowedUser, ClientID: "cid",
-			grantClaims: grantClaims{Resource: a.cfg.IssuerURL, SessionID: sid, SessionKey: make([]byte, 32), Family: family},
-			IssuedAt:    issued.Unix(), LoginAt: issued.Unix(),
-		})
-		require.NoError(t, err)
-		_, err = openBlob(a.sealer, refreshBlob, refresh, now)
-		require.ErrorIs(t, err, errIssuedInFuture, "precondition: this instance's clock sees the token as issued in the future")
+	// A token a clock-skewed instance issued "in the future", of either kind.
+	futureTokens := map[string]func(t *testing.T, a *AuthServer, grant grantClaims, issued, now time.Time) string{
+		"refresh": func(t *testing.T, a *AuthServer, grant grantClaims, issued, now time.Time) string {
+			token, err := sealBlob(a.sealer, refreshBlob, refreshClaims{
+				Subject: allowedUser, ClientID: "cid", grantClaims: grant,
+				IssuedAt: issued.Unix(), LoginAt: issued.Unix(),
+			})
+			require.NoError(t, err)
+			_, err = openBlob(a.sealer, refreshBlob, token, now)
+			require.ErrorIs(t, err, errIssuedInFuture, "precondition: this instance's clock sees the token as issued in the future")
+			return token
+		},
+		"access": func(t *testing.T, a *AuthServer, grant grantClaims, issued, now time.Time) string {
+			token, err := sealBlob(a.sealer, accessBlob, accessClaims{
+				Subject: allowedUser, ClientID: "cid", grantClaims: grant,
+				IssuedAt: issued.Unix(), ExpiresAt: issued.Add(accessTokenTTL).Unix(),
+			})
+			require.NoError(t, err)
+			_, err = openBlob(a.sealer, accessBlob, token, now)
+			require.ErrorIs(t, err, errIssuedInFuture, "precondition: this instance's clock sees the token as issued in the future")
+			return token
+		},
+	}
+	for kind, seal := range futureTokens {
+		t.Run(kind+" token issued in the future by a skewed instance is revoked", func(t *testing.T) {
+			const sid = "0123456789abcdef0123456789abcdef"
+			const family = "fedcba9876543210fedcba9876543210"
+			store := sessionstoretest.New(t)
+			a, ts := newTestServer(t, testConfig(t), store, neverStartLogin)
+			ctx := context.Background()
+			now := a.now()
+			redeemed, err := store.RedeemCode(ctx, family, now.Add(time.Hour))
+			require.NoError(t, err)
+			require.True(t, redeemed)
+			grant := grantClaims{Resource: a.cfg.IssuerURL, SessionID: sid, SessionKey: make([]byte, 32), Family: family}
+			token := seal(t, a, grant, now.Add(maxIssueSkew+time.Minute), now)
 
-		require.Equal(t, http.StatusOK, revokeToken(t, ts, url.Values{"token": {refresh}}))
-		revoked, err := store.Revoked(ctx, allowedUser, sid)
-		require.NoError(t, err)
-		assert.True(t, revoked, "an authentic token must be revoked whatever its issue time")
-		rotation, err := store.RotateGrant(ctx, family, 0, now)
-		require.NoError(t, err)
-		assert.Equal(t, sessionstore.GrantReplay, rotation, "revocation must kill the token's grant")
-	})
+			require.Equal(t, http.StatusOK, revokeToken(t, ts, url.Values{"token": {token}}))
+			revoked, err := store.Revoked(ctx, allowedUser, sid)
+			require.NoError(t, err)
+			assert.True(t, revoked, "an authentic token must be revoked whatever its issue time")
+			rotation, err := store.RotateGrant(ctx, family, 0, now)
+			require.NoError(t, err)
+			assert.Equal(t, sessionstore.GrantReplay, rotation, "revocation must kill the token's grant")
+		})
+	}
 }
 
 // failRevokeStore fails every Revoke, to exercise the /revoke store-error path.
@@ -1188,6 +1206,41 @@ type failExistsProbeStore struct {
 
 func (s *failExistsProbeStore) Exists(context.Context, tgid.UserID, string) (bool, error) {
 	return false, errors.New("simulated existence probe failure")
+}
+
+// probesMeetStore answers the refresh gate's Revoked only once its Exists
+// has started, so a gate that runs the probes one after the other fails.
+type probesMeetStore struct {
+	sessionstore.Store
+	existsStarted chan struct{}
+}
+
+func (s *probesMeetStore) Exists(ctx context.Context, userID tgid.UserID, sid string) (bool, error) {
+	close(s.existsStarted)
+	return s.Store.Exists(ctx, userID, sid)
+}
+
+func (s *probesMeetStore) Revoked(ctx context.Context, userID tgid.UserID, sid string) (bool, error) {
+	select {
+	case <-s.existsStarted:
+	case <-time.After(5 * time.Second):
+		return false, errors.New("the existence probe never started alongside the revocation probe")
+	}
+	return s.Store.Revoked(ctx, userID, sid)
+}
+
+// TestRefreshProbesRunTogether pins that the refresh gate asks the store
+// whether the session is revoked and whether it exists at the same time.
+func TestRefreshProbesRunTogether(t *testing.T) {
+	store := &probesMeetStore{Store: sessionstoretest.New(t)}
+	flow := newFakeFlow()
+	a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
+	clientID := registerClient(t, ts, testRedirectURI)
+	tr, _ := loginAndRedeem(t, a, ts, flow, clientID)
+
+	store.existsStarted = make(chan struct{})
+	_, oe, status := refreshGrant(t, ts, clientID, tr.RefreshToken)
+	require.Equal(t, http.StatusOK, status, "refresh failed: %+v", oe)
 }
 
 // TestRefreshStoreErrorIs503 pins that a transient store failure during the
