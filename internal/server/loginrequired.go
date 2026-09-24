@@ -181,7 +181,7 @@ func (s *Server) fillProbedStatus(ctx context.Context, status *LoginRequiredStat
 	probeCtx, cancel := context.WithTimeout(ctx, authProbeTimeout)
 	defer cancel()
 
-	account, authorized, err := s.authProbeFn(probeCtx)
+	account, authorized, err := s.authProbe(probeCtx)
 	if err != nil && probeCtx.Err() != nil && ctx.Err() == nil {
 		// Our own ceiling fired, not one the host imposed on the tool call —
 		// only then is naming authProbeTimeout accurate.
@@ -225,7 +225,7 @@ func accountSuffix(account string) string {
 
 // authProbe connects to Telegram on the stored session and reports whether it
 // is authorized, plus the display name when it is. It goes through
-// startLocalClient, so it answers exactly as startup would: a session
+// connectLocal, so it answers exactly as startup would: a session
 // Telegram refused — whether through the auth check or already in the connect
 // phase, where there is no Status to read — is the verdict "not authorized",
 // not a failed check, while a cancelled or incomplete probe stays an error
@@ -243,18 +243,18 @@ func (s *Server) authProbe(ctx context.Context) (account string, authorized bool
 	s.probeMu.Lock()
 	defer s.probeMu.Unlock()
 
-	return probeVerdict(s.startLocalClient(ctx))
+	return probeVerdict(s.connectLocal(ctx, s))
 }
 
-// probeVerdict turns a startLocalClient outcome into the re-check's answer.
-func probeVerdict(running *tgclient.Running, err error) (account string, authorized bool, _ error) {
+// probeVerdict turns a connectLocal outcome into the re-check's answer.
+func probeVerdict(client localClient, err error) (account string, authorized bool, _ error) {
 	switch {
 	case errors.Is(err, tgclient.ErrSessionUnauthorized):
 		return "", false, nil
 	case err != nil:
 		return "", false, err
 	}
-	account = tgclient.UserName(running.Self())
-	running.Close()
+	account = tgclient.UserName(client.Self())
+	client.Close()
 	return account, true, nil
 }

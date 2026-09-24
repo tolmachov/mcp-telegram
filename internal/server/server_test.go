@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gotd/td/session"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,35 +26,33 @@ func TestNewRequiresConfig(t *testing.T) {
 
 // connectViaRun drives the full Server.Run entry point, so the tests that use
 // it also pin that Run routes an unusable config into login-required mode.
-// Only safe with a config Run cannot try to connect with — anything else
-// reaches for a real Telegram DC.
-func connectViaRun(t *testing.T, cfg *tgclient.Config, tweak func(*Server)) *mcp.ClientSession {
+func connectViaRun(t *testing.T, cfg *tgclient.Config, connect localConnector) *mcp.ClientSession {
 	t.Helper()
-	return connectServer(t, cfg, tweak, (*Server).Run)
+	return connectServer(t, cfg, connect, (*Server).Run)
 }
 
 // connectLoginRequired enters the mode directly with a given reason, for the
 // tool-behaviour tests: they need credentials present (so the probe branch is
 // reached) without Run trying to use them against the network.
-func connectLoginRequired(t *testing.T, cfg *tgclient.Config, reason string, tweak func(*Server)) *mcp.ClientSession {
+func connectLoginRequired(t *testing.T, cfg *tgclient.Config, reason string, connect localConnector) *mcp.ClientSession {
 	t.Helper()
-	return connectServer(t, cfg, tweak, func(s *Server, ctx context.Context) error {
+	return connectServer(t, cfg, connect, func(s *Server, ctx context.Context) error {
 		return s.runLoginRequired(ctx, reason)
 	})
 }
 
 // connectServer starts a server over a pair of pipes and connects a real MCP
 // client to the other end, so the tests exercise the same initialize handshake
-// a host performs rather than hand-rolled frames. tweak, when non-nil, adjusts
-// the Server before it starts (e.g. to inject an auth probe).
-func connectServer(t *testing.T, cfg *tgclient.Config, tweak func(*Server), start func(*Server, context.Context) error) *mcp.ClientSession {
+// a host performs rather than hand-rolled frames. connect stands in for the
+// local account's connection (and so for the login-required re-check).
+func connectServer(t *testing.T, cfg *tgclient.Config, connect localConnector, start func(*Server, context.Context) error) *mcp.ClientSession {
 	t.Helper()
 	ctx := t.Context()
 
 	clientR, serverW := io.Pipe() // server → client
 	serverR, clientW := io.Pipe() // client → server
 
-	srv, err := New(Options{
+	srv, err := newServer(Options{
 		Config:    cfg,
 		Summarize: testSummarize,
 		Version:   "test",
@@ -63,11 +60,8 @@ func connectServer(t *testing.T, cfg *tgclient.Config, tweak func(*Server), star
 		Stdout:    serverW,
 		ErrOut:    &bytes.Buffer{},
 		Transport: TransportStdio,
-	})
+	}, connect)
 	require.NoError(t, err)
-	if tweak != nil {
-		tweak(srv)
-	}
 
 	// Run's error is captured rather than ignored: if login-required mode ever
 	// fails to come up, Connect below would otherwise block until t.Context is
@@ -97,9 +91,26 @@ func connectServer(t *testing.T, cfg *tgclient.Config, tweak func(*Server), star
 	return cs
 }
 
-// staticProbe builds an auth-probe stub for the login-required tool.
-func staticProbe(account string, authorized bool, err error) func(context.Context) (string, bool, error) {
-	return func(context.Context) (string, bool, error) { return account, authorized, err }
+// noConnect is the local connection of a test that must never make one.
+func noConnect(t *testing.T) localConnector {
+	return func(context.Context, *Server) (localClient, error) {
+		t.Error("the server connected to Telegram")
+		return nil, errors.New("this test does not connect")
+	}
+}
+
+// staticConnect connects the local account the same way every time: failing
+// with err, refused by Telegram when not authorized, or else as fakeSelf.
+func staticConnect(authorized bool, err error) localConnector {
+	return func(context.Context, *Server) (localClient, error) {
+		switch {
+		case err != nil:
+			return nil, err
+		case !authorized:
+			return nil, fmt.Errorf("starting Telegram client: %w", tgclient.ErrSessionUnauthorized)
+		}
+		return newFakeClient(), nil
+	}
 }
 
 // callLoginTool invokes the login-required tool and decodes its structured
@@ -124,7 +135,7 @@ func callLoginTool(t *testing.T, cs *mcp.ClientSession) LoginRequiredStatus {
 // Telegram config must produce a *connected* server, because a host renders a
 // failed stdio connection as a bare "failed" with no reason attached.
 func TestRunMissingCredentialsConnects(t *testing.T) {
-	cs := connectViaRun(t, &tgclient.Config{}, nil)
+	cs := connectViaRun(t, &tgclient.Config{}, noConnect(t))
 
 	init := cs.InitializeResult()
 	require.NotNil(t, init)
@@ -140,7 +151,7 @@ func TestRunMissingCredentialsConnects(t *testing.T) {
 // the contract: no Telegram tool may be advertised when Telegram is
 // unreachable, or the model will call one and get an opaque failure.
 func TestRunMissingCredentialsExposesOnlyTheLoginTool(t *testing.T) {
-	cs := connectViaRun(t, &tgclient.Config{}, nil)
+	cs := connectViaRun(t, &tgclient.Config{}, noConnect(t))
 
 	res, err := cs.ListTools(t.Context(), &mcp.ListToolsParams{})
 	require.NoError(t, err)
@@ -155,7 +166,7 @@ func TestRunMissingCredentialsExposesOnlyTheLoginTool(t *testing.T) {
 // on a live client.API(); advertising them here would hand the model calls
 // that dereference a client this process does not have.
 func TestLoginRequiredModeExposesNoResourcesOrPrompts(t *testing.T) {
-	cs := connectViaRun(t, &tgclient.Config{}, nil)
+	cs := connectViaRun(t, &tgclient.Config{}, noConnect(t))
 
 	resources, err := cs.ListResources(t.Context(), &mcp.ListResourcesParams{})
 	require.NoError(t, err)
@@ -174,9 +185,7 @@ func TestLoginRequiredModeExposesNoResourcesOrPrompts(t *testing.T) {
 // needs no Telegram contact: tgConfig is frozen at startup, so the verdict
 // cannot change in-process and the detail has to say a reconnect is required.
 func TestLoginRequiredToolReportsMissingCredentials(t *testing.T) {
-	cs := connectViaRun(t, &tgclient.Config{}, func(s *Server) {
-		s.authProbeFn = staticProbe("", false, errors.New("probe must not run without credentials"))
-	})
+	cs := connectViaRun(t, &tgclient.Config{}, noConnect(t))
 
 	status := callLoginTool(t, cs)
 	assert.Equal(t, StateNotConfigured, status.State)
@@ -187,15 +196,15 @@ func TestLoginRequiredToolReportsMissingCredentials(t *testing.T) {
 }
 
 // TestLoginRequiredToolProbedStates exercises the three states that depend on
-// a live Telegram check, through the injected probe. Without the seam these
-// branches are unreachable in tests: authProbe reaches the OS keychain and a
-// real DC.
+// a live Telegram check, through the injected local connection. Without it
+// these branches are unreachable in tests: the real one reaches the OS
+// keychain and a real DC.
 func TestLoginRequiredToolProbedStates(t *testing.T) {
 	cfg := &tgclient.Config{APIID: 1, APIHash: "hash"}
 
 	tests := []struct {
 		name        string
-		probe       func(context.Context) (string, bool, error)
+		connect     localConnector
 		wantState   LoginState
 		wantAuthzd  bool
 		wantFix     bool
@@ -204,7 +213,7 @@ func TestLoginRequiredToolProbedStates(t *testing.T) {
 	}{
 		{
 			name:       "session still not authorized",
-			probe:      staticProbe("", false, nil),
+			connect:    staticConnect(false, nil),
 			wantState:  StateLoginRequired,
 			wantFix:    true,
 			wantDetail: "not logged in to Telegram",
@@ -214,7 +223,7 @@ func TestLoginRequiredToolProbedStates(t *testing.T) {
 		},
 		{
 			name:        "probe could not determine anything",
-			probe:       staticProbe("", false, errors.New("dial tcp: no route to host")),
+			connect:     staticConnect(false, errors.New("dial tcp: no route to host")),
 			wantState:   StateCheckFailed,
 			wantFix:     true,
 			wantDetail:  "no route to host",
@@ -222,17 +231,17 @@ func TestLoginRequiredToolProbedStates(t *testing.T) {
 		},
 		{
 			name:        "logged in elsewhere since startup",
-			probe:       staticProbe("Ada Lovelace", true, nil),
+			connect:     staticConnect(true, nil),
 			wantState:   StateAuthorizedPendingReconnect,
 			wantAuthzd:  true,
-			wantDetail:  "Ada Lovelace",
+			wantDetail:  fakeSelf,
 			wantStartup: true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cs := connectLoginRequired(t, cfg, notLoggedInMessage, func(s *Server) { s.authProbeFn = tc.probe })
+			cs := connectLoginRequired(t, cfg, notLoggedInMessage, tc.connect)
 
 			status := callLoginTool(t, cs)
 			assert.Equal(t, tc.wantState, status.State)
@@ -263,22 +272,23 @@ func TestLoginRequiredToolProbedStates(t *testing.T) {
 // every other test in this file.
 func TestLoginRequiredToolRechecksLive(t *testing.T) {
 	var calls int
-	cs := connectLoginRequired(t, &tgclient.Config{APIID: 1, APIHash: "hash"}, notLoggedInMessage, func(s *Server) {
-		s.authProbeFn = func(context.Context) (string, bool, error) {
+	probed := newFakeClient()
+	cs := connectLoginRequired(t, &tgclient.Config{APIID: 1, APIHash: "hash"}, notLoggedInMessage,
+		func(context.Context, *Server) (localClient, error) {
 			calls++
 			if calls == 1 {
-				return "", false, nil
+				return nil, fmt.Errorf("starting Telegram client: %w", tgclient.ErrSessionUnauthorized)
 			}
-			return "Ada Lovelace", true, nil
-		}
-	})
+			return probed, nil
+		})
 
 	assert.Equal(t, StateLoginRequired, callLoginTool(t, cs).State)
 
 	second := callLoginTool(t, cs)
 	assert.Equal(t, StateAuthorizedPendingReconnect, second.State)
 	assert.True(t, second.Authorized)
-	assert.Equal(t, "Ada Lovelace", second.Account)
+	assert.Equal(t, fakeSelf, second.Account)
+	assert.True(t, probed.isClosed(), "the re-check disconnects the client it connected")
 }
 
 // TestRunLoginRequiredExitsCleanlyOnStdinClose covers host shutdown: closing
@@ -330,7 +340,7 @@ func TestRunLoginRequiredExitsCleanlyOnContextCancel(t *testing.T) {
 
 func newPipeServer(t *testing.T, stdin io.Reader) *Server {
 	t.Helper()
-	srv, err := New(Options{
+	srv, err := newServer(Options{
 		Config:    &tgclient.Config{},
 		Summarize: testSummarize,
 		Version:   "test",
@@ -338,13 +348,13 @@ func newPipeServer(t *testing.T, stdin io.Reader) *Server {
 		Stdout:    &nopWriteCloser{Writer: io.Discard},
 		ErrOut:    &bytes.Buffer{},
 		Transport: TransportStdio,
-	})
+	}, noConnect(t))
 	require.NoError(t, err)
 	return srv
 }
 
 // TestBlockedReasonClassifiesStartupFailures is the regression guard for the
-// routing Run applies to a failed startLocalClient. gotd reports a whole class
+// routing Run applies to a failed connectLocal. gotd reports a whole class
 // of failures (corrupt session, AUTH_KEY_UNREGISTERED, SESSION_EXPIRED, any
 // connect-phase 401) without ever running the ready callback; StartClient
 // folds the rejections into ErrSessionUnauthorized, and everything else must
@@ -412,39 +422,11 @@ func TestIsTTYRejectsPipe(t *testing.T) {
 // empty config never reaches blockedReason, so no other test covers this
 // composition.
 func TestBlockedStartupServesLoginRequiredOverStdio(t *testing.T) {
-	ctx := t.Context()
-
-	clientR, serverW := io.Pipe()
-	serverR, clientW := io.Pipe()
-
-	srv, err := New(Options{
-		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
-		Summarize: testSummarize,
-		Version:   "test",
-		Stdin:     serverR,
-		Stdout:    serverW,
-		ErrOut:    &bytes.Buffer{},
-		Transport: TransportStdio,
-	})
-	require.NoError(t, err)
-	srv.authProbeFn = staticProbe("", false, nil)
-
 	// What "corrupted key" out of restoreConnection looks like from Run.
-	go func() {
-		_ = srv.startBlocked(ctx, blockedReason(errors.New("starting Telegram client: corrupted key")))
-	}()
+	cs := connectViaRun(t, &tgclient.Config{APIID: 1, APIHash: "hash"},
+		staticConnect(false, errors.New("starting Telegram client: corrupted key")))
 
-	connectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
-	cs, err := client.Connect(connectCtx, &mcp.IOTransport{Reader: clientR, Writer: clientW}, nil)
-	require.NoError(t, err, "a connect-phase failure must yield a connected server, not a dead process")
-	t.Cleanup(func() {
-		_ = cs.Close()
-		_ = clientW.Close()
-	})
-
-	tools, err := cs.ListTools(ctx, &mcp.ListToolsParams{})
+	tools, err := cs.ListTools(t.Context(), &mcp.ListToolsParams{})
 	require.NoError(t, err)
 	require.Len(t, tools.Tools, 1)
 	assert.Equal(t, loginRequiredTool, tools.Tools[0].Name)
@@ -460,7 +442,8 @@ func TestSummarizeMisconfigurationDisablesOnlySummarizeChat(t *testing.T) {
 	clientR, serverW := io.Pipe()
 	serverR, clientW := io.Pipe()
 	var logs bytes.Buffer
-	srv, err := New(Options{
+	tgClient := newFakeClient()
+	srv, err := newServer(Options{
 		Config: &tgclient.Config{APIID: 1, APIHash: "hash"},
 		Summarize: summarize.Config{
 			Provider:     summarize.ProviderGemini,
@@ -473,12 +456,10 @@ func TestSummarizeMisconfigurationDisablesOnlySummarizeChat(t *testing.T) {
 		Stdout:    serverW,
 		ErrOut:    &logs,
 		Transport: TransportStdio,
-	})
+	}, func(context.Context, *Server) (localClient, error) { return tgClient, nil })
 	require.NoError(t, err)
 	assert.Contains(t, logs.String(), "level=WARN")
 	assert.Contains(t, logs.String(), "the gemini API key is not set")
-	tgClient := newFakeClient()
-	srv.connectLocal = func(context.Context) (telegramClient, error) { return tgClient, nil }
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Run(t.Context()) }()
@@ -542,7 +523,8 @@ func TestRunCancelledDuringStartupReturnsQuietly(t *testing.T) {
 	stdinR, stdinW := io.Pipe()
 	defer func() { _ = stdinW.Close() }()
 	var logs bytes.Buffer
-	srv, err := New(Options{
+	started := make(chan struct{})
+	srv, err := newServer(Options{
 		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
 		Summarize: testSummarize,
 		Version:   "test",
@@ -550,13 +532,15 @@ func TestRunCancelledDuringStartupReturnsQuietly(t *testing.T) {
 		Stdout:    io.Discard,
 		ErrOut:    &logs,
 		Transport: TransportStdio,
+	}, func(ctx context.Context, s *Server) (localClient, error) {
+		close(started)
+		running, err := tgclient.StartClient(ctx, s.opts.Config, blockingSession{}, s.logger, s.floodWaitLogger())
+		if err != nil {
+			return nil, err
+		}
+		return running, nil
 	})
 	require.NoError(t, err)
-	started := make(chan struct{})
-	srv.openLocalSession = func() (session.Storage, error) {
-		close(started)
-		return blockingSession{}, nil
-	}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	errCh := make(chan error, 1)

@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gotd/td/session"
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/experimental-ext-variants/go/sdk/variants"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -97,20 +96,10 @@ type Server struct {
 	// that is misconfigured, one that reports why (see summarizeUnavailable).
 	summarizer *summarize.Summarizer
 
-	// openLocalSession opens the stored session of the single local account
-	// (the Keychain on darwin, the state-directory file elsewhere). New points
-	// it at tgclient.NewSessionStorage; only tests replace it, to start a
-	// client without touching the real session.
-	openLocalSession func() (session.Storage, error)
-	// connectLocal starts the client Run serves over stdio. New points it at
-	// startLocalClient; only tests replace it, to serve on a fake client.
-	connectLocal func(context.Context) (telegramClient, error)
-
-	// authProbeFn is the live authorization re-check the login-required tool
-	// performs, injectable so the tool's states can be exercised without a
-	// Telegram connection (and, on darwin, without a Keychain prompt). New
-	// points it at Server.authProbe; only tests replace it.
-	authProbeFn func(context.Context) (account string, authorized bool, err error)
+	// connectLocal connects the single local account: Run serves on the
+	// client it returns, and the login-required tool's re-check (authProbe)
+	// asks it whether the session is authorized.
+	connectLocal localConnector
 	// probeMu serialises authProbe — see its doc comment for why concurrent
 	// probes on one stored session are a hazard rather than just waste.
 	probeMu sync.Mutex
@@ -124,6 +113,22 @@ type Server struct {
 // integration test pipe in custom io.Pipe endpoints.
 // ErrOut is used for slog-based diagnostics (server lifecycle, flood-wait).
 func New(opts Options) (*Server, error) {
+	return newServer(opts, connectStoredSession)
+}
+
+// localClient is the client of the single local account: what Run serves
+// on, plus the account it is logged in as, which the login-required re-check
+// reports.
+type localClient interface {
+	telegramClient
+	Self() *tg.User
+}
+
+// localConnector connects the single local account's client for s.
+type localConnector func(ctx context.Context, s *Server) (localClient, error)
+
+// newServer is New connecting the local account through connect.
+func newServer(opts Options, connect localConnector) (*Server, error) {
 	if opts.Config == nil {
 		return nil, fmt.Errorf("server.New: Options.Config is required")
 	}
@@ -161,21 +166,12 @@ func New(opts Options) (*Server, error) {
 	logger := slog.New(logging.NewHandler(opts.ErrOut, logFormat, level, "mcp-telegram", opts.Version)).
 		With("component", "mcp-telegram")
 
-	srv := &Server{logger: logger, opts: opts}
-	srv.openLocalSession = func() (session.Storage, error) { return tgclient.NewSessionStorage() }
-	srv.connectLocal = func(ctx context.Context) (telegramClient, error) {
-		running, err := srv.startLocalClient(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return running, nil
-	}
+	srv := &Server{logger: logger, opts: opts, connectLocal: connect}
 	srv.summarizer, err = summarize.New(opts.Summarize)
 	if err != nil {
 		logger.Warn("summarisation is misconfigured; SummarizeChat reports it and every other tool works", "err", err)
 		srv.summarizer = summarize.Unavailable(summarizeUnavailable(opts.Transport, err))
 	}
-	srv.authProbeFn = srv.authProbe
 	return srv, nil
 }
 
@@ -214,7 +210,7 @@ func (s *Server) Run(ctx context.Context) error {
 		return s.runHTTPWithAuth(ctx)
 	}
 
-	client, err := s.connectLocal(ctx)
+	client, err := s.connectLocal(ctx, s)
 	if err != nil {
 		if ctx.Err() != nil {
 			// The host shut down while the client was still starting:
@@ -232,12 +228,13 @@ func (s *Server) Run(ctx context.Context) error {
 	return s.serveAssembly(ctx, client)
 }
 
-// startLocalClient connects the single local account on its stored session
-// through the same StartClient the HTTP pool uses per user, so stdio startup
-// and the login-required re-check share one "authorized / unauthorized /
-// failed" answer.
-func (s *Server) startLocalClient(ctx context.Context) (*tgclient.Running, error) {
-	storage, err := s.openLocalSession()
+// connectStoredSession is the localConnector New uses: it connects the single
+// local account on its stored session (the Keychain on darwin, the
+// state-directory file elsewhere) through the same StartClient the HTTP pool
+// uses per user, so stdio startup and the login-required re-check share one
+// "authorized / unauthorized / failed" answer.
+func connectStoredSession(ctx context.Context, s *Server) (localClient, error) {
+	storage, err := tgclient.NewSessionStorage()
 	if err != nil {
 		return nil, fmt.Errorf("opening session storage: %w", err)
 	}
@@ -249,7 +246,7 @@ func (s *Server) startLocalClient(ctx context.Context) (*tgclient.Running, error
 }
 
 // blockedReason is the login-required explanation for a failed
-// startLocalClient. Only a session Telegram refused gets the login advice
+// connectLocal. Only a session Telegram refused gets the login advice
 // outright; anything else may be a network problem as much as a dead or
 // corrupt session, so the raw error leads.
 func blockedReason(err error) string {

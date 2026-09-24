@@ -63,6 +63,8 @@ func (c *fakeClient) Close() {
 	c.closed = true
 }
 
+func (c *fakeClient) Self() *tg.User { return &tg.User{ID: 42, Self: true, FirstName: fakeSelf} }
+
 func (c *fakeClient) isClosed() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
