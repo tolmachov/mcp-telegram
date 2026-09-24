@@ -41,11 +41,11 @@ func TestChatsGetCursorPageCarriesTruncationWarning(t *testing.T) {
 
 // TestSearchChatsTruncationWarning covers the SearchChats side: a search over a
 // truncated snapshot must warn that a chat's absence isn't proof it doesn't
-// exist. Limit=1 with a matching local chat fills the result set, so the global
-// search (which would touch the nil client) is skipped.
+// exist.
 func TestSearchChatsTruncationWarning(t *testing.T) {
 	cache, _ := seededChatsCache(t, []tgdata.ChatInfo{{ID: 1, Name: "alpha", Type: tgdata.ChatTypeGroup}}, true)
-	h := &ChatsSearchHandler{cache: cache}
+	peers, _ := globalSearchPeers(t, nil, nil)
+	h := NewChatsSearchHandler(peers, cache)
 
 	errRes, out, err := h.handle(context.Background(), &mcp.CallToolRequest{}, SearchChatsInput{
 		Query: "alpha",
@@ -54,6 +54,6 @@ func TestSearchChatsTruncationWarning(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, errRes)
 	require.NotNil(t, out)
-	require.Len(t, out.Results, 1, "local match should fill the single slot and skip global search")
+	require.Len(t, out.Results, 1)
 	assert.Contains(t, out.Warning, truncatedChatsWarning)
 }

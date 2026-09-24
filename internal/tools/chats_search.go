@@ -58,7 +58,7 @@ type SearchResultsList struct {
 func (h *ChatsSearchHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "SearchChats",
-		Description: "Search for chats, groups, and channels by name using fuzzy matching. Searches local chats first, then globally. Returns up to `limit` results (default 10, max 50). Preferred over GetChats when looking for a specific chat.",
+		Description: "Search for chats, groups, and channels by name using fuzzy matching. Matches your own chats and Telegram's global search together. Returns up to `limit` results (default 10, max 50). Preferred over GetChats when looking for a specific chat.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
 	}, h.handle)
 }
@@ -71,8 +71,22 @@ func (h *ChatsSearchHandler) handle(ctx context.Context, req *mcp.CallToolReques
 
 	limit := clampLimit(in.Limit, 10, 50)
 
-	// Get all user's chats for local fuzzy search first. Reuse the shared
-	// snapshot (loading it when cold or stale) rather than re-listing every dialog.
+	// Telegram's global search runs while the local listing loads: neither
+	// needs the other, and the local load may take a full re-pagination.
+	type globalOutcome struct {
+		chats []tgdata.ChatInfo
+		err   error
+	}
+	global := make(chan globalOutcome, 1)
+	globalCtx, cancelGlobal := context.WithCancel(ctx)
+	defer cancelGlobal()
+	go func() {
+		chats, err := h.searchGlobal(globalCtx, query)
+		global <- globalOutcome{chats, err}
+	}()
+
+	// Search the user's own chats, reusing the shared snapshot (loading it
+	// when the cache is cold) rather than re-listing every dialog.
 	onProgress := func(current int, message string) {
 		sendProgress(ctx, req, float64(current), 0, message)
 	}
@@ -87,20 +101,16 @@ func (h *ChatsSearchHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	if snap.Truncated {
 		warnings = append(warnings, truncatedChatsWarning)
 	}
-	var globalResults []tgdata.ChatInfo
-	var globalErr error
-	if h.peers != nil {
-		globalResults, globalErr = h.searchGlobal(ctx, query)
-	}
-	if globalErr != nil {
+	found := <-global
+	if found.err != nil {
 		mcpLog(ctx, req.Session, logLevelWarning, "SearchChats", map[string]any{
 			"action": "global_search_failed",
 			"query":  query,
-			"error":  globalErr.Error(),
+			"error":  found.err.Error(),
 		})
 		warnings = append(warnings, "Global search failed; results may be incomplete (local matches only).")
-	} else if len(globalResults) > 0 {
-		results = mergeSearchResults(results, scoreChats(query, globalResults))
+	} else if len(found.chats) > 0 {
+		results = mergeSearchResults(results, scoreChats(query, found.chats))
 	}
 	if len(results) > limit {
 		results = results[:limit]

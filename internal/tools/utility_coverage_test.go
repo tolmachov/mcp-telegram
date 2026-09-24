@@ -183,7 +183,8 @@ func TestChatsHandlersServeSeededSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, errRes)
 
-	search := NewChatsSearchHandler(nil, cache)
+	peers, _ := globalSearchPeers(t, nil, nil)
+	search := NewChatsSearchHandler(peers, cache)
 	errRes, found, err := search.handle(t.Context(), &mcp.CallToolRequest{}, SearchChatsInput{Query: "@beta", Limit: 1})
 	require.NoError(t, err)
 	require.Nil(t, errRes)
