@@ -181,7 +181,7 @@ func (h *MediaGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest, 
 		op := fmt.Sprintf("download photo %d", mediaID)
 		if errors.Is(err, errMediaTooLarge) {
 			return nil, nil, failedHint(op, err, fmt.Sprintf(
-				"The configured limit is %d bytes and at least %d were downloaded before aborting. Use a smaller thumb_size, or raise --media-max-bytes / MCP_TELEGRAM_MEDIA_MAX_BYTES if you really need the full file.",
+				"The configured limit is %d bytes and at least %d were downloaded before aborting. Raise --media-max-bytes / MCP_TELEGRAM_MEDIA_MAX_BYTES if you really need this file.",
 				h.maxBytes, buf.Len(),
 			))
 		}
