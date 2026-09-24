@@ -75,25 +75,30 @@ func requestLogMiddleware(logger *slog.Logger) mcp.Middleware {
 			res, err := next(ctx, method, req)
 			elapsed := time.Since(start)
 
-			attrs := append([]any{"method", method, "duration_ms", elapsed.Milliseconds()}, requestAttrs(method, req)...)
-
+			level, msg := slog.LevelDebug, "mcp request"
+			var outcome []any
+			warning := resultWarningText(res)
 			switch {
 			case err != nil:
-				logger.Error("mcp request failed", append(attrs, "err", err.Error())...)
+				level, msg, outcome = slog.LevelError, "mcp request failed", []any{"err", err.Error()}
 			case isErrorResult(res):
-				logger.Warn("mcp request returned error to client",
-					append(attrs, "detail", toolErrorText(res.(*mcp.CallToolResult)))...)
-			case resultWarningText(res) != "":
+				level, msg = slog.LevelWarn, "mcp request returned error to client"
+				outcome = []any{"detail", toolErrorText(res.(*mcp.CallToolResult))}
+			case warning != "":
 				// A degraded success: the tool returned a usable 200 but flagged
 				// a warning (e.g. a partial summary salvaged after a late provider
 				// failure). Surface it at Warn so it is not buried in an Info line.
-				logger.Warn("mcp request completed with warning",
-					append(attrs, "detail", resultWarningText(res))...)
+				level, msg, outcome = slog.LevelWarn, "mcp request completed with warning", []any{"detail", warning}
 			case isContentMethod(method):
-				logger.Info("mcp request", attrs...)
-			default:
-				logger.Debug("mcp request", attrs...)
+				level = slog.LevelInfo
 			}
+			// Most requests are lifecycle noise at Debug; building their
+			// attributes (redacting the params) is wasted when Debug is off.
+			if !logger.Enabled(ctx, level) {
+				return res, err
+			}
+			attrs := append([]any{"method", method, "duration_ms", elapsed.Milliseconds()}, requestAttrs(method, req)...)
+			logger.Log(ctx, level, msg, append(attrs, outcome...)...)
 			return res, err
 		}
 	}
