@@ -23,9 +23,13 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/tgid"
 )
 
+// panicAbortFlow records its abort, then panics.
 type panicAbortFlow struct{ *fakeFlow }
 
-func (panicAbortFlow) Abort() { panic("abort panic") }
+func (f panicAbortFlow) Abort() {
+	f.fakeFlow.Abort()
+	panic("abort panic")
+}
 
 type noUserFlow struct{ *fakeFlow }
 
@@ -95,7 +99,8 @@ func TestAuthLifecycleAndPanicIsolationBranches(t *testing.T) {
 // TestPanickingAbortSparesOtherExpiredLogins pins that a LoginFlow.Abort that
 // panics neither unwinds the sweep nor keeps the other expired flows from
 // being aborted, on the janitor path and on the admission path, and does not
-// leave the registry locked.
+// leave the registry locked. Every flow panics after recording its abort, so
+// whichever order the sweep takes them in, each one follows a panic.
 func TestPanickingAbortSparesOtherExpiredLogins(t *testing.T) {
 	for name, sweep := range map[string]func(*AuthServer){
 		"janitor":   (*AuthServer).sweepExpiredPending,
@@ -105,19 +110,16 @@ func TestPanickingAbortSparesOtherExpiredLogins(t *testing.T) {
 			a, err := New(testConfig(t), slog.New(slog.DiscardHandler), sessionstoretest.New(t), neverStartLogin, noInvalidate)
 			require.NoError(t, err)
 			t.Cleanup(a.Close)
-			// Map iteration order is random, so enough healthy flows surround
-			// the panicking one that some always come after it.
-			require.NoError(t, a.addPending("request", panicAbortFlow{newFakeFlow()}, ""))
-			healthy := make([]*fakeFlow, 4)
-			for i := range healthy {
-				healthy[i] = newFakeFlow()
-				require.NoError(t, a.addPending("request", healthy[i], ""))
+			flows := make([]*fakeFlow, 3)
+			for i := range flows {
+				flows[i] = newFakeFlow()
+				require.NoError(t, a.addPending("request", panicAbortFlow{flows[i]}, ""))
 			}
 			a.now = func() time.Time { return time.Now().Add(pendingLoginTTL + time.Minute) }
 
 			assert.NotPanics(t, func() { sweep(a) })
-			for i, flow := range healthy {
-				assert.True(t, flow.wasAborted(), "healthy flow %d", i)
+			for i, flow := range flows {
+				assert.True(t, flow.wasAborted(), "flow %d", i)
 			}
 			a.pendingMu.Lock()
 			for _, p := range a.pending {
