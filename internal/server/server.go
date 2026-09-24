@@ -364,6 +364,11 @@ type telegramClient interface {
 	Close()
 }
 
+// toolSchemas caches the tools' JSON schemas for the whole process: every
+// assembly (one per user on HTTP) registers the same tools on several inner
+// servers, and without it each registration reflects and resolves them anew.
+var toolSchemas = mcp.NewSchemaCache()
+
 // buildAssembly constructs handlers, resources, prompts, and the MCP
 // server(s) for one Telegram client. The assembly lives on a child of ctx —
 // its pinned-chat watcher and the loads its chat-list cache and peer resolver
@@ -399,6 +404,7 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 	serverOpts := &mcp.ServerOptions{
 		Instructions: happyInstructions,
 		Logger:       logger,
+		SchemaCache:  toolSchemas,
 		// Suggest chat titles/usernames/ids for prompt arguments and the
 		// chat resource template as the user types.
 		CompletionHandler: completion.Handler(chatsCache),

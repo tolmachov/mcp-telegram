@@ -63,14 +63,16 @@ type SummarizeChatResult struct {
 	partialOutcome
 }
 
+var summarizeChatInputSchema = inputSchemaWithEnums[SummarizeChatInput](map[string][]string{
+	"period": summarize.PeriodNames(),
+})
+
 // Register adds the tool to the MCP server.
 func (h *ChatSummarizeHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "SummarizeChat",
 		Description: "Use this whenever the user asks to summarise, digest, recap, or 'catch up on' a Telegram chat. Prefer it over fetching messages with GetMessages and summarising them yourself: it performs rolling/incremental summarisation server-side, so it handles long histories (weeks/months, hundreds of messages) without loading every message into the conversation context. Specify a goal (e.g. 'key decisions', 'action items', 'what did I miss') and a time period (day/week/month) or a since date.",
-		InputSchema: inputSchemaWithEnums[SummarizeChatInput](map[string][]string{
-			"period": summarize.PeriodNames(),
-		}),
+		InputSchema: summarizeChatInputSchema,
 		// Note: ReadOnlyHint is intentionally NOT set. The tool calls out
 		// to external LLM providers (sampling, Gemini, Ollama, Anthropic)
 		// which may cache, log, or bill for the content — it is not a

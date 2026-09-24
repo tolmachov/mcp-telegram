@@ -41,8 +41,12 @@ type Handler interface {
 // values (e.g. period, media_type) pass the result as mcp.Tool.InputSchema to
 // turn the allowed set into a hard schema constraint the client can validate.
 //
+// Call it once, into a package-level variable: the server's schema cache
+// resolves a provided schema by pointer, so every server the process builds
+// must be handed the same one.
+//
 // It panics on a missing property or an inference error: both are programmer
-// errors fixed at edit time, and Register has no error return.
+// errors fixed at edit time, and they surface at package initialisation.
 func inputSchemaWithEnums[In any](enums map[string][]string) *jsonschema.Schema {
 	schema, err := jsonschema.For[In](nil)
 	if err != nil {

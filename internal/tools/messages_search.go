@@ -78,6 +78,10 @@ type searchMessagesOutput struct {
 	PaginationHint string                 `json:"pagination_hint,omitempty"`
 }
 
+var searchMessagesInputSchema = inputSchemaWithEnums[SearchMessagesInput](map[string][]string{
+	"media_type": mediaTypes,
+})
+
 // Register adds the SearchMessages tool to the MCP server.
 func (h *MessagesSearchHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
@@ -85,9 +89,7 @@ func (h *MessagesSearchHandler) Register(s *mcp.Server) {
 		Description: "Search messages by substring within a specific chat via Telegram's server-side messages.search. Returns up to `limit` messages (default 50, max 100) sorted newest-first. " +
 			"Continue with `cursor` alone; it embeds the original query and filters. Use `before_message_id` only for the initial anchor. Date range uses inclusive `from_date` and exclusive `to_date`. " +
 			"For cross-chat search use SearchMessagesGlobal. For chat discovery by title use SearchChats.",
-		InputSchema: inputSchemaWithEnums[SearchMessagesInput](map[string][]string{
-			"media_type": mediaTypes,
-		}),
+		InputSchema: searchMessagesInputSchema,
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(true)},
 	}, h.handle)
 }

@@ -97,14 +97,16 @@ type SendMessageResult struct {
 	Note               string `json:"note,omitempty"`
 }
 
+var sendMessageInputSchema = inputSchemaWithEnums[SendMessageInput](map[string][]string{
+	"mode": {"send", "schedule", "draft"},
+})
+
 // Register adds the tool to the MCP server.
 func (h *MessageSendHandler) Register(s *mcp.Server) {
 	AddTool(s, &mcp.Tool{
 		Name:        "SendMessage",
 		Description: "Send a message to a chat. Modes (mutually exclusive): \"send\" (default) delivers immediately; \"schedule\" stores on Telegram's servers and delivers at schedule_at (RFC3339, must be in future; delays < ~10s are sent immediately); \"draft\" saves locally in the Telegram app without sending. reply_to_message_id (opaque handle) works with any mode for threaded replies. Returns status: sent | scheduled | sent_immediate | drafted.",
-		InputSchema: inputSchemaWithEnums[SendMessageInput](map[string][]string{
-			"mode": {"send", "schedule", "draft"},
-		}),
+		InputSchema: sendMessageInputSchema,
 		Annotations: &mcp.ToolAnnotations{OpenWorldHint: new(true)},
 	}, h.handle)
 }
