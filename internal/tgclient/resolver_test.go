@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gotd/td/bin"
@@ -48,71 +49,77 @@ func (g gatedInvoker) Invoke(ctx context.Context, input bin.Encoder, output bin.
 // TestResolverCachesSuccess verifies concurrent cold resolves of one ID share
 // a single probe, and a warm Resolve is served from the cache.
 func TestResolverCachesSuccess(t *testing.T) {
-	var calls atomic.Int32
-	inv := gatedInvoker{
-		inner:   fakeInvoker{channels: channelClientHandler(&calls, func() int64 { return 999 })},
-		entered: make(chan struct{}, 16),
-		gate:    make(chan struct{}),
-	}
-	r := NewResolver(t.Context(), tg.NewClient(inv))
-	want := &tg.InputPeerChannel{ChannelID: 1555091578, AccessHash: 999}
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int32
+		inv := gatedInvoker{
+			inner:   fakeInvoker{channels: channelClientHandler(&calls, func() int64 { return 999 })},
+			entered: make(chan struct{}, 16),
+			gate:    make(chan struct{}),
+		}
+		r := NewResolver(t.Context(), tg.NewClient(inv))
+		want := &tg.InputPeerChannel{ChannelID: 1555091578, AccessHash: 999}
 
-	var wg sync.WaitGroup
-	for range 8 {
-		wg.Go(func() {
-			p, err := r.Resolve(t.Context(), 1555091578)
-			assert.NoError(t, err)
-			assert.Equal(t, want, p.Input)
-		})
-	}
-	<-inv.entered // the shared probe holds at the gate while the callers pile up
-	close(inv.gate)
-	wg.Wait()
-	assert.Equal(t, int32(1), calls.Load(), "concurrent cold resolves must share one probe")
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Go(func() {
+				p, err := r.Resolve(t.Context(), 1555091578)
+				assert.NoError(t, err)
+				assert.Equal(t, want, p.Input)
+			})
+		}
+		<-inv.entered   // the shared probe holds at the gate
+		synctest.Wait() // and every caller waits on it
+		close(inv.gate)
+		wg.Wait()
+		assert.Equal(t, int32(1), calls.Load(), "concurrent cold resolves must share one probe")
 
-	p, err := r.Resolve(t.Context(), 1555091578)
-	require.NoError(t, err)
-	assert.Equal(t, want, p.Input)
-	assert.Equal(t, int32(1), calls.Load(), "a warm Resolve must hit the cache, not the API")
+		p, err := r.Resolve(t.Context(), 1555091578)
+		require.NoError(t, err)
+		assert.Equal(t, want, p.Input)
+		assert.Equal(t, int32(1), calls.Load(), "a warm Resolve must hit the cache, not the API")
+	})
 }
 
 // TestResolverSharedProbeOutlivesCaller verifies the caller that started a
 // shared probe giving up does not fail another caller waiting on it.
 func TestResolverSharedProbeOutlivesCaller(t *testing.T) {
-	var calls atomic.Int32
-	inv := gatedInvoker{
-		inner:   fakeInvoker{channels: channelClientHandler(&calls, func() int64 { return 999 })},
-		entered: make(chan struct{}, 16),
-		gate:    make(chan struct{}),
-	}
-	r := NewResolver(t.Context(), tg.NewClient(inv))
-
-	firstCtx, cancelFirst := context.WithCancel(t.Context())
-	firstErr := make(chan error, 1)
-	go func() {
-		_, err := r.Resolve(firstCtx, 5)
-		firstErr <- err
-	}()
-	<-inv.entered // the first caller's probe is in flight
-
-	second := make(chan error, 1)
-	go func() {
-		p, err := r.Resolve(t.Context(), 5)
-		if err == nil {
-			assert.Equal(t, &tg.InputPeerChannel{ChannelID: 5, AccessHash: 999}, p.Input)
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int32
+		inv := gatedInvoker{
+			inner:   fakeInvoker{channels: channelClientHandler(&calls, func() int64 { return 999 })},
+			entered: make(chan struct{}, 16),
+			gate:    make(chan struct{}),
 		}
-		second <- err
-	}()
+		r := NewResolver(t.Context(), tg.NewClient(inv))
 
-	cancelFirst()
-	err := <-firstErr
-	require.ErrorIs(t, err, context.Canceled, "the cancelled caller stops waiting")
-	require.ErrorContains(t, err, "resolving chat 5")
-	assert.False(t, IsPeerSpecific(err), "giving up says nothing about the chat")
+		firstCtx, cancelFirst := context.WithCancel(t.Context())
+		firstErr := make(chan error, 1)
+		go func() {
+			_, err := r.Resolve(firstCtx, 5)
+			firstErr <- err
+		}()
+		<-inv.entered // the first caller's probe is in flight
 
-	close(inv.gate)
-	require.NoError(t, <-second, "the other caller still gets the peer")
-	assert.Equal(t, int32(1), calls.Load())
+		second := make(chan error, 1)
+		go func() {
+			p, err := r.Resolve(t.Context(), 5)
+			if err == nil {
+				assert.Equal(t, &tg.InputPeerChannel{ChannelID: 5, AccessHash: 999}, p.Input)
+			}
+			second <- err
+		}()
+		synctest.Wait() // the second caller waits on the same probe
+
+		cancelFirst()
+		err := <-firstErr
+		require.ErrorIs(t, err, context.Canceled, "the cancelled caller stops waiting")
+		require.ErrorContains(t, err, "resolving chat 5")
+		assert.False(t, IsPeerSpecific(err), "giving up says nothing about the chat")
+
+		close(inv.gate)
+		require.NoError(t, <-second, "the other caller still gets the peer")
+		assert.Equal(t, int32(1), calls.Load())
+	})
 }
 
 // ctxKey tags a caller's context so a test can tell whether a probe saw it.
@@ -134,42 +141,45 @@ func (v valueSpy) Invoke(ctx context.Context, input bin.Encoder, output bin.Deco
 // that caller's values, and ending the lifetime (the assembly closing) cancels
 // it and fails every caller waiting on it.
 func TestResolverProbeRunsOnItsLifetime(t *testing.T) {
-	var calls atomic.Int32
-	inv := valueSpy{
-		gatedInvoker: gatedInvoker{
-			inner:   fakeInvoker{channels: channelClientHandler(&calls, func() int64 { return 999 })},
-			entered: make(chan struct{}, 16),
-			gate:    make(chan struct{}),
-		},
-		sawCaller: make(chan bool, 16),
-	}
-	life, end := context.WithCancel(t.Context())
-	r := NewResolver(life, tg.NewClient(inv))
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int32
+		inv := valueSpy{
+			gatedInvoker: gatedInvoker{
+				inner:   fakeInvoker{channels: channelClientHandler(&calls, func() int64 { return 999 })},
+				entered: make(chan struct{}, 16),
+				gate:    make(chan struct{}),
+			},
+			sawCaller: make(chan bool, 16),
+		}
+		life, end := context.WithCancel(t.Context())
+		r := NewResolver(life, tg.NewClient(inv))
 
-	const waiters = 3
-	errs := make(chan error, waiters)
-	caller := context.WithValue(t.Context(), ctxKey{}, "first caller")
-	go func() {
-		_, err := r.Resolve(caller, 5)
-		errs <- err
-	}()
-	<-inv.entered
-	assert.False(t, <-inv.sawCaller, "the probe must not carry its first caller's values")
-	for range waiters - 1 {
+		const waiters = 3
+		errs := make(chan error, waiters)
+		caller := context.WithValue(t.Context(), ctxKey{}, "first caller")
 		go func() {
-			_, err := r.Resolve(t.Context(), 5)
+			_, err := r.Resolve(caller, 5)
 			errs <- err
 		}()
-	}
+		<-inv.entered
+		assert.False(t, <-inv.sawCaller, "the probe must not carry its first caller's values")
+		for range waiters - 1 {
+			go func() {
+				_, err := r.Resolve(t.Context(), 5)
+				errs <- err
+			}()
+		}
+		synctest.Wait() // every waiter joined the probe
 
-	end()
-	for range waiters {
-		err := <-errs
-		require.ErrorIs(t, err, context.Canceled, "ending the lifetime fails the waiters")
-		assert.False(t, IsPeerSpecific(err), "the lifetime ending says nothing about the chat")
-	}
-	_, ok := r.cached(5)
-	assert.False(t, ok, "a cancelled probe caches nothing")
+		end()
+		for range waiters {
+			err := <-errs
+			require.ErrorIs(t, err, context.Canceled, "ending the lifetime fails the waiters")
+			assert.False(t, IsPeerSpecific(err), "the lifetime ending says nothing about the chat")
+		}
+		_, ok := r.cached(5)
+		assert.False(t, ok, "a cancelled probe caches nothing")
+	})
 }
 
 // TestResolverDoesNotCacheErrors is the core contract: a transient failure
