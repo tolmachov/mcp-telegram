@@ -56,7 +56,8 @@ type MarkAsReadResult struct {
 	// tried, so the requested total is TotalChats + len(SkippedIDs).
 	TotalChats int `json:"total_chats"`
 	// SkippedIDs holds chats not attempted because the batch stopped early on
-	// a systemic failure (a flood wait, a dead session, a cancelled call).
+	// a systemic failure (tgclient.IsSystemic: a flood wait, a dead session,
+	// a stopped client, a cancelled or timed-out call).
 	SkippedIDs []int64 `json:"skipped_ids,omitempty"`
 	// The warning names the chats that failed or were skipped, and why the
 	// batch stopped.
@@ -98,8 +99,8 @@ func (h *MessageReadHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	// structured Warning log so MCP clients with a log panel can flag them. A
 	// systemic error is the exception (tgclient.IsSystemic): a flood wait is
 	// account-level and cumulative, so going on would deepen the limit, and a
-	// dead session or a cancelled call fails every chat alike. record then
-	// reports stop=true.
+	// dead session, a stopped client or a cancelled or timed-out call fails
+	// every chat alike. record then reports stop=true.
 	record := func(outcome markReadResult) (stop bool) {
 		results = append(results, outcome)
 		if outcome.err == nil {

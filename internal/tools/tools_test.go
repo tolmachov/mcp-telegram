@@ -97,7 +97,7 @@ func TestFailureText(t *testing.T) {
 		assert.Equal(t, "Failed to delete messages in chat 5: deleting: forbidden. Ask an admin.", failureText("DeleteMessages", err))
 	})
 
-	t.Run("systemic failures get no hint", func(t *testing.T) {
+	t.Run("conditions beyond the request get no hint", func(t *testing.T) {
 		for name, cause := range map[string]error{
 			"flood wait":     flood,
 			"dead session":   dead,
