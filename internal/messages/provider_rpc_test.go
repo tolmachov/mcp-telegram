@@ -15,39 +15,17 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
-func resolveMessageChannelStep(t *testing.T, id, hash int64) telegramfake.InvokeFunc {
-	t.Helper()
-	return telegramfake.Typed(func(_ context.Context, req *tg.ChannelsGetChannelsRequest, out *tg.MessagesChatsBox) error {
-		require.Len(t, req.ID, 1)
-		assert.Equal(t, id, req.ID[0].(*tg.InputChannel).ChannelID)
-		out.Chats = &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Channel{ID: id, AccessHash: hash, Title: "Channel"}}}
-		return nil
-	})
-}
-
-// notUserStep answers the resolver's users.getUsers probe with "not a user",
-// so resolution falls through to the channel probe.
-func notUserStep(t *testing.T, id int64) telegramfake.InvokeFunc {
-	t.Helper()
-	return telegramfake.Typed(func(_ context.Context, req *tg.UsersGetUsersRequest, out *tg.UserClassVector) error {
-		require.Len(t, req.ID, 1)
-		assert.Equal(t, id, req.ID[0].(*tg.InputUser).UserID)
-		out.Elems = nil
-		return nil
-	})
-}
-
 func TestFetchRefreshesStalePeerExactlyOnce(t *testing.T) {
 	const channelID = int64(77)
 	inv := telegramfake.New(
-		notUserStep(t, channelID),
-		resolveMessageChannelStep(t, channelID, 100),
+		telegramfake.NotUser(t, channelID),
+		telegramfake.Channel(t, channelID, 100),
 		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetHistoryRequest, _ *tg.MessagesMessagesBox) error {
 			assert.Equal(t, int64(100), req.Peer.(*tg.InputPeerChannel).AccessHash)
 			return tgerr.New(400, "CHANNEL_INVALID")
 		}),
-		notUserStep(t, channelID),
-		resolveMessageChannelStep(t, channelID, 200),
+		telegramfake.NotUser(t, channelID),
+		telegramfake.Channel(t, channelID, 200),
 		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
 			assert.Equal(t, int64(200), req.Peer.(*tg.InputPeerChannel).AccessHash)
 			out.Messages = &tg.MessagesMessages{Messages: []tg.MessageClass{&tg.Message{ID: 9, Date: 100, Message: "fresh"}}}
@@ -68,8 +46,8 @@ func TestFetchAllContinuesServiceOnlyPageAndPreservesPartialResult(t *testing.T)
 
 	t.Run("service-only page advances", func(t *testing.T) {
 		inv := telegramfake.New(
-			notUserStep(t, channelID),
-			resolveMessageChannelStep(t, channelID, 101),
+			telegramfake.NotUser(t, channelID),
+			telegramfake.Channel(t, channelID, 101),
 			telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
 				assert.Zero(t, req.OffsetID)
 				out.Messages = &tg.MessagesMessagesSlice{Count: 2, Messages: []tg.MessageClass{&tg.MessageService{ID: 10}}}
@@ -96,8 +74,8 @@ func TestFetchAllContinuesServiceOnlyPageAndPreservesPartialResult(t *testing.T)
 
 	t.Run("late error returns accumulated messages", func(t *testing.T) {
 		inv := telegramfake.New(
-			notUserStep(t, channelID),
-			resolveMessageChannelStep(t, channelID, 101),
+			telegramfake.NotUser(t, channelID),
+			telegramfake.Channel(t, channelID, 101),
 			telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
 				out.Messages = &tg.MessagesMessagesSlice{Count: 2, Messages: []tg.MessageClass{&tg.Message{ID: 9, Date: 90, Message: "kept"}}}
 				return nil
@@ -136,11 +114,11 @@ func TestFetchAllStalePeer(t *testing.T) {
 
 	t.Run("nothing collected re-resolves and succeeds", func(t *testing.T) {
 		inv := telegramfake.New(
-			notUserStep(t, channelID),
-			resolveMessageChannelStep(t, channelID, 100),
+			telegramfake.NotUser(t, channelID),
+			telegramfake.Channel(t, channelID, 100),
 			stale(100),
-			notUserStep(t, channelID),
-			resolveMessageChannelStep(t, channelID, 200),
+			telegramfake.NotUser(t, channelID),
+			telegramfake.Channel(t, channelID, 200),
 			page(200, 9),
 			telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
 				out.Messages = &tg.MessagesMessagesSlice{Count: 1}
@@ -157,12 +135,12 @@ func TestFetchAllStalePeer(t *testing.T) {
 
 	t.Run("mid-pagination re-resolves and continues from the cursor", func(t *testing.T) {
 		inv := telegramfake.New(
-			notUserStep(t, channelID),
-			resolveMessageChannelStep(t, channelID, 100),
+			telegramfake.NotUser(t, channelID),
+			telegramfake.Channel(t, channelID, 100),
 			page(100, 9),
 			stale(100),
-			notUserStep(t, channelID),
-			resolveMessageChannelStep(t, channelID, 200),
+			telegramfake.NotUser(t, channelID),
+			telegramfake.Channel(t, channelID, 200),
 			telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
 				assert.Equal(t, int64(200), req.Peer.(*tg.InputPeerChannel).AccessHash)
 				assert.Equal(t, 9, req.OffsetID, "the retried page must start after the collected one")
@@ -195,8 +173,8 @@ func TestProviderWaitHonoursContext(t *testing.T) {
 func TestFetchContextIncludesAnchorWhenAfterZero(t *testing.T) {
 	const channelID = int64(79)
 	inv := telegramfake.New(
-		notUserStep(t, channelID),
-		resolveMessageChannelStep(t, channelID, 102),
+		telegramfake.NotUser(t, channelID),
+		telegramfake.Channel(t, channelID, 102),
 		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
 			assert.Equal(t, 20, req.OffsetID)
 			assert.Equal(t, -1, req.AddOffset)
@@ -218,8 +196,8 @@ func TestFetchContextIncludesAnchorWhenAfterZero(t *testing.T) {
 func TestFetchScheduledIsUnpaginated(t *testing.T) {
 	const channelID = int64(80)
 	inv := telegramfake.New(
-		notUserStep(t, channelID),
-		resolveMessageChannelStep(t, channelID, 103),
+		telegramfake.NotUser(t, channelID),
+		telegramfake.Channel(t, channelID, 103),
 		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetScheduledHistoryRequest, out *tg.MessagesMessagesBox) error {
 			out.Messages = &tg.MessagesMessages{Messages: []tg.MessageClass{&tg.Message{ID: 3, Date: 30, Message: "scheduled"}}}
 			return nil
@@ -241,8 +219,8 @@ func TestSearchAndRepliesBuildTelegramRequests(t *testing.T) {
 
 	t.Run("search uses inclusive lower and exclusive upper bound", func(t *testing.T) {
 		inv := telegramfake.New(
-			notUserStep(t, channelID),
-			resolveMessageChannelStep(t, channelID, 104),
+			telegramfake.NotUser(t, channelID),
+			telegramfake.Channel(t, channelID, 104),
 			telegramfake.Typed(func(_ context.Context, req *tg.MessagesSearchRequest, out *tg.MessagesMessagesBox) error {
 				assert.Equal(t, "needle", req.Q)
 				assert.Equal(t, 99, req.MinDate)
@@ -261,8 +239,8 @@ func TestSearchAndRepliesBuildTelegramRequests(t *testing.T) {
 
 	t.Run("replies", func(t *testing.T) {
 		inv := telegramfake.New(
-			notUserStep(t, channelID),
-			resolveMessageChannelStep(t, channelID, 104),
+			telegramfake.NotUser(t, channelID),
+			telegramfake.Channel(t, channelID, 104),
 			telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetRepliesRequest, out *tg.MessagesMessagesBox) error {
 				assert.Equal(t, 55, req.MsgID)
 				assert.Equal(t, 20, req.Limit)
@@ -301,8 +279,8 @@ func TestSearchGlobalAndForumTopicsBuildTelegramRequests(t *testing.T) {
 	t.Run("forum topics", func(t *testing.T) {
 		const channelID = int64(83)
 		inv := telegramfake.New(
-			notUserStep(t, channelID),
-			resolveMessageChannelStep(t, channelID, 106),
+			telegramfake.NotUser(t, channelID),
+			telegramfake.Channel(t, channelID, 106),
 			telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetForumTopicsRequest, out *tg.MessagesForumTopics) error {
 				query, ok := req.GetQ()
 				assert.True(t, ok)
@@ -343,8 +321,8 @@ func TestProviderPublicValidation(t *testing.T) {
 func TestFetchUnreadUsesDialogReadBoundary(t *testing.T) {
 	const channelID = int64(84)
 	inv := telegramfake.New(
-		notUserStep(t, channelID),
-		resolveMessageChannelStep(t, channelID, 107),
+		telegramfake.NotUser(t, channelID),
+		telegramfake.Channel(t, channelID, 107),
 		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetPeerDialogsRequest, out *tg.MessagesPeerDialogs) error {
 			require.Len(t, req.Peers, 1)
 			out.Dialogs = []tg.DialogClass{&tg.Dialog{ReadInboxMaxID: 40}}
@@ -367,8 +345,8 @@ func TestFetchUnreadUsesDialogReadBoundary(t *testing.T) {
 func TestForumPaginationCountsOnlyThroughLiveAnchor(t *testing.T) {
 	const channelID = int64(85)
 	inv := telegramfake.New(
-		notUserStep(t, channelID),
-		resolveMessageChannelStep(t, channelID, 108),
+		telegramfake.NotUser(t, channelID),
+		telegramfake.Channel(t, channelID, 108),
 		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetForumTopicsRequest, out *tg.MessagesForumTopics) error {
 			assert.Zero(t, req.OffsetTopic)
 			assert.Equal(t, 100, req.Limit) // default limit
@@ -415,8 +393,8 @@ func TestForumPaginationCountsOnlyThroughLiveAnchor(t *testing.T) {
 
 func TestForumPaginationRejectsRepeatedAnchorEvenAtReportedEnd(t *testing.T) {
 	inv := telegramfake.New(
-		notUserStep(t, 85),
-		resolveMessageChannelStep(t, 85, 108),
+		telegramfake.NotUser(t, 85),
+		telegramfake.Channel(t, 85, 108),
 		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetForumTopicsRequest, out *tg.MessagesForumTopics) error {
 			out.Count = 2
 			out.Topics = []tg.ForumTopicClass{&tg.ForumTopic{ID: 7, TopMessage: 70, Date: 10}, &tg.ForumTopicDeleted{ID: 8}}
@@ -447,8 +425,8 @@ func TestFetchPreservesMediaAndMetadataForBackup(t *testing.T) {
 		{Reaction: &tg.ReactionPaid{}, Count: 3},
 	}})
 	inv := telegramfake.New(
-		notUserStep(t, 86),
-		resolveMessageChannelStep(t, 86, 109),
+		telegramfake.NotUser(t, 86),
+		telegramfake.Channel(t, 86, 109),
 		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
 			out.Messages = &tg.MessagesMessages{Messages: []tg.MessageClass{
 				picture,

@@ -18,34 +18,10 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
-func resolveChannelStep(t *testing.T, id, accessHash int64) telegramfake.InvokeFunc {
-	t.Helper()
-	return telegramfake.Typed(func(_ context.Context, req *tg.ChannelsGetChannelsRequest, out *tg.MessagesChatsBox) error {
-		require.Len(t, req.ID, 1)
-		input, ok := req.ID[0].(*tg.InputChannel)
-		require.True(t, ok)
-		assert.Equal(t, id, input.ChannelID)
-		out.Chats = &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Channel{ID: id, AccessHash: accessHash}}}
-		return nil
-	})
-}
-
-// notUserStep answers the resolver's users.getUsers probe with "not a user",
-// so resolution falls through to the channel probe.
-func notUserStep(t *testing.T, id int64) telegramfake.InvokeFunc {
-	t.Helper()
-	return telegramfake.Typed(func(_ context.Context, req *tg.UsersGetUsersRequest, out *tg.UserClassVector) error {
-		require.Len(t, req.ID, 1)
-		assert.Equal(t, id, req.ID[0].(*tg.InputUser).UserID)
-		out.Elems = nil
-		return nil
-	})
-}
-
 func TestEditMessageIDRangeThroughMCP(t *testing.T) {
 	inv := telegramfake.New(
-		notUserStep(t, 41),
-		resolveChannelStep(t, 41, 91),
+		telegramfake.NotUser(t, 41),
+		telegramfake.Channel(t, 41, 91),
 		telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesEditMessageRequest, out *tg.UpdatesBox) error {
 			// Check the target after TL serialisation, where a Go int could
 			// otherwise silently wrap to another message's signed int32 ID.
@@ -140,8 +116,8 @@ func TestMessageMutationHandlersUseExpectedRPCs(t *testing.T) {
 
 	t.Run("send", func(t *testing.T) {
 		inv := telegramfake.New(
-			notUserStep(t, channelID),
-			resolveChannelStep(t, channelID, accessHash),
+			telegramfake.NotUser(t, channelID),
+			telegramfake.Channel(t, channelID, accessHash),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesSendMessageRequest, out *tg.UpdatesBox) error {
 				assert.Equal(t, "hello", rpc.Message)
 				out.Updates = &tg.Updates{Updates: []tg.UpdateClass{&tg.UpdateNewChannelMessage{Message: &tg.Message{ID: 7, Date: 10}}}}
@@ -158,8 +134,8 @@ func TestMessageMutationHandlersUseExpectedRPCs(t *testing.T) {
 
 	t.Run("edit", func(t *testing.T) {
 		inv := telegramfake.New(
-			notUserStep(t, channelID),
-			resolveChannelStep(t, channelID, accessHash),
+			telegramfake.NotUser(t, channelID),
+			telegramfake.Channel(t, channelID, accessHash),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesEditMessageRequest, out *tg.UpdatesBox) error {
 				assert.Equal(t, 7, rpc.ID)
 				assert.Equal(t, "updated", rpc.Message)
@@ -177,8 +153,8 @@ func TestMessageMutationHandlersUseExpectedRPCs(t *testing.T) {
 
 	t.Run("reaction", func(t *testing.T) {
 		inv := telegramfake.New(
-			notUserStep(t, channelID),
-			resolveChannelStep(t, channelID, accessHash),
+			telegramfake.NotUser(t, channelID),
+			telegramfake.Channel(t, channelID, accessHash),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesSendReactionRequest, out *tg.UpdatesBox) error {
 				assert.Equal(t, 7, rpc.MsgID)
 				reactions, ok := rpc.GetReaction()
@@ -198,8 +174,8 @@ func TestMessageMutationHandlersUseExpectedRPCs(t *testing.T) {
 
 	t.Run("delete", func(t *testing.T) {
 		inv := telegramfake.New(
-			notUserStep(t, channelID),
-			resolveChannelStep(t, channelID, accessHash),
+			telegramfake.NotUser(t, channelID),
+			telegramfake.Channel(t, channelID, accessHash),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.ChannelsGetMessagesRequest, out *tg.MessagesMessagesBox) error {
 				assert.Len(t, rpc.ID, 1)
 				msg := &tg.Message{ID: 7, PeerID: &tg.PeerChannel{ChannelID: channelID}}
@@ -229,8 +205,8 @@ func TestMessageMutationHandlersUseExpectedRPCs(t *testing.T) {
 
 	t.Run("delete scheduled", func(t *testing.T) {
 		inv := telegramfake.New(
-			notUserStep(t, channelID),
-			resolveChannelStep(t, channelID, accessHash),
+			telegramfake.NotUser(t, channelID),
+			telegramfake.Channel(t, channelID, accessHash),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesGetScheduledMessagesRequest, out *tg.MessagesMessagesBox) error {
 				assert.Equal(t, []int{7}, rpc.ID)
 				out.Messages = &tg.MessagesMessages{Messages: []tg.MessageClass{&tg.Message{ID: 7, PeerID: &tg.PeerChannel{ChannelID: channelID}}}}
@@ -263,10 +239,10 @@ func TestForwardAndMembershipMutationsUseExpectedRPCs(t *testing.T) {
 
 	t.Run("forward", func(t *testing.T) {
 		inv := telegramfake.New(
-			notUserStep(t, sourceID),
-			resolveChannelStep(t, sourceID, 91),
-			notUserStep(t, targetID),
-			resolveChannelStep(t, targetID, 92),
+			telegramfake.NotUser(t, sourceID),
+			telegramfake.Channel(t, sourceID, 91),
+			telegramfake.NotUser(t, targetID),
+			telegramfake.Channel(t, targetID, 92),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesForwardMessagesRequest, out *tg.UpdatesBox) error {
 				assert.Equal(t, []int{7}, rpc.ID)
 				out.Updates = &tg.Updates{Updates: []tg.UpdateClass{&tg.UpdateNewChannelMessage{Message: &tg.Message{ID: 8, Date: 12}}}}
@@ -286,18 +262,18 @@ func TestForwardAndMembershipMutationsUseExpectedRPCs(t *testing.T) {
 	t.Run("forward re-resolves both peers once on a stale hash", func(t *testing.T) {
 		var randomIDs []int64
 		inv := telegramfake.New(
-			notUserStep(t, sourceID),
-			resolveChannelStep(t, sourceID, 91),
-			notUserStep(t, targetID),
-			resolveChannelStep(t, targetID, 92),
+			telegramfake.NotUser(t, sourceID),
+			telegramfake.Channel(t, sourceID, 91),
+			telegramfake.NotUser(t, targetID),
+			telegramfake.Channel(t, targetID, 92),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesForwardMessagesRequest, _ *tg.UpdatesBox) error {
 				randomIDs = append(randomIDs, rpc.RandomID...)
 				return tgerr.New(400, "CHANNEL_INVALID")
 			}),
-			notUserStep(t, sourceID),
-			resolveChannelStep(t, sourceID, 191),
-			notUserStep(t, targetID),
-			resolveChannelStep(t, targetID, 192),
+			telegramfake.NotUser(t, sourceID),
+			telegramfake.Channel(t, sourceID, 191),
+			telegramfake.NotUser(t, targetID),
+			telegramfake.Channel(t, targetID, 192),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesForwardMessagesRequest, out *tg.UpdatesBox) error {
 				assert.Equal(t, int64(191), rpc.FromPeer.(*tg.InputPeerChannel).AccessHash)
 				assert.Equal(t, int64(192), rpc.ToPeer.(*tg.InputPeerChannel).AccessHash)
@@ -320,8 +296,8 @@ func TestForwardAndMembershipMutationsUseExpectedRPCs(t *testing.T) {
 
 	t.Run("leave", func(t *testing.T) {
 		inv := telegramfake.New(
-			notUserStep(t, sourceID),
-			resolveChannelStep(t, sourceID, 91),
+			telegramfake.NotUser(t, sourceID),
+			telegramfake.Channel(t, sourceID, 91),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.ChannelsLeaveChannelRequest, out *tg.UpdatesBox) error {
 				input, ok := rpc.Channel.(*tg.InputChannel)
 				require.True(t, ok)
@@ -449,8 +425,8 @@ func TestFolderMutationHandlersUseExpectedRPCs(t *testing.T) {
 		const channelID = int64(51)
 		inv := telegramfake.New(
 			dialogFiltersStep(t, &tg.DialogFilter{ID: 3, Title: tg.TextWithEntities{Text: "Work"}, Groups: true}),
-			notUserStep(t, channelID),
-			resolveChannelStep(t, channelID, 151),
+			telegramfake.NotUser(t, channelID),
+			telegramfake.Channel(t, channelID, 151),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesUpdateDialogFilterRequest, out *tg.BoolBox) error {
 				filter, ok := rpc.GetFilter()
 				require.True(t, ok)
@@ -478,8 +454,8 @@ func TestFolderMutationHandlersUseExpectedRPCs(t *testing.T) {
 				ID: 3, Title: tg.TextWithEntities{Text: "Work"},
 				IncludePeers: []tg.InputPeerClass{&tg.InputPeerChannel{ChannelID: channelID, AccessHash: 152}, &tg.InputPeerUser{UserID: 8}},
 			}),
-			notUserStep(t, channelID),
-			resolveChannelStep(t, channelID, 152),
+			telegramfake.NotUser(t, channelID),
+			telegramfake.Channel(t, channelID, 152),
 			telegramfake.Typed(func(_ context.Context, rpc *tg.MessagesUpdateDialogFilterRequest, out *tg.BoolBox) error {
 				filter, ok := rpc.GetFilter()
 				require.True(t, ok)
@@ -502,8 +478,8 @@ func TestFolderMutationHandlersUseExpectedRPCs(t *testing.T) {
 func TestSetChatMuteUsesExpectedRPC(t *testing.T) {
 	const channelID = int64(44)
 	inv := telegramfake.New(
-		notUserStep(t, channelID),
-		resolveChannelStep(t, channelID, 94),
+		telegramfake.NotUser(t, channelID),
+		telegramfake.Channel(t, channelID, 94),
 		telegramfake.Typed(func(_ context.Context, rpc *tg.AccountUpdateNotifySettingsRequest, out *tg.BoolBox) error {
 			peer, ok := rpc.Peer.(*tg.InputNotifyPeer)
 			require.True(t, ok)

@@ -38,11 +38,11 @@ func TestLeaveChatRetriesStaleHash(t *testing.T) {
 		})
 	}
 	inv := telegramfake.New(
-		notUserStep(t, 41),
-		resolveChannelStep(t, 41, 1),
+		telegramfake.NotUser(t, 41),
+		telegramfake.Channel(t, 41, 1),
 		leave(1, tgerr.New(400, "CHANNEL_INVALID")),
-		notUserStep(t, 41),
-		resolveChannelStep(t, 41, 2),
+		telegramfake.NotUser(t, 41),
+		telegramfake.Channel(t, 41, 2),
 		leave(2, nil),
 	)
 	h := NewLeaveChatHandler(tgclient.NewResolver(t.Context(), tg.NewClient(inv)))
@@ -82,11 +82,11 @@ func TestAddChatsToFolderRetriesStaleHash(t *testing.T) {
 			}}
 			return nil
 		}),
-		notUserStep(t, 41),
-		resolveChannelStep(t, 41, 1),
+		telegramfake.NotUser(t, 41),
+		telegramfake.Channel(t, 41, 1),
 		update(1, tgerr.New(400, "CHANNEL_INVALID")),
-		notUserStep(t, 41),
-		resolveChannelStep(t, 41, 2),
+		telegramfake.NotUser(t, 41),
+		telegramfake.Channel(t, 41, 2),
 		update(2, nil),
 	)
 	h := NewAddChatsToFolderHandler(tgclient.NewResolver(t.Context(), tg.NewClient(inv)))

@@ -188,14 +188,8 @@ func TestSummarizeCountsCompletedBatches(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := telegramfake.New(
-				telegramfake.Typed(func(_ context.Context, _ *tg.UsersGetUsersRequest, out *tg.UserClassVector) error {
-					out.Elems = nil // not a user: fall through to the channel probe
-					return nil
-				}),
-				telegramfake.Typed(func(_ context.Context, _ *tg.ChannelsGetChannelsRequest, out *tg.MessagesChatsBox) error {
-					out.Chats = &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Channel{ID: 77, AccessHash: 100}}}
-					return nil
-				}),
+				telegramfake.NotUser(t, 77),
+				telegramfake.Channel(t, 77, 100),
 				telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
 					raw := make([]tg.MessageClass, 0, len(tc.texts))
 					for i, text := range tc.texts {

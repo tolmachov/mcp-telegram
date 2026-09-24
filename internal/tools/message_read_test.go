@@ -69,7 +69,7 @@ func TestMarkAsReadNonFloodErrorContinuesBatch(t *testing.T) {
 func TestMarkAsReadChannelUsesCurrentTopMessage(t *testing.T) {
 	const channelID = int64(99)
 	inv := telegramfake.New(
-		notUserStep(t, channelID),
+		telegramfake.NotUser(t, channelID),
 		telegramfake.Typed(func(_ context.Context, req *tg.ChannelsGetChannelsRequest, out *tg.MessagesChatsBox) error {
 			assert.Equal(t, channelID, req.ID[0].(*tg.InputChannel).ChannelID)
 			out.Chats = &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Channel{ID: channelID, AccessHash: 123}}}
@@ -104,11 +104,11 @@ func TestMarkAsReadChannelUsesCurrentTopMessage(t *testing.T) {
 func TestMarkAsReadLooksUpChannelTopsInOneCall(t *testing.T) {
 	const firstID, secondID, groupID = int64(91), int64(92), int64(93)
 	inv := telegramfake.New(
-		notUserStep(t, firstID),
-		resolveChannelStep(t, firstID, 1),
-		notUserStep(t, secondID),
-		resolveChannelStep(t, secondID, 2),
-		notUserStep(t, groupID),
+		telegramfake.NotUser(t, firstID),
+		telegramfake.Channel(t, firstID, 1),
+		telegramfake.NotUser(t, secondID),
+		telegramfake.Channel(t, secondID, 2),
+		telegramfake.NotUser(t, groupID),
 		telegramfake.Typed(func(_ context.Context, _ *tg.ChannelsGetChannelsRequest, _ *tg.MessagesChatsBox) error {
 			return tgerr.New(400, "CHANNEL_INVALID")
 		}),
@@ -150,7 +150,7 @@ func TestMarkAsReadLooksUpChannelTopsInOneCall(t *testing.T) {
 // answers with false fails that chat instead of counting as read.
 func TestMarkAsReadReportsAnUnacknowledgedRead(t *testing.T) {
 	const channelID, groupID = int64(91), int64(93)
-	script := []telegramfake.InvokeFunc{notUserStep(t, channelID), resolveChannelStep(t, channelID, 1)}
+	script := []telegramfake.InvokeFunc{telegramfake.NotUser(t, channelID), telegramfake.Channel(t, channelID, 1)}
 	script = append(script, basicGroupSteps(t, groupID)...)
 	script = append(script,
 		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetPeerDialogsRequest, out *tg.MessagesPeerDialogs) error {
@@ -183,10 +183,10 @@ func TestMarkAsReadReportsAnUnacknowledgedRead(t *testing.T) {
 func TestMarkAsReadCollapsesIdenticalFailures(t *testing.T) {
 	const firstID, secondID = int64(91), int64(92)
 	inv := telegramfake.New(
-		notUserStep(t, firstID),
-		resolveChannelStep(t, firstID, 1),
-		notUserStep(t, secondID),
-		resolveChannelStep(t, secondID, 2),
+		telegramfake.NotUser(t, firstID),
+		telegramfake.Channel(t, firstID, 1),
+		telegramfake.NotUser(t, secondID),
+		telegramfake.Channel(t, secondID, 2),
 		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetPeerDialogsRequest, _ *tg.MessagesPeerDialogs) error {
 			return tgerr.New(500, "INTERNAL_SERVER_ERROR")
 		}),
@@ -205,7 +205,7 @@ func TestMarkAsReadCollapsesIdenticalFailures(t *testing.T) {
 func basicGroupSteps(t *testing.T, id int64) []telegramfake.InvokeFunc {
 	t.Helper()
 	return []telegramfake.InvokeFunc{
-		notUserStep(t, id),
+		telegramfake.NotUser(t, id),
 		telegramfake.Typed(func(_ context.Context, _ *tg.ChannelsGetChannelsRequest, _ *tg.MessagesChatsBox) error {
 			return tgerr.New(400, "CHANNEL_INVALID")
 		}),
@@ -222,10 +222,10 @@ func basicGroupSteps(t *testing.T, id int64) []telegramfake.InvokeFunc {
 func TestMarkAsReadIsolatesBadChannel(t *testing.T) {
 	const goodID, badID = int64(91), int64(92)
 	inv := telegramfake.New(
-		notUserStep(t, goodID),
-		resolveChannelStep(t, goodID, 1),
-		notUserStep(t, badID),
-		resolveChannelStep(t, badID, 2),
+		telegramfake.NotUser(t, goodID),
+		telegramfake.Channel(t, goodID, 1),
+		telegramfake.NotUser(t, badID),
+		telegramfake.Channel(t, badID, 2),
 		telegramfake.Typed(func(_ context.Context, req *tg.MessagesGetPeerDialogsRequest, _ *tg.MessagesPeerDialogs) error {
 			require.Len(t, req.Peers, 2)
 			return tgerr.New(400, "CHANNEL_PRIVATE")
@@ -269,10 +269,10 @@ func TestMarkAsReadIsolatesBadChannel(t *testing.T) {
 func TestMarkAsReadSharedLookupFailureFailsEveryChannel(t *testing.T) {
 	const firstID, secondID, groupID = int64(91), int64(92), int64(93)
 	script := []telegramfake.InvokeFunc{
-		notUserStep(t, firstID),
-		resolveChannelStep(t, firstID, 1),
-		notUserStep(t, secondID),
-		resolveChannelStep(t, secondID, 2),
+		telegramfake.NotUser(t, firstID),
+		telegramfake.Channel(t, firstID, 1),
+		telegramfake.NotUser(t, secondID),
+		telegramfake.Channel(t, secondID, 2),
 	}
 	script = append(script, basicGroupSteps(t, groupID)...)
 	script = append(script,
@@ -341,7 +341,7 @@ func TestMarkAsReadFloodWaitMidReadSkipsRest(t *testing.T) {
 // Telegram again.
 func TestMarkAsReadDeadSessionStopsBatch(t *testing.T) {
 	const channelID, groupID = int64(91), int64(93)
-	script := []telegramfake.InvokeFunc{notUserStep(t, channelID), resolveChannelStep(t, channelID, 1)}
+	script := []telegramfake.InvokeFunc{telegramfake.NotUser(t, channelID), telegramfake.Channel(t, channelID, 1)}
 	script = append(script, basicGroupSteps(t, groupID)...)
 	script = append(script, telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetPeerDialogsRequest, _ *tg.MessagesPeerDialogs) error {
 		// The verdict a refusal by the home DC reaches the call as.

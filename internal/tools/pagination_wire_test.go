@@ -105,7 +105,7 @@ func TestPaginationThroughMCP(t *testing.T) {
 				}
 			}
 			inv := telegramfake.New(
-				notUserStep(t, chatID),
+				telegramfake.NotUser(t, chatID),
 				telegramfake.Typed(func(_ context.Context, _ *tg.ChannelsGetChannelsRequest, out *tg.MessagesChatsBox) error {
 					out.Chats = &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Channel{ID: 77, AccessHash: 100}}}
 					return nil

@@ -133,8 +133,8 @@ func TestReadOnlyHandlersUseExpectedRPCs(t *testing.T) {
 	t.Run("chat info", func(t *testing.T) {
 		const channelID = int64(60)
 		inv := telegramfake.New(
-			notUserStep(t, channelID),
-			resolveChannelStep(t, channelID, 160),
+			telegramfake.NotUser(t, channelID),
+			telegramfake.Channel(t, channelID, 160),
 			telegramfake.Typed(func(_ context.Context, req *tg.ChannelsGetFullChannelRequest, out *tg.MessagesChatFull) error {
 				channel := req.Channel.(*tg.InputChannel)
 				assert.Equal(t, channelID, channel.ChannelID)
@@ -199,10 +199,10 @@ func TestBackupMessagesWritesAtomicallyInsideConfiguredPath(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "backup.txt")
 	inv := telegramfake.New(
-		notUserStep(t, channelID),
-		resolveChannelStep(t, channelID, 161),
-		notUserStep(t, channelID),
-		resolveChannelStep(t, channelID, 161),
+		telegramfake.NotUser(t, channelID),
+		telegramfake.Channel(t, channelID, 161),
+		telegramfake.NotUser(t, channelID),
+		telegramfake.Channel(t, channelID, 161),
 		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
 			out.Messages = &tg.MessagesMessages{Messages: []tg.MessageClass{&tg.Message{ID: 1, Date: 100, Message: "backed up"}}}
 			return nil
@@ -234,8 +234,8 @@ func TestBackupMessagesWritesAtomicallyInsideConfiguredPath(t *testing.T) {
 func partialBackupScript(t *testing.T, channelID int64, secondPage func() error) *telegramfake.Invoker {
 	t.Helper()
 	return telegramfake.New(
-		notUserStep(t, channelID),
-		resolveChannelStep(t, channelID, 161),
+		telegramfake.NotUser(t, channelID),
+		telegramfake.Channel(t, channelID, 161),
 		telegramfake.Typed(func(_ context.Context, _ *tg.MessagesGetHistoryRequest, out *tg.MessagesMessagesBox) error {
 			out.Messages = &tg.MessagesMessagesSlice{Count: 10, Messages: []tg.MessageClass{
 				&tg.Message{ID: 10, Date: 200, Message: "second"},
