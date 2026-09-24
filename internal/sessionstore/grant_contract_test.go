@@ -462,3 +462,33 @@ func TestGrantWriteSurvivesLostResponse(t *testing.T) {
 		}
 	}
 }
+
+// TestGCSGrantSweepJoinsListingFailure pins that a listing that fails part-way
+// through a GCS sweep is reported together with the failures already seen.
+func TestGCSGrantSweepJoinsListingFailure(t *testing.T) {
+	b := newTestGCSWithTransport(t, func(rt http.RoundTripper) http.RoundTripper {
+		failRead := failGrantReads(badFamily)(rt)
+		return roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method != http.MethodGet || !strings.HasSuffix(req.URL.Path, "/o") {
+				return failRead.RoundTrip(req)
+			}
+			// A listing: serve one object per page and fail the second page.
+			query := req.URL.Query()
+			if query.Get("pageToken") != "" {
+				return forbidden(req), nil
+			}
+			query.Set("maxResults", "1")
+			req = req.Clone(req.Context())
+			req.URL.RawQuery = query.Encode()
+			return rt.RoundTrip(req)
+		})
+	})
+	now := time.Now()
+	store := Encrypted(b, newCipher(t, testIssuer, newKey(t)))
+	redeemExpired(t, store, badFamily, now)
+	redeemExpired(t, store, testGrantFamily, now)
+
+	_, err := store.SweepAuthState(t.Context(), now)
+	require.ErrorContains(t, err, "sweeping grant "+badFamily)
+	require.ErrorContains(t, err, "listing grants")
+}
