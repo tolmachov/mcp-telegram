@@ -2,6 +2,7 @@ package authsrv
 
 import (
 	"context"
+	"errors"
 	"runtime/debug"
 	"time"
 
@@ -78,10 +79,30 @@ func (a *AuthServer) runSweep(ctx context.Context) {
 			a.logger.Warn("oauth state sweep: deleted an undecodable grant record",
 				"family", family)
 		}
-		if err != nil && ctx.Err() == nil {
+		if err != nil && !cancelledOnly(err) {
 			a.logger.Error("oauth state sweep failed", "err", err)
 		}
 	})
+}
+
+// cancelledOnly reports whether err consists of cancellation alone: every
+// leaf of its wrap and join tree is context.Canceled. Shutdown cancels a
+// sweep's context, and the failures that causes are not worth logging; a real
+// failure joined with them still is.
+func cancelledOnly(err error) bool {
+	switch e := err.(type) { //nolint:errorlint // walks the wrap tree itself, leaf by leaf
+	case interface{ Unwrap() []error }:
+		for _, inner := range e.Unwrap() {
+			if !cancelledOnly(inner) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		return cancelledOnly(e.Unwrap())
+	default:
+		return errors.Is(err, context.Canceled)
+	}
 }
 
 // sweepRefs deletes every entry list returns whose UpdatedAt is older than
@@ -95,27 +116,27 @@ func (a *AuthServer) sweepRefs(
 	del func(context.Context, tgid.UserID, string) error,
 ) {
 	refs, err := list(ctx)
-	if ctx.Err() != nil {
-		return
-	}
 	if err != nil {
-		a.logger.Error("auth sweep: listing failed", "sweep", label, "err", err)
+		if !cancelledOnly(err) {
+			a.logger.Error("auth sweep: listing failed", "sweep", label, "err", err)
+		}
 		return
 	}
 	cutoff := refreshTokenTTL + sweepMargin
 	now := a.now()
 	for _, ref := range refs {
+		if ctx.Err() != nil {
+			return
+		}
 		age := now.Sub(ref.UpdatedAt)
 		if age <= cutoff {
 			continue
 		}
-		err := del(ctx, ref.UserID, ref.SID)
-		if ctx.Err() != nil {
-			return
-		}
-		if err != nil {
-			a.logger.Error("auth sweep: delete failed",
-				"sweep", label, "user_id", ref.UserID, "session", ref.SID, "err", err)
+		if err := del(ctx, ref.UserID, ref.SID); err != nil {
+			if !cancelledOnly(err) {
+				a.logger.Error("auth sweep: delete failed",
+					"sweep", label, "user_id", ref.UserID, "session", ref.SID, "err", err)
+			}
 			continue
 		}
 		a.logger.Info("auth sweep: deleted expired entry",

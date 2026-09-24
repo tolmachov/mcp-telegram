@@ -227,7 +227,7 @@ func (f *FS) SweepAuthState(ctx context.Context, now time.Time) ([]string, error
 	var errs []error
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
-			return undecodable, err
+			return undecodable, errors.Join(append(errs, err)...)
 		}
 		family, ok := strings.CutSuffix(entry.Name(), ".json")
 		if entry.IsDir() || !ok || !ValidSID(family) {

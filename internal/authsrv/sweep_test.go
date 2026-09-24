@@ -259,3 +259,57 @@ func TestSweepStopsQuietlyOnShutdown(t *testing.T) {
 	a.runSweep(ctx)
 	assert.NotContains(t, logs.String(), "level=ERROR")
 }
+
+// failThenCancelStore stands in for a real failure arriving together with
+// shutdown: its Delete cancels the sweep's context yet fails for its own
+// reason, and SweepAuthState reports a real failure joined with the ended
+// context, as the backends do.
+type failThenCancelStore struct {
+	sessionstore.Store
+	cancel context.CancelFunc
+}
+
+func (s failThenCancelStore) Delete(context.Context, tgid.UserID, string) error {
+	s.cancel()
+	return errors.New("delete boom")
+}
+
+func (s failThenCancelStore) SweepAuthState(ctx context.Context, _ time.Time) ([]string, error) {
+	return nil, fmt.Errorf("encrypted store: %w", errors.Join(errors.New("grant boom"), ctx.Err()))
+}
+
+// TestSweepLogsRealFailuresAtShutdown pins that shutdown silences only the
+// failures cancellation causes: a real failure that arrives as the context
+// ends is still logged.
+func TestSweepLogsRealFailuresAtShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	inner := sessionstoretest.NewWithClock(t, func() time.Time { return base })
+	require.NoError(t, inner.Session(allowedUser, "0123456789abcdef0123456789abcdef", sessionKey(t)).StoreSession(ctx, []byte("stale")))
+	a, logs := newLoggingServer(t, failThenCancelStore{Store: inner, cancel: cancel})
+	a.now = func() time.Time { return base.Add(refreshTokenTTL + sweepMargin + time.Minute) }
+
+	a.runSweep(ctx)
+	assert.Contains(t, logs.String(), `level=ERROR msg="auth sweep: delete failed" sweep=sessions`)
+	assert.Contains(t, logs.String(), `level=ERROR msg="oauth state sweep failed" err="encrypted store: grant boom`)
+}
+
+func TestCancelledOnly(t *testing.T) {
+	failure := errors.New("boom")
+	for name, tc := range map[string]struct {
+		err  error
+		want bool
+	}{
+		"canceled":                  {context.Canceled, true},
+		"wrapped canceled":          {fmt.Errorf("op: %w", context.Canceled), true},
+		"joined cancellations":      {errors.Join(fmt.Errorf("a: %w", context.Canceled), context.Canceled), true},
+		"wrapped join of cancelled": {fmt.Errorf("store: %w", errors.Join(context.Canceled)), true},
+		"real":                      {failure, false},
+		"real joined with canceled": {fmt.Errorf("store: %w", errors.Join(failure, context.Canceled)), false},
+		"deadline":                  {context.DeadlineExceeded, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, cancelledOnly(tc.err))
+		})
+	}
+}

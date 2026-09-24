@@ -181,7 +181,8 @@ type Store interface {
 	// deleted. A
 	// record it cannot read or delete is skipped, so one bad record cannot
 	// stall the sweep of every other; the failures are joined into the
-	// returned error. When ctx ends it stops and returns only ctx's error.
+	// returned error. When ctx ends it stops and returns the failures collected
+	// so far joined with ctx's error.
 	SweepAuthState(ctx context.Context, now time.Time) (undecodable []string, err error)
 
 	// encrypted restricts implementations to the store Encrypted returns (and

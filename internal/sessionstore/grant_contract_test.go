@@ -235,7 +235,7 @@ func TestGrantSweepSkipsUnreadableRecord(t *testing.T) {
 }
 
 // TestGrantSweepStopsWhenContextEnds pins that a sweep whose context has ended
-// deletes nothing more and returns the context's error alone.
+// deletes nothing more and returns the context's error.
 func TestGrantSweepStopsWhenContextEnds(t *testing.T) {
 	for name, b := range backends(t) {
 		t.Run(name, func(t *testing.T) {
@@ -245,7 +245,7 @@ func TestGrantSweepStopsWhenContextEnds(t *testing.T) {
 			cancel()
 
 			_, err := b.SweepAuthState(ctx, now)
-			require.Equal(t, context.Canceled, err) //nolint:errorlint // the context's error must come back alone
+			require.ErrorIs(t, err, context.Canceled)
 			_, version, err := b.LoadGrant(t.Context(), testGrantFamily)
 			require.NoError(t, err)
 			assert.NotZero(t, version)
@@ -253,14 +253,22 @@ func TestGrantSweepStopsWhenContextEnds(t *testing.T) {
 	}
 }
 
-// TestGCSGrantSweepStopsMidListing pins that a context ending part-way
-// through a GCS sweep drops the failures it caused: the read it cut short is
-// not reported, only the context's error.
-func TestGCSGrantSweepStopsMidListing(t *testing.T) {
+// TestGCSGrantSweepStopsMidListingKeepingFailures pins that a context ending
+// part-way through a GCS sweep stops it without dropping what it already
+// collected: a real failure before the cancellation comes back joined with
+// the context's error.
+func TestGCSGrantSweepStopsMidListingKeepingFailures(t *testing.T) {
+	const cutFamily = "11111111111111111111111111111111"
 	ctx, cancel := context.WithCancel(t.Context())
 	b := newTestGCSWithTransport(t, func(rt http.RoundTripper) http.RoundTripper {
 		return roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if req.Method == http.MethodGet && strings.Contains(req.URL.Path, badFamily) {
+			if req.Method != http.MethodGet {
+				return rt.RoundTrip(req)
+			}
+			switch {
+			case strings.Contains(req.URL.Path, badFamily):
+				return forbidden(req), nil
+			case strings.Contains(req.URL.Path, cutFamily):
 				cancel()
 				return nil, context.Canceled
 			}
@@ -269,11 +277,13 @@ func TestGCSGrantSweepStopsMidListing(t *testing.T) {
 	})
 	now := time.Now()
 	store := Encrypted(b, newCipher(t, testIssuer, newKey(t)))
-	redeemExpired(t, store, badFamily, now)
-	redeemExpired(t, store, testGrantFamily, now)
+	for _, family := range []string{badFamily, cutFamily, testGrantFamily} {
+		redeemExpired(t, store, family, now)
+	}
 
 	_, err := b.SweepAuthState(ctx, now)
-	require.Equal(t, context.Canceled, err) //nolint:errorlint // the context's error must come back alone
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorContains(t, err, "sweeping grant "+badFamily, "a failure before the cancellation must be kept")
 	_, version, err := b.LoadGrant(t.Context(), testGrantFamily)
 	require.NoError(t, err)
 	assert.NotZero(t, version, "the sweep must stop at the cancellation")

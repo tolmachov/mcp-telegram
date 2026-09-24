@@ -247,16 +247,13 @@ func (g *GCS) SweepAuthState(ctx context.Context, now time.Time) ([]string, erro
 	it := g.bucket.Objects(ctx, &storage.Query{Prefix: grantPrefix})
 	for {
 		if err := ctx.Err(); err != nil {
-			return undecodable, err
+			return undecodable, errors.Join(append(errs, err)...)
 		}
 		attrs, err := it.Next()
 		if errors.Is(err, iterator.Done) {
 			return undecodable, errors.Join(errs...)
 		}
 		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return undecodable, ctxErr
-			}
 			return undecodable, errors.Join(append(errs, fmt.Errorf("sessionstore: listing grants: %w", err))...)
 		}
 		family := strings.TrimSuffix(strings.TrimPrefix(attrs.Name, grantPrefix), ".json")
