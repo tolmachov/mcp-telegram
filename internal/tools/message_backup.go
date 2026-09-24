@@ -435,15 +435,25 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 			)),
 			&BackupMessagesResult{ChatID: in.ChatID, MessageCount: len(result.Messages), Filepath: absPath, Partial: true}, nil
 	default:
-		// Real mid-pagination failure (a timeout, FLOOD_WAIT, a transport
-		// error, etc.). We persisted what we fetched so the user doesn't lose
-		// minutes of work, but surface it as a tool error so the caller knows
-		// the backup is incomplete and needs a retry anchored past the saved
-		// file's last message. The note reaches the model whatever the
-		// failure; the hint only when it is not systemic (see failure).
-		return nil, nil, failedHint(op, withNote(partialErr, fmt.Sprintf(
-			"The backup stopped mid-stream; a partial file with %d messages was saved to %s.",
-			len(result.Messages), absPath,
-		)), "Retry with a narrower date window or resume from the last saved message.")
+		return nil, nil, partialBackupFailure(op, partialErr, len(result.Messages), absPath)
 	}
+}
+
+// partialBackupFailure reports a fetch that failed mid-pagination (a timeout,
+// FLOOD_WAIT, a transport error, etc.) after count messages were saved to
+// path. We persisted what we fetched so the user doesn't lose minutes of work,
+// but surface it as a tool error so the caller knows the backup is incomplete
+// and needs a retry anchored past the saved file's last message.
+//
+// The note reaches the model whatever the failure, the hint only when the
+// failure is not systemic (see failureText). A timeout is systemic, yet a
+// smaller request can avoid it, so its retry advice goes in the note.
+func partialBackupFailure(op string, err error, count int, path string) error {
+	saved := fmt.Sprintf("a partial file with %d messages was saved to %s.", count, path)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return failed(op, withNote(err, "The backup timed out; "+saved+
+			" Retry with a narrower date window or a smaller limit, or resume from the last saved message."))
+	}
+	return failedHint(op, withNote(err, "The backup stopped mid-stream; "+saved),
+		"Retry with a narrower date window or resume from the last saved message.")
 }

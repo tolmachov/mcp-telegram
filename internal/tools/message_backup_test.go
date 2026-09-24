@@ -1,6 +1,9 @@
 package tools
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +14,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestPartialBackupFailure pins that a timed-out backup still tells the model
+// how to shrink the request: a timeout is systemic, so failureText drops the
+// hint, and the retry advice must travel in the note.
+func TestPartialBackupFailure(t *testing.T) {
+	timedOut := failureText("BackupMessages", partialBackupFailure("back up chat 1",
+		fmt.Errorf("fetching batch: %w", context.DeadlineExceeded), 42, "/backups/chat.txt"))
+	assert.Contains(t, timedOut, "The backup timed out; a partial file with 42 messages was saved to /backups/chat.txt.")
+	assert.Contains(t, timedOut, "narrower date window or a smaller limit")
+	assert.NotContains(t, timedOut, "mid-stream")
+
+	broken := failureText("BackupMessages", partialBackupFailure("back up chat 1",
+		errors.New("connection reset"), 42, "/backups/chat.txt"))
+	assert.Contains(t, broken, "The backup stopped mid-stream; a partial file with 42 messages was saved to /backups/chat.txt.")
+	assert.Contains(t, broken, "Retry with a narrower date window or resume from the last saved message.")
+}
 
 func TestSanitizeFilename(t *testing.T) {
 	tests := []struct {
