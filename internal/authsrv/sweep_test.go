@@ -294,6 +294,14 @@ func TestSweepLogsRealFailuresAtShutdown(t *testing.T) {
 	assert.Contains(t, logs.String(), `level=ERROR msg="oauth state sweep failed" err="encrypted store: grant boom`)
 }
 
+// cancellationOver is a cancellation that keeps its underlying cause: it
+// Is context.Canceled and unwraps to cause, as errors.Is sees it.
+type cancellationOver struct{ cause error }
+
+func (e cancellationOver) Error() string      { return "cancelled: " + e.cause.Error() }
+func (e cancellationOver) Unwrap() error      { return e.cause }
+func (cancellationOver) Is(target error) bool { return target == context.Canceled }
+
 func TestCancelledOnly(t *testing.T) {
 	failure := errors.New("boom")
 	for name, tc := range map[string]struct {
@@ -307,6 +315,8 @@ func TestCancelledOnly(t *testing.T) {
 		"real":                      {failure, false},
 		"real joined with canceled": {fmt.Errorf("store: %w", errors.Join(failure, context.Canceled)), false},
 		"deadline":                  {context.DeadlineExceeded, false},
+		"is canceled over a cause":  {cancellationOver{failure}, true},
+		"joined with one":           {errors.Join(failure, cancellationOver{failure}), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			assert.Equal(t, tc.want, cancelledOnly(tc.err))

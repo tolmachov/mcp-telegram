@@ -2,7 +2,6 @@ package authsrv
 
 import (
 	"context"
-	"errors"
 	"runtime/debug"
 	"time"
 
@@ -86,22 +85,31 @@ func (a *AuthServer) runSweep(ctx context.Context) {
 }
 
 // cancelledOnly reports whether err consists of cancellation alone: every
-// leaf of its wrap and join tree is context.Canceled. Shutdown cancels a
-// sweep's context, and the failures that causes are not worth logging; a real
-// failure joined with them still is.
+// path down its wrap and join tree reaches an error that is itself
+// context.Canceled, by equality or by its own Is method, as errors.Is would
+// match it. Shutdown cancels a sweep's context, and the failures that causes
+// are not worth logging; a real failure joined with them still is.
 func cancelledOnly(err error) bool {
-	switch e := err.(type) { //nolint:errorlint // walks the wrap tree itself, leaf by leaf
+	if err == context.Canceled { //nolint:errorlint // matches this node only; the walk below visits the rest
+		return true
+	}
+	if is, ok := err.(interface{ Is(error) bool }); ok && is.Is(context.Canceled) { //nolint:errorlint // this node's own Is, as errors.Is consults it
+		return true
+	}
+	switch e := err.(type) { //nolint:errorlint // walks the wrap tree itself, node by node
 	case interface{ Unwrap() []error }:
-		for _, inner := range e.Unwrap() {
-			if !cancelledOnly(inner) {
+		inner := e.Unwrap()
+		for _, one := range inner {
+			if !cancelledOnly(one) {
 				return false
 			}
 		}
-		return true
+		return len(inner) > 0
 	case interface{ Unwrap() error }:
-		return cancelledOnly(e.Unwrap())
+		inner := e.Unwrap()
+		return inner != nil && cancelledOnly(inner)
 	default:
-		return errors.Is(err, context.Canceled)
+		return false
 	}
 }
 
