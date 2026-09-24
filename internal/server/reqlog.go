@@ -200,18 +200,13 @@ func safeValue(v json.RawMessage) any {
 }
 
 // toolErrorText extracts the human-readable message from an error tool result:
-// the first TextContent, truncated so a giant payload can't flood the logs.
-// Returns "" when the result carries no text content.
+// its text (tools.ResultText), truncated so a giant payload can't flood the
+// logs. Returns "" when the result carries no text content.
 func toolErrorText(res *mcp.CallToolResult) string {
 	const maxLen = 500
-	for _, c := range res.Content {
-		if tc, ok := c.(*mcp.TextContent); ok {
-			text := strings.TrimSpace(tc.Text)
-			if len(text) > maxLen {
-				return text[:maxLen] + "…(truncated)"
-			}
-			return text
-		}
+	text := strings.TrimSpace(tools.ResultText(res))
+	if len(text) > maxLen {
+		return text[:maxLen] + "…(truncated)"
 	}
-	return ""
+	return text
 }

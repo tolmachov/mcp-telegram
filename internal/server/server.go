@@ -506,7 +506,7 @@ func (s *Server) clientDownMiddleware(client telegramClient) mcp.Middleware {
 // model reads, or a resource-read error.
 func clientDownResult(method, text string) (mcp.Result, error) {
 	if method == methodCallTool {
-		return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil
+		return tools.ErrResult(text), nil
 	}
 	return nil, errors.New(text)
 }

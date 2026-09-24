@@ -378,18 +378,18 @@ func sentence(err error) string {
 	return strings.TrimSuffix(err.Error(), ".") + "."
 }
 
-// ResultText concatenates the text blocks of a tool result.
+// ResultText joins the text blocks of a tool result, one per line.
 func ResultText(r *mcp.CallToolResult) string {
 	if r == nil {
 		return ""
 	}
-	var b strings.Builder
+	var texts []string
 	for _, c := range r.Content {
 		if tc, ok := c.(*mcp.TextContent); ok {
-			b.WriteString(tc.Text)
+			texts = append(texts, tc.Text)
 		}
 	}
-	return b.String()
+	return strings.Join(texts, "\n")
 }
 
 // textResult constructs a CallToolResult with a single TextContent.
