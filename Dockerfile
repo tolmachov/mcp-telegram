@@ -35,7 +35,7 @@ COPY . .
 ARG VERSION=docker
 RUN go build -ldflags="-s -w -X github.com/tolmachov/mcp-telegram/internal.Version=${VERSION}" -o mcp-telegram .
 
-FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
 # ca-certificates is required for the HTTPS summarize providers (Anthropic,
 # Gemini); without it their TLS handshakes fail inside the container.
