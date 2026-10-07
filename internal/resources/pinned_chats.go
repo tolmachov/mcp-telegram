@@ -31,12 +31,9 @@ import (
 type PinnedChatsProvider struct {
 	client   *tg.Client
 	provider *messages.Provider
-	// servers are the MCP servers the pinned resource set is mirrored onto. With
-	// SEP-2053 variants there is one inner server per variant, all fed by this
-	// single poller so every variant can list/read pinned chats without
-	// multiplying Telegram polling.
-	servers []*mcp.Server
-	logger  *slog.Logger
+	// server is the MCP server the pinned resource set is registered on.
+	server *mcp.Server
+	logger *slog.Logger
 	// mu guards currentURIs/sortedFingerprints. doRefresh commits them only after
 	// the server registry has been updated, so a reader holding mu sees fields
 	// that match what is actually registered (never an interim "about to apply"
@@ -61,21 +58,15 @@ type PinnedChatResource struct {
 // NewPinnedChatsProvider creates a new PinnedChatsProvider. The logger is
 // used to surface refresh failures from the background watcher — nil falls
 // back to slog.Default so this stays safe to call from tests.
-//
-// servers is the set the pinned resources are mirrored onto; passing none is a
-// programming error (RefreshResources would fetch from Telegram and register the
-// results onto nobody), so it is logged loudly rather than silently no-oping.
-func NewPinnedChatsProvider(client *tg.Client, provider *messages.Provider, logger *slog.Logger, servers ...*mcp.Server) *PinnedChatsProvider {
+// The pinned resources are registered on server.
+func NewPinnedChatsProvider(client *tg.Client, provider *messages.Provider, logger *slog.Logger, server *mcp.Server) *PinnedChatsProvider {
 	if logger == nil {
 		logger = slog.Default()
-	}
-	if len(servers) == 0 {
-		logger.Warn("pinned-chat provider created with no servers; pinned resources will be fetched but registered nowhere")
 	}
 	return &PinnedChatsProvider{
 		client:   client,
 		provider: provider,
-		servers:  servers,
+		server:   server,
 		logger:   logger,
 	}
 }
@@ -132,14 +123,12 @@ func (p *PinnedChatsProvider) doRefresh(ctx context.Context) error {
 	// singleflight in RefreshResources, so no concurrent refresh can observe the
 	// interim state; the only reader of these fields is doRefresh itself.
 
-	// Remove previously added pinned resources from every mirrored server.
+	// Remove previously added pinned resources.
 	if len(prevURIs) > 0 {
-		for _, srv := range p.servers {
-			srv.RemoveResources(prevURIs...)
-		}
+		p.server.RemoveResources(prevURIs...)
 	}
 
-	// Register the new pinned resources individually on every mirrored server.
+	// Register the new pinned resources individually.
 	// Each closure captures its own chat for the handler.
 	for _, chat := range chats {
 		uri := fmt.Sprintf("telegram://chats/%d/messages", chat.ID)
@@ -153,9 +142,7 @@ func (p *PinnedChatsProvider) doRefresh(ctx context.Context) error {
 		handler := func(ctx context.Context, request *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 			return p.handlePinnedChat(ctx, request, chatCopy)
 		}
-		for _, srv := range p.servers {
-			srv.AddResource(res, handler)
-		}
+		p.server.AddResource(res, handler)
 	}
 
 	// Commit the applied set only now that the registry reflects it.
@@ -164,12 +151,8 @@ func (p *PinnedChatsProvider) doRefresh(ctx context.Context) error {
 	p.sortedFingerprints = sortedNew
 	p.mu.Unlock()
 	// Both AddResource and RemoveResources auto-emit
-	// notifications/resources/list_changed. In single --variant mode that
-	// reaches the client directly, so listChanged-capable clients re-list and
-	// pick up the new set. In multi-variant mode the variants proxy drops these
-	// async notifications (they fire on a background context with no front
-	// session — see server's assembly.run and the README), so those clients
-	// instead pick up the change on their next client-initiated resources/list.
+	// notifications/resources/list_changed, so listChanged-capable clients
+	// re-list and pick up the new set.
 	return nil
 }
 

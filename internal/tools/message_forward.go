@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -89,10 +90,7 @@ func (h *MessageForwardHandler) handle(ctx context.Context, req *mcp.CallToolReq
 
 	forwardedMsgID, date := extractSentMessageID(updates)
 	if forwardedMsgID == 0 {
-		mcpLog(ctx, req.Session, logLevelWarning, "ForwardMessage", map[string]any{
-			"action": "message_id_extraction_failed",
-			"note":   "Telegram returned an unrecognised update type; new_message_id in response is unreliable",
-		})
+		slog.WarnContext(ctx, "ForwardMessage: Telegram returned an unrecognised update type; new_message_id is unknown")
 	}
 	res := &ForwardMessageResult{
 		Status:            statusForwarded,

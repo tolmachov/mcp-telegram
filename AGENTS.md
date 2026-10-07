@@ -48,7 +48,9 @@ context loading); admin and posting features are secondary. Two transports:
    the handler's Go error via `failed(op, err)` / `failedHint`: the registration
    helpers classify it (dead session, a stopped client, flood wait, a problem
    with the chat named — `tgclient.IsPeerSpecific`), render the text the model
-   sees and log it under the tool's name. They also give the call its flood-wait
+   sees, which the request log records under the tool's name. Anything else
+   worth an operator's attention goes to `slog` (MCP client logging is
+   deprecated and not used). They also give the call its flood-wait
    budget (`tgclient.WithWaitBudget`). A call that got part of its work done is
    no failure: its output embeds `partialOutcome` and says what it lacks with
    `warn` / `warnCause`, which `AddTool` flags for the request log.
@@ -75,8 +77,8 @@ make fmt               # golangci-lint fmt
   may prompt. Between steps run targeted tests (`go test ./internal/<pkg>/...`);
   run the full suite once at the end.
 - **`!darwin` files aren't linted locally on macOS.** Before pushing, run
-  `GOOS=linux golangci-lint run ./...` to match CI (ubuntu, Go 1.26,
-  golangci-lint v2.12.2).
+  `GOOS=linux golangci-lint run ./...` to match CI (ubuntu, Go 1.27,
+  golangci-lint v2.14.0).
 - **Manual `run` can hang silently.** A zero-log hang usually means another
   process holds the same Telegram session — kill strays before blaming the change.
 - **Startup failures don't exit over stdio.** They go through `startBlocked`

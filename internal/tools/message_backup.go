@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -228,14 +229,6 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	progress, stopProgress := startBackupProgress(ctx, req, fromDate, toDate, count)
 	defer stopProgress()
 
-	mcpLog(ctx, req.Session, logLevelInfo, "BackupMessages", map[string]any{
-		"chat_id":     in.ChatID,
-		"target_path": targetPath,
-		"count":       count,
-		"from":        fromStr,
-		"to":          toStr,
-	})
-
 	// Configure fetch options.
 	opts := messages.FetchOptions{
 		Limit:    100,
@@ -283,11 +276,7 @@ func (h *MessageBackupHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 	if resolved, err := filepath.Abs(targetPath); err == nil {
 		absPath = resolved
 	} else {
-		mcpLog(ctx, req.Session, logLevelWarning, "BackupMessages", map[string]any{
-			"action": "abs_path_failed",
-			"path":   targetPath,
-			"error":  err.Error(),
-		})
+		slog.WarnContext(ctx, "BackupMessages: resolving the absolute backup path failed", "err", err)
 	}
 	out := &BackupMessagesResult{ChatID: in.ChatID, MessageCount: len(result.Messages), Filepath: absPath}
 	if fetchErr == nil {

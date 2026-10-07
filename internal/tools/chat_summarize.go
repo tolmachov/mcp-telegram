@@ -19,9 +19,9 @@ type ChatSummarizeHandler struct {
 }
 
 // NewChatSummarizeHandler creates a new ChatSummarizeHandler. When
-// summarisation is misconfigured, summarizer is one built by
-// summarize.Unavailable: the tool stays registered and every call reports
-// why, so the other tools keep working.
+// summarisation is off (no provider named) or misconfigured, summarizer is one
+// built by summarize.Unavailable: the tool stays registered and every call
+// says why, so the other tools keep working.
 func NewChatSummarizeHandler(msgProvider *messages.Provider, summarizer *summarize.Summarizer) *ChatSummarizeHandler {
 	return &ChatSummarizeHandler{
 		msgProvider: msgProvider,
@@ -74,8 +74,8 @@ func (h *ChatSummarizeHandler) Register(s *mcp.Server) {
 		Description: "Use this whenever the user asks to summarise, digest, recap, or 'catch up on' a Telegram chat. Prefer it over fetching messages with GetMessages and summarising them yourself: it performs rolling/incremental summarisation server-side, so it handles long histories (weeks/months, hundreds of messages) without loading every message into the conversation context. Specify a goal (e.g. 'key decisions', 'action items', 'what did I miss') and a time period (day/week/month) or a since date.",
 		InputSchema: summarizeChatInputSchema,
 		// Note: ReadOnlyHint is intentionally NOT set. The tool calls out
-		// to external LLM providers (sampling, Gemini, Ollama, Anthropic)
-		// which may cache, log, or bill for the content — it is not a
+		// to an LLM provider (Gemini, Anthropic, or an Ollama URL that may be
+		// remote), which may cache, log, or bill for the content — it is not a
 		// pure read of Telegram state. OpenWorldHint reflects that.
 		Annotations: &mcp.ToolAnnotations{OpenWorldHint: new(true)},
 	}, h.handle)
@@ -102,20 +102,13 @@ func (h *ChatSummarizeHandler) handle(ctx context.Context, req *mcp.CallToolRequ
 		return ErrResult(fmt.Sprintf("Invalid time parameters: %v", err)), nil, nil
 	}
 
-	mcpLog(ctx, req.Session, logLevelInfo, "SummarizeChat", map[string]any{
-		"chat_id":  in.ChatID,
-		"goal":     in.Goal,
-		"since":    since.Format(time.RFC3339),
-		"provider": h.summarizer.ProviderName(),
-	})
-
 	// Progress callback using MCP notifications. sendProgress is a no-op when
 	// the client did not provide a progressToken.
 	onProgress := func(current, total int, message string) {
 		sendProgress(ctx, req, float64(current), float64(total), message)
 	}
 
-	result, err := h.summarizer.Summarize(ctx, req.Session, h.msgProvider, in.ChatID, in.Goal, since, maxMessages, onProgress)
+	result, err := h.summarizer.Summarize(ctx, h.msgProvider, in.ChatID, in.Goal, since, maxMessages, onProgress)
 	return h.buildResult(in, maxMessages, since, periodEnd, result, err)
 }
 

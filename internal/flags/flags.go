@@ -7,7 +7,6 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/tolmachov/mcp-telegram/internal/authsrv"
-	"github.com/tolmachov/mcp-telegram/internal/summarize"
 )
 
 // Environment variable name constants.
@@ -137,8 +136,7 @@ func PhoneFlag() *cli.StringFlag {
 func SummarizeProviderFlag() *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:    SummarizeProvider,
-		Value:   string(summarize.ProviderSampling),
-		Usage:   "Provider for summarisation: 'sampling', 'ollama', 'gemini', or 'anthropic'",
+		Usage:   "Provider for summarisation: 'ollama', 'gemini', or 'anthropic'; summarisation is off when unset",
 		Sources: cli.EnvVars("MCP_SUMMARIZE_PROVIDER"),
 	}
 }
@@ -333,15 +331,12 @@ func LogLevelFlag() *cli.StringFlag {
 	}
 }
 
-// VariantFlag selects a single SEP-2053 server variant to expose. Empty (the
-// default) exposes all variants and lets the client pick via hints; clients
-// that don't support variants get the full set. Set it to pin one variant for
-// a client that can't negotiate (e.g. --variant research for a read-only bot).
-// The value is validated in server.New.
+// VariantFlag selects the server variant: which tools the server exposes and
+// how it describes them. The value is validated in server.New.
 func VariantFlag() *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:    Variant,
-		Usage:   "Expose only one server variant: 'full' (all tools), 'compact' (all tools, short descriptions), or 'research' (read-only subset). Empty exposes all three and lets the client choose.",
+		Usage:   "Server variant: 'full' (all tools, the default), 'compact' (all tools, short descriptions), or 'research' (read-only subset)",
 		Sources: cli.EnvVars("MCP_VARIANT"),
 	}
 }

@@ -22,7 +22,7 @@ import (
 )
 
 // testSummarize is a valid summarisation configuration that reads no keys.
-var testSummarize = summarize.Config{Provider: summarize.ProviderSampling, BatchTokens: 1}
+var testSummarize = summarize.Config{Provider: summarize.ProviderOllama, OllamaURL: "http://127.0.0.1:11434", BatchTokens: 1}
 
 func testServer(t *testing.T) *Server {
 	t.Helper()

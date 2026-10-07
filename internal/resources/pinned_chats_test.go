@@ -97,14 +97,11 @@ func (s *syncBuffer) String() string {
 	return s.buf.String()
 }
 
-func newTestProvider(t *testing.T, inv *pinnedInvoker, logger *slog.Logger, nServers int) (*PinnedChatsProvider, []*mcp.Server) {
+func newTestProvider(t *testing.T, inv *pinnedInvoker, logger *slog.Logger) (*PinnedChatsProvider, *mcp.Server) {
 	api := tg.NewClient(inv)
 	msgProvider := messages.NewProvider(tgclient.NewResolver(t.Context(), api), 100_000)
-	servers := make([]*mcp.Server, nServers)
-	for i := range servers {
-		servers[i] = mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
-	}
-	return NewPinnedChatsProvider(api, msgProvider, logger, servers...), servers
+	srv := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
+	return NewPinnedChatsProvider(api, msgProvider, logger, srv), srv
 }
 
 // listResources connects an in-memory client to srv and returns uri → name for
@@ -139,30 +136,19 @@ func listResources(t *testing.T, srv *mcp.Server) map[string]string {
 	return out
 }
 
-// TestPinnedChatsMirroredOntoAllServers is the core cross-feature contract of
-// SEP-2053 + pinned resources: the single poller must register the pinned set on
-// EVERY inner server so the compact and research variants can list/read pinned
-// chats too, not just the full variant. A regression registering onto only the
-// first server would leave the others empty and no tools-only test would catch
-// it.
-func TestPinnedChatsMirroredOntoAllServers(t *testing.T) {
+// TestPinnedChatsRegistered pins that a refresh registers exactly the pinned
+// set on the server.
+func TestPinnedChatsRegistered(t *testing.T) {
 	inv := &pinnedInvoker{}
 	inv.set(fakeChat{id: 111, name: "Alice"}, fakeChat{id: 222, name: "Bob"})
-	p, servers := newTestProvider(t, inv, slog.New(slog.DiscardHandler), 3)
+	p, srv := newTestProvider(t, inv, slog.New(slog.DiscardHandler))
 
 	require.NoError(t, p.RefreshResources(context.Background()))
 
-	wantURIs := []string{
-		"telegram://chats/111/messages",
-		"telegram://chats/222/messages",
-	}
-	for i, srv := range servers {
-		got := listResources(t, srv)
-		for _, uri := range wantURIs {
-			assert.Containsf(t, got, uri, "server %d must expose pinned resource %s", i, uri)
-		}
-		assert.Lenf(t, got, len(wantURIs), "server %d must expose exactly the pinned set", i)
-	}
+	got := listResources(t, srv)
+	assert.Contains(t, got, "telegram://chats/111/messages")
+	assert.Contains(t, got, "telegram://chats/222/messages")
+	assert.Len(t, got, 2, "the server must expose exactly the pinned set")
 }
 
 // TestPinnedRefreshReorderIsNoOp guards the sorted-fingerprint short-circuit:
@@ -176,7 +162,7 @@ func TestPinnedRefreshReorderIsNoOp(t *testing.T) {
 	a := fakeChat{id: 111, name: "Alice"}
 	b := fakeChat{id: 222, name: "Bob"}
 	inv.set(a, b)
-	p, _ := newTestProvider(t, inv, slog.New(slog.DiscardHandler), 1)
+	p, _ := newTestProvider(t, inv, slog.New(slog.DiscardHandler))
 
 	require.NoError(t, p.RefreshResources(context.Background()))
 	firstOrder := append([]string(nil), p.currentURIs...)
@@ -198,23 +184,23 @@ func TestPinnedRefreshReorderIsNoOp(t *testing.T) {
 func TestPinnedRefreshReregistersOnRename(t *testing.T) {
 	inv := &pinnedInvoker{}
 	inv.set(fakeChat{id: 111, name: "Alice"})
-	p, servers := newTestProvider(t, inv, slog.New(slog.DiscardHandler), 1)
+	p, srv := newTestProvider(t, inv, slog.New(slog.DiscardHandler))
 
 	require.NoError(t, p.RefreshResources(context.Background()))
-	before := listResources(t, servers[0])
+	before := listResources(t, srv)
 	require.Equal(t, "Messages from Alice", before["telegram://chats/111/messages"])
 
 	inv.set(fakeChat{id: 111, name: "Alice Renamed"})
 	require.NoError(t, p.RefreshResources(context.Background()))
-	after := listResources(t, servers[0])
+	after := listResources(t, srv)
 	assert.Equal(t, "Messages from Alice Renamed", after["telegram://chats/111/messages"],
 		"a rename (same URI) must re-register the resource with the new name")
 }
 
 // TestPinnedRefreshUnpinRemovesResource guards the RemoveResources cleanup path:
-// when a chat is unpinned the set shrinks, and its resource must disappear from
-// every mirrored server. The reorder/rename tests only exercise a same-size set
-// (the URI never vanishes there), so without this a regression that dropped or
+// when a chat is unpinned the set shrinks, and its resource must disappear.
+// The reorder/rename tests only exercise a same-size set (the URI never
+// vanishes there), so without this a regression that dropped or
 // mis-diffed the removal loop would leave an unpinned chat listed as a live
 // resource forever, and no other test would catch it.
 func TestPinnedRefreshUnpinRemovesResource(t *testing.T) {
@@ -222,25 +208,19 @@ func TestPinnedRefreshUnpinRemovesResource(t *testing.T) {
 	alice := fakeChat{id: 111, name: "Alice"}
 	bob := fakeChat{id: 222, name: "Bob"}
 	inv.set(alice, bob)
-	p, servers := newTestProvider(t, inv, slog.New(slog.DiscardHandler), 2)
+	p, srv := newTestProvider(t, inv, slog.New(slog.DiscardHandler))
 
 	require.NoError(t, p.RefreshResources(context.Background()))
-	for i, srv := range servers {
-		got := listResources(t, srv)
-		require.Containsf(t, got, "telegram://chats/222/messages", "server %d must start with Bob pinned", i)
-	}
+	require.Contains(t, listResources(t, srv), "telegram://chats/222/messages", "Bob starts pinned")
 
 	// Unpin Bob: the set shrinks to just Alice.
 	inv.set(alice)
 	require.NoError(t, p.RefreshResources(context.Background()))
 
-	for i, srv := range servers {
-		got := listResources(t, srv)
-		assert.Containsf(t, got, "telegram://chats/111/messages", "server %d must keep Alice", i)
-		assert.NotContainsf(t, got, "telegram://chats/222/messages",
-			"server %d must drop the unpinned Bob resource", i)
-		assert.Lenf(t, got, 1, "server %d must expose exactly the shrunk set", i)
-	}
+	got := listResources(t, srv)
+	assert.Contains(t, got, "telegram://chats/111/messages", "Alice stays")
+	assert.NotContains(t, got, "telegram://chats/222/messages", "the unpinned Bob resource is dropped")
+	assert.Len(t, got, 1, "the server exposes exactly the shrunk set")
 }
 
 // TestRefreshResourcesWrapsError confirms a Telegram failure surfaces as a
@@ -248,27 +228,12 @@ func TestPinnedRefreshUnpinRemovesResource(t *testing.T) {
 func TestRefreshResourcesWrapsError(t *testing.T) {
 	inv := &pinnedInvoker{}
 	inv.setErr(errors.New("boom"))
-	p, _ := newTestProvider(t, inv, slog.New(slog.DiscardHandler), 1)
+	p, _ := newTestProvider(t, inv, slog.New(slog.DiscardHandler))
 
 	err := p.RefreshResources(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "refreshing pinned resources")
 	assert.Contains(t, err.Error(), "boom")
-}
-
-// TestNewPinnedChatsProviderWarnsWithoutServers covers the guard that a provider
-// built with no servers logs loudly: it would otherwise fetch from Telegram and
-// register the results onto nobody.
-func TestNewPinnedChatsProviderWarnsWithoutServers(t *testing.T) {
-	var buf syncBuffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	api := tg.NewClient(&pinnedInvoker{})
-	msgProvider := messages.NewProvider(tgclient.NewResolver(t.Context(), api), 100_000)
-
-	NewPinnedChatsProvider(api, msgProvider, logger) // no servers
-
-	assert.Contains(t, buf.String(), "level=WARN")
-	assert.Contains(t, buf.String(), "no servers")
 }
 
 // TestWatchInBackgroundInitialFailureLogsError pins the documented severity
@@ -281,7 +246,7 @@ func TestWatchInBackgroundInitialFailureLogsError(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	inv := &pinnedInvoker{}
 	inv.setErr(errors.New("auth expired"))
-	p, _ := newTestProvider(t, inv, logger, 1)
+	p, _ := newTestProvider(t, inv, logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := p.WatchInBackground(ctx, time.Hour)
@@ -307,7 +272,7 @@ func TestWatchInBackgroundStoppedClientLogsDebug(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	inv := &pinnedInvoker{}
 	inv.setErr(tgclient.Stopped(errors.New("connection reset")))
-	p, _ := newTestProvider(t, inv, logger, 1)
+	p, _ := newTestProvider(t, inv, logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := p.WatchInBackground(ctx, time.Hour)
@@ -333,7 +298,7 @@ func TestWatchInBackgroundStoppedClientLogsDebug(t *testing.T) {
 func TestWatchInBackgroundZeroIntervalDisables(t *testing.T) {
 	inv := &pinnedInvoker{}
 	inv.set(fakeChat{id: 111, name: "Alice"})
-	p, _ := newTestProvider(t, inv, slog.New(slog.DiscardHandler), 1)
+	p, _ := newTestProvider(t, inv, slog.New(slog.DiscardHandler))
 
 	done := p.WatchInBackground(context.Background(), 0)
 
@@ -354,7 +319,7 @@ func TestWatchInBackgroundNegativeIntervalWarns(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	inv := &pinnedInvoker{}
 	inv.set(fakeChat{id: 111, name: "Alice"})
-	p, _ := newTestProvider(t, inv, logger, 1)
+	p, _ := newTestProvider(t, inv, logger)
 
 	done := p.WatchInBackground(context.Background(), -30*time.Second)
 

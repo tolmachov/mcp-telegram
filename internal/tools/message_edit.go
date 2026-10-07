@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -109,11 +110,7 @@ func (h *MessageEditHandler) handle(ctx context.Context, req *mcp.CallToolReques
 
 	editedMsgID, editDate := extractEditedMessageID(updates)
 	if editedMsgID == 0 {
-		mcpLog(ctx, req.Session, logLevelWarning, "EditMessage", map[string]any{
-			"action":  "edited_message_id_extraction_failed",
-			"chat_id": in.ChatID,
-			"note":    "Telegram returned an unrecognised update type; falling back to input handle",
-		})
+		slog.WarnContext(ctx, "EditMessage: Telegram returned an unrecognised update type; reporting the input message ID", "chat_id", in.ChatID)
 	}
 
 	res := &EditMessageResult{

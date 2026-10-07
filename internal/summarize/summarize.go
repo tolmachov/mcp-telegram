@@ -11,8 +11,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
-
 	"github.com/tolmachov/mcp-telegram/internal/messages"
 )
 
@@ -64,10 +62,7 @@ type Summarizer struct {
 	// the other fields are unset.
 	unavailable error
 	name        ProviderName
-	// providerFor returns the provider for one tool call. The direct-LLM
-	// providers are built once and ignore the session; sampling is a
-	// per-session operation, so it binds to the session of the call.
-	providerFor func(*mcp.ServerSession) Provider
+	provider    Provider
 	batchTokens int
 }
 
@@ -76,11 +71,11 @@ func New(cfg Config) (*Summarizer, error) {
 	if cfg.BatchTokens <= 0 {
 		return nil, fmt.Errorf("--summarize-batch-tokens must be positive, got %d", cfg.BatchTokens)
 	}
-	providerFor, err := cfg.providerFor()
+	provider, err := cfg.providerFor()
 	if err != nil {
 		return nil, err
 	}
-	return &Summarizer{name: cfg.Provider, providerFor: providerFor, batchTokens: cfg.BatchTokens}, nil
+	return &Summarizer{name: cfg.Provider, provider: provider, batchTokens: cfg.BatchTokens}, nil
 }
 
 // Unavailable returns a Summarizer whose every Summarize call fails with err:
@@ -109,9 +104,8 @@ type Result struct {
 
 // Summarize fetches at most maxMessages of chatID through msgProvider and
 // summarises them for goal, preserving usable work when a later Telegram page
-// or batch fails. session is the MCP session of the tool call (sampling
-// summarises through it).
-func (s *Summarizer) Summarize(ctx context.Context, session *mcp.ServerSession, msgProvider *messages.Provider, chatID int64, goal string, since time.Time, maxMessages int, onProgress ProgressCallback) (Result, error) {
+// or batch fails.
+func (s *Summarizer) Summarize(ctx context.Context, msgProvider *messages.Provider, chatID int64, goal string, since time.Time, maxMessages int, onProgress ProgressCallback) (Result, error) {
 	if s.unavailable != nil {
 		return Result{}, s.unavailable
 	}
@@ -147,7 +141,6 @@ func (s *Summarizer) Summarize(ctx context.Context, session *mcp.ServerSession, 
 		return out, err
 	}
 	totalBatches := len(batches)
-	provider := s.providerFor(session)
 
 	var runningSummary string
 
@@ -162,7 +155,7 @@ func (s *Summarizer) Summarize(ctx context.Context, session *mcp.ServerSession, 
 		}
 		request := Request{System: systemPrompt, Goal: goal, PreviousSummary: runningSummary, Messages: encodedMessages}
 
-		summary, err := summarizeWithProgress(ctx, provider, request, i+1, totalBatches, onProgress)
+		summary, err := summarizeWithProgress(ctx, s.provider, request, i+1, totalBatches, onProgress)
 		if err != nil {
 			// Return the summary accumulated from earlier batches alongside the
 			// error so the caller can surface partial work instead of discarding

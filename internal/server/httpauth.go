@@ -118,11 +118,7 @@ func (s *Server) userAssemblyBuilder() userHandlerBuilder {
 			}
 			return nil, fmt.Errorf("connecting Telegram client for user %s: %w", user.ID, err)
 		}
-		asm, err := s.buildAssembly(ctx, running, logger)
-		if err != nil {
-			return nil, err
-		}
-		return asm, nil
+		return s.buildAssembly(ctx, running, logger), nil
 	}
 }
 

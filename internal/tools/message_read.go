@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
@@ -95,9 +96,8 @@ func (h *MessageReadHandler) handle(ctx context.Context, req *mcp.CallToolReques
 
 	results := make([]markReadResult, 0, len(in.ChatIDs))
 	// record adds one chat's outcome. Ordinary errors don't stop the batch —
-	// partial failures are surfaced via the result payload AND via a
-	// structured Warning log so MCP clients with a log panel can flag them. A
-	// systemic error is the exception (tgclient.IsSystemic): a flood wait is
+	// partial failures are surfaced via the result payload and logged as
+	// warnings for the operator. A systemic error is the exception (tgclient.IsSystemic): a flood wait is
 	// account-level and cumulative, so going on would deepen the limit, and a
 	// dead session, a stopped client or a cancelled or timed-out call fails
 	// every chat alike. record then reports stop=true.
@@ -106,10 +106,7 @@ func (h *MessageReadHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		if outcome.err == nil {
 			return false
 		}
-		mcpLog(ctx, req.Session, logLevelWarning, "MarkAsRead", map[string]any{
-			"chat_id": outcome.chatID,
-			"error":   outcome.err.Error(),
-		})
+		slog.WarnContext(ctx, "MarkAsRead: chat not marked as read", "chat_id", outcome.chatID, "err", outcome.err)
 		return tgclient.IsSystemic(outcome.err)
 	}
 	// stopped reports a batch cut short by the systemic err, with the chats
@@ -147,18 +144,12 @@ func (h *MessageReadHandler) handle(ctx context.Context, req *mcp.CallToolReques
 		// Telegram fails the shared lookup as a whole for one bad channel,
 		// so each channel looks up its own top message and only the bad one
 		// fails.
-		mcpLog(ctx, req.Session, logLevelWarning, "MarkAsRead", map[string]any{
-			"error":    err.Error(),
-			"fallback": "looking up each channel's top message on its own",
-		})
+		slog.WarnContext(ctx, "MarkAsRead: shared top-message lookup failed; looking up each channel on its own", "err", err)
 		tops = nil
 	default:
 		// Anything else would fail each channel's own lookup alike: every
 		// channel fails with it, and only the other chats are still read.
-		mcpLog(ctx, req.Session, logLevelWarning, "MarkAsRead", map[string]any{
-			"error":    err.Error(),
-			"chat_ids": channelIDs,
-		})
+		slog.WarnContext(ctx, "MarkAsRead: top-message lookup failed for every channel", "chat_ids", channelIDs, "err", err)
 		for _, chatID := range channelIDs {
 			results = append(results, markReadResult{chatID: chatID, err: err})
 		}

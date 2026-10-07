@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,8 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Provider is an interface for LLM providers that can summarise text.
@@ -50,15 +49,18 @@ func (r Request) userContent() (string, error) {
 type ProviderName string
 
 const (
-	ProviderSampling  ProviderName = "sampling"
 	ProviderOllama    ProviderName = "ollama"
 	ProviderGemini    ProviderName = "gemini"
 	ProviderAnthropic ProviderName = "anthropic"
 )
 
+// ErrNotConfigured is what New fails with when no provider is named:
+// summarisation is off until one is.
+var ErrNotConfigured = errors.New("summarisation is not configured: set --summarize-provider (MCP_SUMMARIZE_PROVIDER) to anthropic, gemini or ollama, with the matching API key or URL")
+
 // Config holds configuration for summarisation providers.
 type Config struct {
-	Provider  ProviderName // "sampling", "ollama", "gemini", or "anthropic"
+	Provider  ProviderName // "ollama", "gemini", or "anthropic"; empty when not configured
 	Model     string       // provider-specific model name
 	OllamaURL string       // URL for Ollama API
 	// GeminiAPIKey and AnthropicAPIKey read their provider's API key. New
@@ -72,29 +74,29 @@ type Config struct {
 
 // providerFor builds the provider cfg names, reading the one setting that
 // provider cannot run without.
-func (c Config) providerFor() (func(*mcp.ServerSession) Provider, error) {
+func (c Config) providerFor() (Provider, error) {
 	switch c.Provider {
-	case ProviderSampling:
-		return func(session *mcp.ServerSession) Provider { return NewSamplingProvider(session) }, nil
+	case "":
+		return nil, ErrNotConfigured
 	case ProviderGemini:
 		key, err := requiredKey(c.GeminiAPIKey, "MCP_SUMMARIZE_GEMINI_API_KEY", c.Provider)
 		if err != nil {
 			return nil, err
 		}
-		return fixedProvider(NewGeminiProvider(key, c.Model)), nil
+		return NewGeminiProvider(key, c.Model), nil
 	case ProviderOllama:
 		if c.OllamaURL == "" {
 			return nil, fmt.Errorf("MCP_SUMMARIZE_OLLAMA_URL is required when using --summarize-provider=ollama")
 		}
-		return fixedProvider(NewOllamaProvider(c.OllamaURL, c.Model)), nil
+		return NewOllamaProvider(c.OllamaURL, c.Model), nil
 	case ProviderAnthropic:
 		key, err := requiredKey(c.AnthropicAPIKey, "MCP_SUMMARIZE_ANTHROPIC_API_KEY", c.Provider)
 		if err != nil {
 			return nil, err
 		}
-		return fixedProvider(NewAnthropicProvider(key, c.Model)), nil
+		return NewAnthropicProvider(key, c.Model), nil
 	default:
-		return nil, fmt.Errorf("invalid summarisation provider %q (must be 'sampling', 'ollama', 'gemini', or 'anthropic')", c.Provider)
+		return nil, fmt.Errorf("invalid summarisation provider %q (must be 'ollama', 'gemini', or 'anthropic')", c.Provider)
 	}
 }
 
@@ -113,11 +115,6 @@ func requiredKey(read func() (string, error), env string, provider ProviderName)
 		return "", fmt.Errorf("the %s API key is not set: --summarize-provider=%s needs %s, or the key stored with `mcp-telegram config set %s <key>`", provider, provider, env, provider)
 	}
 	return key, nil
-}
-
-// fixedProvider serves p to every tool call regardless of its session.
-func fixedProvider(p Provider) func(*mcp.ServerSession) Provider {
-	return func(*mcp.ServerSession) Provider { return p }
 }
 
 // errBodySnippetMax bounds how many bytes of an HTTP error response body are

@@ -6,7 +6,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 cd "$tmp_dir"
-printf 'module example.com/coverage-test\n\ngo 1.26\n' > go.mod
+printf 'module example.com/coverage-test\n\ngo 1.27\n' > go.mod
 for package in tools messages server authsrv; do
  mkdir -p "internal/$package"
  cat > "internal/$package/sample.go" <<'GO'

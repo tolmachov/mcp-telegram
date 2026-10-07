@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -27,7 +26,7 @@ func (f providerFunc) Summarize(ctx context.Context, req Request) (string, error
 
 // fixedSummarizer summarises through llm with the given batch budget.
 func fixedSummarizer(llm Provider, batchTokens int) *Summarizer {
-	return &Summarizer{name: ProviderSampling, providerFor: fixedProvider(llm), batchTokens: batchTokens}
+	return &Summarizer{name: ProviderOllama, provider: llm, batchTokens: batchTokens}
 }
 
 // key serves a fixed API key.
@@ -50,7 +49,6 @@ func TestNewValidatesConfig(t *testing.T) {
 		config      Config
 		wantErrPart string
 	}{
-		{"sampling", Config{Provider: ProviderSampling, BatchTokens: 1, GeminiAPIKey: unread(t), AnthropicAPIKey: unread(t)}, ""},
 		{"gemini", Config{Provider: ProviderGemini, BatchTokens: 1, GeminiAPIKey: key("test-key"), AnthropicAPIKey: unread(t)}, ""},
 		{"gemini missing key", Config{Provider: ProviderGemini, BatchTokens: 1, GeminiAPIKey: key("")}, "the gemini API key is not set: --summarize-provider=gemini needs MCP_SUMMARIZE_GEMINI_API_KEY"},
 		{"gemini key unreadable", Config{Provider: ProviderGemini, BatchTokens: 1, GeminiAPIKey: func() (string, error) { return "", readErr }}, "keychain access denied"},
@@ -60,10 +58,10 @@ func TestNewValidatesConfig(t *testing.T) {
 		{"ollama missing url", Config{Provider: ProviderOllama, BatchTokens: 1}, "OLLAMA_URL is required"},
 		{"anthropic", Config{Provider: ProviderAnthropic, BatchTokens: 1, AnthropicAPIKey: key("test-key"), GeminiAPIKey: unread(t)}, ""},
 		{"anthropic missing key", Config{Provider: ProviderAnthropic, BatchTokens: 1, AnthropicAPIKey: key("")}, "the anthropic API key is not set: --summarize-provider=anthropic needs MCP_SUMMARIZE_ANTHROPIC_API_KEY"},
-		{"empty", Config{BatchTokens: 1}, "invalid summarisation provider"},
+		{"not configured", Config{BatchTokens: 1, GeminiAPIKey: unread(t), AnthropicAPIKey: unread(t)}, "summarisation is not configured"},
 		{"unknown", Config{Provider: "openai", BatchTokens: 1}, "invalid summarisation provider"},
-		{"zero batch tokens", Config{Provider: ProviderSampling}, "batch-tokens must be positive"},
-		{"negative batch tokens", Config{Provider: ProviderSampling, BatchTokens: -5}, "batch-tokens must be positive"},
+		{"zero batch tokens", Config{Provider: ProviderOllama, OllamaURL: "http://localhost:11434"}, "batch-tokens must be positive"},
+		{"negative batch tokens", Config{Provider: ProviderOllama, OllamaURL: "http://localhost:11434", BatchTokens: -5}, "batch-tokens must be positive"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -74,16 +72,9 @@ func TestNewValidatesConfig(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.config.Provider, s.ProviderName())
-			assert.NotNil(t, s.providerFor(nil))
+			assert.NotNil(t, s.provider)
 		})
 	}
-}
-
-func TestSamplingBindsToTheCallSession(t *testing.T) {
-	s, err := New(Config{Provider: ProviderSampling, BatchTokens: 1})
-	require.NoError(t, err)
-	_, err = s.providerFor(nil).Summarize(t.Context(), providerTestRequest())
-	assert.ErrorIs(t, err, ErrSamplingUnsupported)
 }
 
 func TestTokenEstimationAndBatching(t *testing.T) {
@@ -162,14 +153,6 @@ func TestSummarizeWithProgressSuccessFailurePanicAndCancellation(t *testing.T) {
 	assert.ErrorContains(t, err, "canceled")
 }
 
-func TestSamplingProviderWithoutCapabilityAndContentText(t *testing.T) {
-	p := NewSamplingProvider(nil)
-	_, err := p.Summarize(t.Context(), providerTestRequest())
-	assert.ErrorIs(t, err, ErrSamplingUnsupported)
-	assert.Equal(t, "hello", contentText(&mcp.TextContent{Text: "hello"}))
-	assert.Empty(t, contentText(&mcp.ImageContent{}))
-}
-
 func TestSummarizeCountsCompletedBatches(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -220,7 +203,7 @@ func TestSummarizeCountsCompletedBatches(t *testing.T) {
 				return strings.TrimSpace(summary), nil
 			})
 			s := fixedSummarizer(llm, max(tc.batchTokens, 1))
-			got, err := s.Summarize(t.Context(), nil, messages.NewProvider(tgclient.NewResolver(t.Context(), tg.NewClient(inv)), 100_000), 77, "summarize", time.Time{}, 100, nil)
+			got, err := s.Summarize(t.Context(), messages.NewProvider(tgclient.NewResolver(t.Context(), tg.NewClient(inv)), 100_000), 77, "summarize", time.Time{}, 100, nil)
 			if tc.failBatch > 0 {
 				require.ErrorIs(t, err, assert.AnError)
 			} else {
@@ -269,6 +252,6 @@ func TestKeyErrorsTellUnsetFromUnreadable(t *testing.T) {
 // rejected configuration fails with the reason before touching Telegram.
 func TestUnavailableFailsEveryCall(t *testing.T) {
 	reason := errors.New("the gemini API key is not set")
-	_, err := Unavailable(reason).Summarize(t.Context(), nil, nil, 1, "recap", time.Time{}, 10, nil)
+	_, err := Unavailable(reason).Summarize(t.Context(), nil, 1, "recap", time.Time{}, 10, nil)
 	assert.ErrorIs(t, err, reason)
 }

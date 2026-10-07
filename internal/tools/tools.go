@@ -17,15 +17,6 @@ import (
 	"github.com/tolmachov/mcp-telegram/internal/tgclient"
 )
 
-// MCP logging level constants. The official SDK exposes LoggingLevel as a
-// plain string type with no exported wire-value constants, so we define them
-// here for readability at call sites.
-const (
-	logLevelInfo    mcp.LoggingLevel = "info"
-	logLevelWarning mcp.LoggingLevel = "warning"
-	logLevelError   mcp.LoggingLevel = "error"
-)
-
 // Handler is the interface every tool implements. Each handler registers
 // itself with the server through AddTool (or AddContentTool for a tool with no
 // typed output), which wrap the SDK's typed mcp.AddTool: input is validated,
@@ -130,46 +121,12 @@ func sendProgress(ctx context.Context, req *mcp.CallToolRequest, progress, total
 	}
 }
 
-// mcpLog sends a structured log message to the MCP client via
-// notifications/message. Use this instead of stderr logging when the client
-// should be able to surface the message (e.g. auth errors, long-running task
-// diagnostics).
-//
-// When the MCP transport is unavailable (nil session), errors and warnings
-// fall back to slog so the operator always has a record. Debug/info messages
-// are silently dropped in that case — they are not operational signals.
-// On delivery failure, errors and warnings are forwarded to slog.
-func mcpLog(ctx context.Context, ss *mcp.ServerSession, level mcp.LoggingLevel, logger string, data any) {
-	msg := "mcp log (no session)"
-	var err error
-	if ss != nil {
-		if err = ss.Log(ctx, &mcp.LoggingMessageParams{Level: level, Logger: logger, Data: data}); err == nil {
-			return
-		}
-		msg = "mcp log delivery failed"
-	}
-	var slogLevel slog.Level
-	switch level {
-	case logLevelError:
-		slogLevel = slog.LevelError
-	case logLevelWarning:
-		slogLevel = slog.LevelWarn
-	default:
-		return
-	}
-	attrs := []any{"logger", logger, "data", data}
-	if err != nil {
-		attrs = append(attrs, "err", err)
-	}
-	slog.Log(ctx, slogLevel, msg, attrs...)
-}
-
 // AddTool registers a typed tool so that a non-success outcome can never reach
 // the client as a zero-valued output. For a pointer output type the SDK fills
 // StructuredContent from the zero value whenever the handler returns a nil
 // output, and hosts that render structured content then show an empty
 // {"status":""} object instead of the error text or the real outcome. So:
-//   - a handler error is rendered and logged by toolFailure;
+//   - a handler error is rendered by failureText (the request log records it);
 //   - an IsError result (input validation) is turned into a Go error, which
 //     the SDK sends as IsError + text with no structured content;
 //   - a non-error result without a typed output is a handler bug and is
@@ -187,7 +144,7 @@ func AddTool[In, Out any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, *
 	mcp.AddTool(s, t, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, *Out, error) {
 		res, out, err := h(tgclient.WithWaitBudget(ctx), req, in)
 		if err != nil {
-			return nil, nil, toolFailure(ctx, req, t.Name, err)
+			return nil, nil, errors.New(failureText(t.Name, err))
 		}
 		if res != nil && res.IsError {
 			return nil, nil, errors.New(ResultText(res))
@@ -249,13 +206,13 @@ func flagPartial(res *mcp.CallToolResult, out any) *mcp.CallToolResult {
 }
 
 // AddContentTool registers a tool with no typed output (e.g. GetMedia, which
-// returns image content), routing its handler errors through toolFailure and
+// returns image content), rendering its handler errors with failureText and
 // giving it a flood-wait budget like AddTool does.
 func AddContentTool[In any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, any]) {
 	mcp.AddTool(s, t, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
 		res, out, err := h(tgclient.WithWaitBudget(ctx), req, in)
 		if err != nil {
-			return nil, nil, toolFailure(ctx, req, t.Name, err)
+			return nil, nil, errors.New(failureText(t.Name, err))
 		}
 		return res, out, nil
 	})
@@ -263,7 +220,7 @@ func AddContentTool[In any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In,
 
 // failure is a tool call that failed past input validation — a Telegram RPC
 // or another runtime error. Handlers return it as their Go error and
-// toolFailure renders it as "Failed to <op>: <err>" plus the hint. A failure
+// failureText renders it as "Failed to <op>: <err>" plus the hint. A failure
 // without an op only carries a hint for an outer failure to render.
 //
 // A hint suggests how to fix the request, which cannot cure a condition
@@ -311,18 +268,6 @@ func withHint(err error, hint string) error { return newFailure("", hint, err) }
 // peerHint follows a failure about the one chat a call named
 // (tgclient.IsPeerSpecific).
 const peerHint = "The chat may not exist, you may not have access, or the ID may be wrong. Use SearchChats or GetChats to verify, or ResolveUsername if you only have a @handle."
-
-// toolFailure is the single place a handler's Go error becomes the tool error
-// the model reads: it classifies err through tgclient, renders it, and logs
-// it under the tool's name.
-func toolFailure(ctx context.Context, req *mcp.CallToolRequest, tool string, err error) error {
-	level := logLevelError
-	if _, ok := tgclient.RetryAfter(err); ok {
-		level = logLevelWarning
-	}
-	mcpLog(ctx, req.Session, level, tool, map[string]any{"error": err.Error()})
-	return errors.New(failureText(tool, err))
-}
 
 // failureText renders a handler error as "Failed to <op>: <what happened>",
 // followed by the hint describe picks.

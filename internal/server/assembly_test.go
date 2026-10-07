@@ -86,6 +86,76 @@ func (fakeInvoker) Invoke(ctx context.Context, input bin.Encoder, output bin.Dec
 	return ctx.Err()
 }
 
+// TestBuildAssemblyServesTheVariant pins what a client of a built assembly
+// sees for each --variant: the variant's tool set and descriptions, and the
+// capabilities — every one the server uses, and not the deprecated logging.
+func TestBuildAssemblyServesTheVariant(t *testing.T) {
+	cases := []struct {
+		variant  string
+		tools    int
+		compact  bool
+		mutating bool
+	}{
+		{"", 29, false, true},
+		{variantFull, 29, false, true},
+		{variantCompact, 29, true, true},
+		{variantResearch, 15, true, false},
+	}
+	var fullGetChats string
+	for _, tc := range cases {
+		t.Run(tc.variant, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			srv, err := New(Options{
+				Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
+				Summarize: testSummarize,
+				Version:   "test",
+				Variant:   tc.variant,
+				ErrOut:    io.Discard,
+				Transport: TransportStdio,
+			})
+			require.NoError(t, err)
+			asm := srv.buildAssembly(t.Context(), newFakeClient(), slog.New(slog.DiscardHandler))
+			t.Cleanup(func() { _ = asm.Close() })
+
+			serverT, clientT := mcp.NewInMemoryTransports()
+			ss, err := asm.server.Connect(t.Context(), serverT, nil)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = ss.Close() })
+			cs, err := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil).Connect(t.Context(), clientT, nil)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = cs.Close() })
+
+			caps := cs.InitializeResult().Capabilities
+			wire, err := json.Marshal(caps)
+			require.NoError(t, err)
+			assert.NotContains(t, string(wire), `"logging"`, "the deprecated logging capability is not advertised")
+			assert.NotNil(t, caps.Tools)
+			assert.NotNil(t, caps.Prompts)
+			assert.NotNil(t, caps.Completions)
+			require.NotNil(t, caps.Resources)
+			assert.True(t, caps.Resources.ListChanged, "pinned-chat refreshes notify the client")
+
+			names := map[string]string{}
+			for tl, err := range cs.Tools(t.Context(), nil) {
+				require.NoError(t, err)
+				names[tl.Name] = tl.Description
+			}
+			assert.Len(t, names, tc.tools)
+			_, hasSend := names["SendMessage"]
+			assert.Equal(t, tc.mutating, hasSend)
+			require.Contains(t, names, "GetChats")
+			if fullGetChats == "" {
+				fullGetChats = names["GetChats"]
+			}
+			if tc.compact {
+				assert.Equal(t, compactDesc(fullGetChats), names["GetChats"])
+			} else {
+				assert.Equal(t, fullGetChats, names["GetChats"])
+			}
+		})
+	}
+}
+
 func TestBuildAssemblyForVariantModesWithoutTelegramConnection(t *testing.T) {
 	for _, variant := range []string{"", variantFull, variantCompact, variantResearch} {
 		t.Run(variant, func(t *testing.T) {
@@ -101,13 +171,8 @@ func TestBuildAssemblyForVariantModesWithoutTelegramConnection(t *testing.T) {
 			})
 			require.NoError(t, err)
 			client := newFakeClient()
-			assembly, err := srv.buildAssembly(t.Context(), client, slog.New(slog.DiscardHandler))
-			require.NoError(t, err)
-			if variant == "" {
-				require.NotNil(t, assembly.variants)
-			} else {
-				require.NotNil(t, assembly.single)
-			}
+			assembly := srv.buildAssembly(t.Context(), client, slog.New(slog.DiscardHandler))
+			require.NotNil(t, assembly.server)
 			require.NoError(t, assembly.Close())
 			select {
 			case <-assembly.watchDone:
@@ -136,8 +201,7 @@ func TestClientStopEndsAssemblyLifetime(t *testing.T) {
 	})
 	require.NoError(t, err)
 	client := newFakeClient()
-	asm, err := srv.buildAssembly(t.Context(), client, slog.New(slog.DiscardHandler))
-	require.NoError(t, err)
+	asm := srv.buildAssembly(t.Context(), client, slog.New(slog.DiscardHandler))
 	t.Cleanup(func() { _ = asm.Close() })
 
 	select {
@@ -154,26 +218,12 @@ func TestClientStopEndsAssemblyLifetime(t *testing.T) {
 	assert.False(t, client.isClosed(), "a client stopping on its own is not closed by the assembly until Close")
 }
 
-func TestServeAssemblyPinnedVariantExitsOnStdinEOF(t *testing.T) {
+func TestServeAssemblyExitsOnStdinEOF(t *testing.T) {
 	srv, err := New(Options{
 		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
 		Summarize: testSummarize,
 		Version:   "test",
 		Variant:   variantResearch,
-		Stdin:     strings.NewReader(""),
-		Stdout:    io.Discard,
-		ErrOut:    io.Discard,
-		Transport: TransportStdio,
-	})
-	require.NoError(t, err)
-	require.NoError(t, srv.serveAssembly(t.Context(), newFakeClient()))
-}
-
-func TestServeAssemblyAllVariantsExitsOnStdinEOF(t *testing.T) {
-	srv, err := New(Options{
-		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
-		Summarize: testSummarize,
-		Version:   "test",
 		Stdin:     strings.NewReader(""),
 		Stdout:    io.Discard,
 		ErrOut:    io.Discard,
@@ -419,7 +469,7 @@ func TestStreamableHTTPOptionsCarrySessionTimeout(t *testing.T) {
 }
 
 func TestServerAuxiliaryLifecycleBranches(t *testing.T) {
-	srv, err := New(Options{
+	_, err := New(Options{
 		Config:    &tgclient.Config{APIID: 1, APIHash: "hash", FloodWaitMaxWait: 2 * time.Second},
 		Summarize: testSummarize,
 		Version:   "test",
@@ -431,12 +481,6 @@ func TestServerAuxiliaryLifecycleBranches(t *testing.T) {
 	require.NoError(t, err)
 	_, err = (&Server{opts: Options{Config: &tgclient.Config{}}}).startLogin(t.Context())
 	require.Error(t, err)
-
-	srv.opts.Variant = "unknown"
-	client := newFakeClient()
-	_, err = srv.buildAssembly(t.Context(), client, slog.New(slog.DiscardHandler))
-	require.ErrorContains(t, err, "variant")
-	assert.True(t, client.isClosed(), "a failed build disconnects the client it was handed")
 }
 
 // panickingClient is a fakeClient whose API panics, so the wiring that
@@ -461,7 +505,7 @@ func TestBuildAssemblyPanicClosesClient(t *testing.T) {
 	require.NoError(t, err)
 	client := panickingClient{newFakeClient()}
 	assert.PanicsWithValue(t, "wiring bug", func() {
-		_, _ = srv.buildAssembly(t.Context(), client, slog.New(slog.DiscardHandler))
+		_ = srv.buildAssembly(t.Context(), client, slog.New(slog.DiscardHandler))
 	})
 	assert.True(t, client.isClosed(), "a panicking build disconnects the client it was handed")
 }

@@ -18,8 +18,15 @@ configuration, and pagination contract.
   restricted to server-configured roots.
 - Environment names now use `MCP_*`, `MCP_AUTH_*`, and `MCP_SUMMARIZE_*`.
   `.env` is never loaded automatically.
-- Release containers compile with the checksummed Go 1.26.8 toolchain, upgrade
-  Alpine 3.22 security packages, and use gRPC 1.83.2 or newer.
+- The `sampling` summarisation provider is removed (MCP deprecated sampling in
+  SEP-2577). Summarisation is off until `MCP_SUMMARIZE_PROVIDER` names
+  `anthropic`, `gemini` or `ollama`.
+- The server sends no MCP logging notifications and no longer advertises the
+  `logging` capability; diagnostics go to the server log.
+- Clients no longer negotiate server variants (SEP-2053): `--variant` /
+  `MCP_VARIANT` picks one, `full` by default.
+- Release containers compile with the checksummed Go 1.27.1 toolchain, upgrade
+  Alpine 3.24 security packages, and use gRPC 1.84.0 or newer.
 
 All users must reconfigure current environment names and complete a new QR
 login after upgrading. Keep the prior image and old storage prefixes through
