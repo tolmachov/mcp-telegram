@@ -48,6 +48,7 @@ type fakeFlow struct {
 	doneOnce  sync.Once
 	aborted   bool
 	passwords []string // every submitted password, in order
+	rejected  int      // submitted passwords refused so far
 	pwOK      string   // password that completes the login (when non-empty)
 	pwUser    LoginUser
 	pwSession []byte
@@ -107,7 +108,8 @@ func (f *fakeFlow) SubmitPassword(pw string) bool {
 }
 
 // settlePassword finishes verifying the last submitted password: the
-// scripted one completes the login, anything else is rejected.
+// scripted one completes the login, anything else counts as a rejection, and
+// the last allowed rejection fails the flow.
 func (f *fakeFlow) settlePassword() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -120,8 +122,23 @@ func (f *fakeFlow) settlePassword() {
 		f.doneOnce.Do(func() { close(f.done) })
 		return
 	}
-	f.err = errors.New("PASSWORD_HASH_INVALID")
+	f.rejected++
+	if f.rejected == fakePasswordAttempts {
+		f.state = LoginFailed
+		f.err = errors.New("too many wrong 2FA password attempts")
+		f.doneOnce.Do(func() { close(f.done) })
+		return
+	}
 	f.state = LoginPasswordNeeded
+}
+
+// fakePasswordAttempts is the fake's 2FA attempt budget.
+const fakePasswordAttempts = 3
+
+func (f *fakeFlow) Rejections() (rejected, left int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.rejected, fakePasswordAttempts - f.rejected
 }
 
 func (f *fakeFlow) Err() error {
@@ -314,6 +331,17 @@ func startAuthorize(t *testing.T, ts *httptest.Server, clientID, challenge, stat
 }
 
 // pollLogin fetches /login/poll once and decodes the JSON.
+// submitPassword posts a 2FA password for loginID and returns the status.
+func submitPassword(t *testing.T, ts *httptest.Server, loginID, pw string) int {
+	t.Helper()
+	resp, err := http.PostForm(ts.URL+"/login/password", url.Values{
+		"login": {loginID}, "password": {pw},
+	})
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
 func pollLogin(t *testing.T, ts *httptest.Server, loginID string) pollResponse {
 	t.Helper()
 	resp, err := http.Get(ts.URL + "/login/poll?login=" + url.QueryEscape(loginID))
@@ -795,7 +823,7 @@ func TestLoginEndpoints(t *testing.T) {
 		flow.failNow(errors.New("AUTH_TOKEN_EXPIRED"))
 		pr := pollLogin(t, ts, loginID)
 		assert.Equal(t, "failed", pr.Status)
-		assert.NotEmpty(t, pr.Message)
+		assert.Equal(t, "Telegram login failed. Start over from your MCP client.", pr.Message)
 		assert.True(t, flow.wasAborted())
 		// The entry is gone afterwards.
 		assert.Equal(t, "expired", pollLogin(t, ts, loginID).Status)
@@ -810,28 +838,23 @@ func TestLoginEndpoints(t *testing.T) {
 		assert.Equal(t, "password", pr.Status)
 		assert.Empty(t, pr.Message, "no error before the first attempt")
 
-		submit := func(pw string) int {
-			resp, err := http.PostForm(ts.URL+"/login/password", url.Values{
-				"login": {loginID}, "password": {pw},
-			})
-			require.NoError(t, err)
-			_ = resp.Body.Close()
-			return resp.StatusCode
-		}
+		submit := func(pw string) int { return submitPassword(t, ts, loginID, pw) }
 
 		// While a password is being checked the poll says so, and a second
-		// submission is ignored rather than queued as another attempt.
+		// submission is refused rather than queued as another attempt.
 		assert.Equal(t, http.StatusNoContent, submit("wrong"))
 		pr = pollLogin(t, ts, loginID)
 		assert.Equal(t, "checking", pr.Status)
 		assert.Empty(t, pr.Message)
-		assert.Equal(t, http.StatusNoContent, submit("again"))
+		assert.Equal(t, http.StatusConflict, submit("again"))
 
-		// Wrong password: back to password, poll carries the hint.
+		// Wrong password: back to password, poll counts the rejection and
+		// says how many attempts remain.
 		flow.settlePassword()
 		pr = pollLogin(t, ts, loginID)
 		assert.Equal(t, "password", pr.Status)
-		assert.NotEmpty(t, pr.Message)
+		assert.Equal(t, 1, pr.Rejected)
+		assert.Equal(t, "Wrong password, 2 attempts left.", pr.Message)
 
 		// While the next attempt is checked, the poll does not repeat the
 		// previous attempt's error message.
@@ -863,14 +886,41 @@ func TestLoginEndpoints(t *testing.T) {
 		assert.Equal(t, http.StatusOK, status)
 	})
 
+	t.Run("spent 2FA attempts fail the login", func(t *testing.T) {
+		flow := newFakeFlow()
+		_, ts, _, _, loginID := setup(t, flow)
+		flow.needPassword("hunter2", LoginUser{ID: allowedUser}, []byte("session-2fa"))
+
+		for attempt := 1; attempt <= fakePasswordAttempts; attempt++ {
+			require.Equal(t, http.StatusNoContent, submitPassword(t, ts, loginID, "wrong"))
+			flow.settlePassword()
+			if attempt == fakePasswordAttempts-1 {
+				pr := pollLogin(t, ts, loginID)
+				assert.Equal(t, attempt, pr.Rejected, "each rejection raises the count")
+				assert.Equal(t, "Wrong password, 1 attempt left.", pr.Message)
+			}
+		}
+		pr := pollLogin(t, ts, loginID)
+		assert.Equal(t, "failed", pr.Status)
+		assert.Equal(t, "Too many wrong passwords. Start over from your MCP client.", pr.Message)
+	})
+
+	t.Run("a rejection before another failure keeps the generic message", func(t *testing.T) {
+		flow := newFakeFlow()
+		_, ts, _, _, loginID := setup(t, flow)
+		flow.needPassword("hunter2", LoginUser{ID: allowedUser}, []byte("session-2fa"))
+
+		require.Equal(t, http.StatusNoContent, submitPassword(t, ts, loginID, "wrong"))
+		flow.settlePassword()
+		flow.failNow(errors.New("SRP_ID_INVALID"))
+		pr := pollLogin(t, ts, loginID)
+		assert.Equal(t, "failed", pr.Status)
+		assert.Equal(t, "Telegram login failed. Start over from your MCP client.", pr.Message)
+	})
+
 	t.Run("password submit for unknown login is 404", func(t *testing.T) {
 		_, ts := newTestServer(t, testConfig(t), sessionstoretest.New(t), neverStartLogin)
-		resp, err := http.PostForm(ts.URL+"/login/password", url.Values{
-			"login": {strings.Repeat("cd", 16)}, "password": {"x"},
-		})
-		require.NoError(t, err)
-		_ = resp.Body.Close()
-		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+		assert.Equal(t, http.StatusNotFound, submitPassword(t, ts, strings.Repeat("cd", 16), "x"))
 	})
 
 	t.Run("TTL expiry aborts the flow", func(t *testing.T) {

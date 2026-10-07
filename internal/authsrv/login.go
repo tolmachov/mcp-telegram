@@ -48,15 +48,17 @@ type LoginFlow interface {
 	User() (LoginUser, bool)
 	// SessionData returns the raw gotd session bytes; valid only in LoginDone.
 	SessionData() ([]byte, bool)
-	// SubmitPassword feeds the 2FA cloud password to the flow. It is
-	// accepted only in LoginPasswordNeeded and moves the flow to
-	// LoginPasswordChecking. A wrong password returns it to
-	// LoginPasswordNeeded (Err then reports that attempt's error) until the
-	// attempt budget is spent, after which the flow fails.
+	// SubmitPassword feeds the 2FA cloud password to the flow and reports
+	// whether it was taken. It is taken only in LoginPasswordNeeded and
+	// moves the flow to LoginPasswordChecking. A wrong password counts
+	// towards Rejections and returns the flow to LoginPasswordNeeded while
+	// attempts are left; the flow fails once none are.
 	SubmitPassword(pw string) bool
-	// Err reports the failure in LoginFailed, and the last rejected password
-	// attempt while in LoginPasswordNeeded or LoginPasswordChecking. Nil
-	// otherwise.
+	// Rejections reports how many submitted passwords Telegram has rejected
+	// and how many attempts remain; left counts an attempt under check and
+	// is 0 only once every attempt has been refused.
+	Rejections() (rejected, left int)
+	// Err reports the failure in LoginFailed; nil otherwise.
 	Err() error
 	// Done is closed when the flow has fully terminated (success or not).
 	Done() <-chan struct{}

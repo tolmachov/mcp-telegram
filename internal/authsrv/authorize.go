@@ -181,22 +181,39 @@ input[type=password]{width:100%;box-sizing:border-box;margin-top:6px;padding:10p
 	var loadingRev = 0;
 	var latestRev = 0;
 	var stopped = false;
-	var qrActive = true;
-	// Password POSTs sent and settled. A poll sent while one was unsettled
-	// may report "password" for the state that submission replaced, so only
-	// a poll sent with every submission settled may re-open the form.
-	var sent = 0;
-	var settled = 0;
+	// phase is the password form's state: "" (not shown, so the QR is the
+	// live step), "prompt" or "checking". seenRejected is the server's
+	// rejection count last shown.
+	var phase = "";
+	var seenRejected = 0;
+	// submission numbers password POSTs so a late answer to an older one is
+	// ignored.
+	var submission = 0;
 
-	function setChecking(checking) {
-		pwInput.disabled = checking;
-		pwButton.disabled = checking;
-		if (checking) { statusEl.textContent = "Checking password…"; }
+	function showPrompt(text) {
+		hideQR();
+		form.hidden = false;
+		pwInput.disabled = false;
+		pwButton.disabled = false;
+		phase = "prompt";
+		statusEl.textContent = text;
 	}
 
-	function sendFailed() {
-		setChecking(false);
-		statusEl.textContent = "Couldn't send the password. Try again.";
+	function showChecking() {
+		hideQR();
+		form.hidden = false;
+		pwInput.disabled = true;
+		pwButton.disabled = true;
+		// The status is a live region: announce the check once, not every poll.
+		if (phase !== "checking") { statusEl.textContent = "Checking password…"; }
+		phase = "checking";
+	}
+
+	function stop(text) {
+		stopped = true;
+		hideQR();
+		form.hidden = true;
+		statusEl.textContent = text;
 	}
 
 	form.addEventListener("submit", function (e) {
@@ -204,11 +221,34 @@ input[type=password]{width:100%;box-sizing:border-box;margin-top:6px;padding:10p
 		var body = new URLSearchParams();
 		body.set("login", loginID);
 		body.set("password", pwInput.value);
-		setChecking(true);
-		sent++;
-		fetch("/login/password", {method: "POST", body: body})
-			.then(function (r) { if (!r.ok) { sendFailed(); } }, sendFailed)
-			.then(function () { settled++; });
+		showChecking();
+		var id = ++submission;
+		// A hung request must not hold the form shut.
+		var abort = new AbortController();
+		var timer = setTimeout(function () { abort.abort(); }, 15000);
+		// Reopen the form only while this submission is the one the page
+		// awaits: a poll may already have reported its outcome or ended the
+		// login, or a later submission replaced it.
+		function reopen(text) {
+			if (!stopped && id === submission && phase === "checking") { showPrompt(text); }
+		}
+		fetch("/login/password", {method: "POST", body: body, signal: abort.signal})
+			.then(function (r) {
+				// 204: taken. 409: another password is being checked or the login
+				// has ended; either way the polls report what happens next.
+				if (r.ok || r.status === 409) { return; }
+				if (r.status === 404) {
+					stop("The login expired. Start over from your MCP client.");
+				} else if (r.status === 429) {
+					reopen("Too many requests. Wait a moment and try again.");
+				} else {
+					reopen("Couldn't send the password. Try again.");
+				}
+			}, function () {
+				// The password may have arrived; if so, the next poll says so.
+				reopen("Couldn't confirm the password was sent. Try again.");
+			})
+			.then(function () { clearTimeout(timer); });
 	});
 
 	function clearQRImage() {
@@ -237,7 +277,7 @@ input[type=password]{width:100%;box-sizing:border-box;margin-top:6px;padding:10p
 		var next = new Image();
 		var src = "/login/qr?login=" + encodeURIComponent(loginID) + "&rev=" + rev;
 		next.onload = function () {
-			if (stopped || !qrActive || loadingRev !== rev) { return; }
+			if (stopped || phase !== "" || loadingRev !== rev) { return; }
 			img.src = src;
 			img.hidden = false;
 			loader.hidden = true;
@@ -245,28 +285,24 @@ input[type=password]{width:100%;box-sizing:border-box;margin-top:6px;padding:10p
 			displayedRev = rev;
 			loadingRev = 0;
 			requestAnimationFrame(function () { img.classList.add("ready"); });
-			if (form.hidden) { statusEl.textContent = "Waiting for scan…"; }
+			statusEl.textContent = "Waiting for scan…";
 		};
 		next.onerror = function () {
 			if (loadingRev !== rev) { return; }
 			loadingRev = 0;
-			if (!stopped && qrActive && rev === latestRev) {
+			if (!stopped && phase === "" && rev === latestRev) {
 				setTimeout(function () { loadQR(rev); }, 1000);
 			}
 		};
 		next.src = src;
 	}
 
-	function showPasswordForm() {
-		qrActive = false;
-		hideQR();
-		form.hidden = false;
-	}
-
-	function apply(j, settledAt) {
+	function apply(j) {
 		switch (j.status) {
 		case "waiting":
-			qrActive = true;
+			// The QR step never returns once the password form is up: this is
+			// another poll finalising the login, and the next poll ends it.
+			if (phase !== "") { return; }
 			qrwrap.hidden = false;
 			if (j.qr_rev && j.qr_rev > latestRev) {
 				latestRev = j.qr_rev;
@@ -279,46 +315,41 @@ input[type=password]{width:100%;box-sizing:border-box;margin-top:6px;padding:10p
 			return;
 		case "done":
 			stopped = true;
-			qrActive = false;
 			hideQR();
 			statusEl.textContent = "Logged in. Redirecting…";
 			window.location.href = j.redirect;
 			return;
 		case "password":
-			if (settledAt !== sent) { return; }
-			// Only an arrival from the QR or from a check rewrites the status:
-			// repeating it every poll would hide a failed send.
-			if (!form.hidden && !pwInput.disabled) { return; }
-			var rejected = pwInput.disabled && j.message;
-			showPasswordForm();
-			setChecking(false);
-			if (rejected) {
+			if (j.rejected > seenRejected) {
+				// A check ended in a refusal, whatever became of the request
+				// that sent the password.
+				seenRejected = j.rejected;
+				showPrompt(j.message);
 				pwInput.value = "";
 				pwInput.focus();
+				return;
 			}
-			statusEl.textContent = j.message || "Enter your two-step verification password.";
+			// No new rejection: open the prompt on arrival from the QR only.
+			// While a submission is under way this answer predates it (a taken
+			// password leaves this state only through a rejection), and an open
+			// prompt, e.g. after a failed send, stays as it is.
+			if (phase === "") { showPrompt("Enter your two-step verification password."); }
 			return;
 		case "checking":
-			showPasswordForm();
-			setChecking(true);
+			showChecking();
 			return;
 		case "failed":
 		case "expired":
-			stopped = true;
-			qrActive = false;
-			hideQR();
-			form.hidden = true;
-			statusEl.textContent = j.message || "Login failed.";
+			stop(j.message || "Login failed.");
 			return;
 		}
 	}
 
 	function poll() {
 		if (stopped) { return; }
-		var settledAt = settled;
 		fetch("/login/poll?login=" + encodeURIComponent(loginID))
 			.then(function (r) { return r.json(); })
-			.then(function (j) { apply(j, settledAt); })
+			.then(apply)
 			.catch(function () {})
 			.then(function () { if (!stopped) { setTimeout(poll, 2000); } });
 	}

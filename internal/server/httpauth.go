@@ -46,6 +46,7 @@ type qrLoginFlow struct {
 func (q qrLoginFlow) TokenURL() (string, bool)      { return q.flow.TokenURL() }
 func (q qrLoginFlow) SessionData() ([]byte, bool)   { return q.flow.SessionData() }
 func (q qrLoginFlow) SubmitPassword(pw string) bool { return q.flow.SubmitPassword(pw) }
+func (q qrLoginFlow) Rejections() (int, int)        { return q.flow.Rejections() }
 func (q qrLoginFlow) Err() error                    { return q.flow.Err() }
 func (q qrLoginFlow) Done() <-chan struct{}         { return q.flow.Done() }
 func (q qrLoginFlow) Abort()                        { q.flow.Abort() }

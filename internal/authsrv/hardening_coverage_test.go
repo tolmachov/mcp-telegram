@@ -296,7 +296,7 @@ func TestPasswordEndpointDefensiveBranches(t *testing.T) {
 	}.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	a.handleLoginPassword(recorder, req)
-	assert.Equal(t, http.StatusNoContent, recorder.Code)
+	assert.Equal(t, http.StatusConflict, recorder.Code, "a flow still on the QR code is not awaiting a password")
 }
 
 func TestRegistrationRejectsInvalidMetadata(t *testing.T) {
