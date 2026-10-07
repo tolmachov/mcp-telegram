@@ -43,8 +43,9 @@ func TestQRFlowStateTransitions(t *testing.T) {
 	assert.Equal(t, "tg://login?token=one", url)
 
 	errPassword := errors.New("PASSWORD_HASH_INVALID")
+	f.setState(QRPasswordVerifying)
 	f.recordPasswordError(errPassword)
-	assert.Equal(t, QRPasswordNeeded, f.State())
+	assert.Equal(t, QRPasswordVerifying, f.State(), "only passwordLoop reopens the password prompt")
 	assert.ErrorIs(t, f.Err(), errPassword)
 
 	errFailed := errors.New("expired")

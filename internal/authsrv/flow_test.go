@@ -102,14 +102,26 @@ func (f *fakeFlow) SubmitPassword(pw string) bool {
 		return false
 	}
 	f.passwords = append(f.passwords, pw)
-	if f.pwOK != "" && pw == f.pwOK {
+	f.state = LoginPasswordChecking
+	return true
+}
+
+// settlePassword finishes verifying the last submitted password: the
+// scripted one completes the login, anything else is rejected.
+func (f *fakeFlow) settlePassword() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.state != LoginPasswordChecking {
+		panic("settlePassword: no password is being checked")
+	}
+	if pw := f.passwords[len(f.passwords)-1]; f.pwOK != "" && pw == f.pwOK {
 		f.user, f.session, f.err = f.pwUser, f.pwSession, nil
 		f.state = LoginDone
 		f.doneOnce.Do(func() { close(f.done) })
-	} else {
-		f.err = errors.New("PASSWORD_HASH_INVALID")
+		return
 	}
-	return true
+	f.err = errors.New("PASSWORD_HASH_INVALID")
+	f.state = LoginPasswordNeeded
 }
 
 func (f *fakeFlow) Err() error {
@@ -807,14 +819,29 @@ func TestLoginEndpoints(t *testing.T) {
 			return resp.StatusCode
 		}
 
-		// Wrong password: state stays password, poll carries the hint.
+		// While a password is being checked the poll says so, and a second
+		// submission is ignored rather than queued as another attempt.
 		assert.Equal(t, http.StatusNoContent, submit("wrong"))
+		pr = pollLogin(t, ts, loginID)
+		assert.Equal(t, "checking", pr.Status)
+		assert.Empty(t, pr.Message)
+		assert.Equal(t, http.StatusNoContent, submit("again"))
+
+		// Wrong password: back to password, poll carries the hint.
+		flow.settlePassword()
 		pr = pollLogin(t, ts, loginID)
 		assert.Equal(t, "password", pr.Status)
 		assert.NotEmpty(t, pr.Message)
 
-		// Correct password completes the login.
+		// While the next attempt is checked, the poll does not repeat the
+		// previous attempt's error message.
 		assert.Equal(t, http.StatusNoContent, submit("hunter2"))
+		pr = pollLogin(t, ts, loginID)
+		assert.Equal(t, "checking", pr.Status)
+		assert.Empty(t, pr.Message)
+
+		// Correct password completes the login.
+		flow.settlePassword()
 		pr = pollLogin(t, ts, loginID)
 		require.Equal(t, "done", pr.Status)
 		assert.Equal(t, []string{"wrong", "hunter2"}, flow.passwords)
