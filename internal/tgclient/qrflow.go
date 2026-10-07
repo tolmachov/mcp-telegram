@@ -21,7 +21,7 @@ type QRState int
 const (
 	QRWaiting           QRState = iota // QR shown, waiting for a scan
 	QRPasswordNeeded                   // account has 2FA; waiting for the password
-	QRPasswordVerifying                // one submitted password is in flight
+	QRPasswordVerifying                // a submitted password is being checked, or the check ended and the flow is about to reopen the prompt or fail
 	QRDone                             // logged in, session bytes final
 	QRFailed                           // terminal failure (incl. abort/expiry)
 )
@@ -32,7 +32,8 @@ type QRUser struct {
 	Username string
 }
 
-// qrPasswordAttempts bounds wrong-2FA-password retries before the flow fails.
+// qrPasswordAttempts is the number of 2FA passwords a login may try before
+// it fails.
 const qrPasswordAttempts = 3
 
 // QRFlow is one Telegram QR login running on a background goroutine with its
@@ -41,11 +42,10 @@ const qrPasswordAttempts = 3
 // (SessionData) only after checking who actually scanned the code.
 //
 // State transitions: Waiting → (PasswordNeeded ⇄ PasswordVerifying →)
-// Done | Failed. The done
-// channel closes only after the underlying client.Run has returned, i.e.
-// when the session bytes are final and no bootstrap connection remains —
-// callers may hand the session to a long-lived client without risking two
-// concurrent users of one auth key.
+// Done | Failed. The done channel closes only after the underlying
+// client.Run has returned, i.e. when the session bytes are final and no
+// bootstrap connection remains — callers may hand the session to a
+// long-lived client without risking two concurrent users of one auth key.
 type QRFlow struct {
 	mu          sync.Mutex
 	tokenURL    string
@@ -53,6 +53,7 @@ type QRFlow struct {
 	user        QRUser
 	sessionData []byte
 	err         error
+	rejected    int // 2FA passwords Telegram has rejected
 
 	passwordCh chan string
 	cancel     context.CancelFunc
@@ -102,7 +103,7 @@ func (f *QRFlow) run(ctx context.Context, client *telegram.Client, dispatcher tg
 			return nil
 		})
 		if tgerr.Is(err, "SESSION_PASSWORD_NEEDED") {
-			authorization, err = f.passwordLoop(ctx, client)
+			authorization, err = f.passwordLoop(ctx, client.Auth().Password)
 		}
 		if err != nil {
 			return err
@@ -131,23 +132,26 @@ func (f *QRFlow) run(ctx context.Context, client *telegram.Client, dispatcher tg
 }
 
 // passwordLoop services the 2FA branch: surface PasswordNeeded, then try
-// submitted passwords until one works, the attempt budget is exhausted, or
-// the flow is cancelled.
-func (f *QRFlow) passwordLoop(ctx context.Context, client *telegram.Client) (*tg.AuthAuthorization, error) {
+// submitted passwords with check until one works, the attempt budget is
+// exhausted, or the flow is cancelled. Only the loop reopens PasswordNeeded,
+// and only while an attempt remains: once the loop gives up the state stays
+// PasswordVerifying until the flow fails, so no password is accepted that
+// nothing would read.
+func (f *QRFlow) passwordLoop(ctx context.Context, check func(context.Context, string) (*tg.AuthAuthorization, error)) (*tg.AuthAuthorization, error) {
 	for range qrPasswordAttempts {
 		f.setState(QRPasswordNeeded)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case pw := <-f.passwordCh:
-			authorization, err := client.Auth().Password(ctx, pw)
+			authorization, err := check(ctx, pw)
 			if err == nil {
 				return authorization, nil
 			}
 			if !tgerr.Is(err, "PASSWORD_HASH_INVALID") {
 				return nil, fmt.Errorf("2FA password check: %w", err)
 			}
-			f.recordPasswordError(err)
+			f.rejectPassword()
 		}
 	}
 	return nil, errors.New("too many wrong 2FA password attempts")
@@ -184,26 +188,21 @@ func (f *QRFlow) SessionData() ([]byte, bool) {
 
 // SubmitPassword hands a 2FA password to the flow. Accepted only in
 // QRPasswordNeeded; returns false otherwise (including when a previous
-// submission is still being verified).
+// submission is still being verified). The send never blocks: passwordLoop
+// opens QRPasswordNeeded only with passwordCh drained, and leaving that
+// state here admits a single password per opening.
 func (f *QRFlow) SubmitPassword(pw string) bool {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.state != QRPasswordNeeded {
-		f.mu.Unlock()
 		return false
 	}
 	f.state = QRPasswordVerifying
-	f.mu.Unlock()
-	select {
-	case f.passwordCh <- pw:
-		return true
-	default:
-		f.setState(QRPasswordNeeded)
-		return false
-	}
+	f.passwordCh <- pw
+	return true
 }
 
-// Err reports the terminal failure (QRFailed), or the most recent rejected
-// 2FA attempt while the state is QRPasswordNeeded or QRPasswordVerifying.
+// Err reports the terminal failure; nil unless the state is QRFailed.
 func (f *QRFlow) Err() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -230,13 +229,19 @@ func (f *QRFlow) setState(s QRState) {
 	f.state = s
 }
 
-// recordPasswordError keeps the state at QRPasswordVerifying: passwordLoop
-// reopens QRPasswordNeeded only if an attempt remains, so a submission can
-// never land after the last one.
-func (f *QRFlow) recordPasswordError(err error) {
+// Rejections reports how many submitted 2FA passwords Telegram has rejected
+// and how many attempts remain; left counts an attempt under check and is 0
+// only once every attempt has been refused.
+func (f *QRFlow) Rejections() (rejected, left int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.err = err
+	return f.rejected, qrPasswordAttempts - f.rejected
+}
+
+func (f *QRFlow) rejectPassword() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rejected++
 }
 
 func (f *QRFlow) fail(err error) {
@@ -252,5 +257,4 @@ func (f *QRFlow) complete(user QRUser, data []byte) {
 	f.state = QRDone
 	f.user = user
 	f.sessionData = append([]byte(nil), data...)
-	f.err = nil
 }

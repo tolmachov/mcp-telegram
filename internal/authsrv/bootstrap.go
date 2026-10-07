@@ -263,8 +263,13 @@ type pollResponse struct {
 	// QRRev increments whenever the QR token rotates; the page re-fetches
 	// the image when it changes.
 	QRRev int `json:"qr_rev,omitempty"`
-	// Message is a human-readable detail for password/failed/expired.
+	// Message is a human-readable detail for failed/expired, and for password
+	// once a password has been rejected.
 	Message string `json:"message,omitempty"`
+	// Rejected counts the 2FA passwords Telegram has rejected; set with
+	// status password. A rise tells the page a submission was checked and
+	// refused, whatever became of its own request.
+	Rejected int `json:"rejected,omitempty"`
 }
 
 // handleLoginPoll reports the state of a pending login and, exactly once per
@@ -284,9 +289,10 @@ func (a *AuthServer) handleLoginPoll(w http.ResponseWriter, r *http.Request) {
 		_, rev, _ := p.qrState()
 		a.writeJSON(w, http.StatusOK, &pollResponse{Status: "waiting", QRRev: rev})
 	case LoginPasswordNeeded:
-		resp := &pollResponse{Status: "password"}
-		if p.flow.Err() != nil {
-			resp.Message = "Wrong password, try again."
+		rejected, left := p.flow.Rejections()
+		resp := &pollResponse{Status: "password", Rejected: rejected}
+		if rejected > 0 {
+			resp.Message = wrongPasswordMessage(left)
 		}
 		a.writeJSON(w, http.StatusOK, resp)
 	case LoginPasswordChecking:
@@ -295,9 +301,11 @@ func (a *AuthServer) handleLoginPoll(w http.ResponseWriter, r *http.Request) {
 		err := p.flow.Err()
 		a.logger.Warn("telegram login failed", "err", err)
 		a.removePending(p.id)
-		a.writeJSON(w, http.StatusOK, &pollResponse{
-			Status: "failed", Message: "Telegram login failed. Start over from your MCP client.",
-		})
+		msg := "Telegram login failed. Start over from your MCP client."
+		if _, left := p.flow.Rejections(); left == 0 {
+			msg = "Too many wrong passwords. Start over from your MCP client."
+		}
+		a.writeJSON(w, http.StatusOK, &pollResponse{Status: "failed", Message: msg})
 	case LoginDone:
 		if !p.tryConsume() {
 			// Another poll is finalising; report waiting until it finishes.
@@ -324,6 +332,15 @@ func (a *AuthServer) handleLoginPoll(w http.ResponseWriter, r *http.Request) {
 			Status: "failed", Message: "Internal error. Start over from your MCP client.",
 		})
 	}
+}
+
+// wrongPasswordMessage tells the user their password was refused and how
+// many tries they have left.
+func wrongPasswordMessage(left int) string {
+	if left == 1 {
+		return "Wrong password, 1 attempt left."
+	}
+	return fmt.Sprintf("Wrong password, %d attempts left.", left)
 }
 
 // finalizeLogin turns a completed QR login into an authorization code:
@@ -428,11 +445,12 @@ func buildCodeRedirect(redirectURI, code, state string) (string, error) {
 }
 
 // handleLoginPassword feeds the 2FA cloud password into a pending flow. A
-// malformed form is a 400 and an unknown/expired login id is a 404, but a
-// valid submission always gets 204, whether the password was right or the
-// submission was dropped because one is already being checked — the outcome
-// surfaces only in a later poll, keeping this endpoint free of oracle
-// behaviour beyond what the login flow itself reveals.
+// malformed form is a 400 and an unknown/expired login id is a 404. A taken
+// submission gets 204 and one the flow is not awaiting (e.g. another is
+// being checked) gets 409 — that depends only on the flow's state, which the
+// poll already reports. Whether the password was right surfaces only in a
+// later poll, keeping this endpoint free of oracle behaviour beyond what the
+// login flow itself reveals.
 func (a *AuthServer) handleLoginPassword(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxFormBody)
 	if err := r.ParseForm(); err != nil {
@@ -445,7 +463,8 @@ func (a *AuthServer) handleLoginPassword(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !p.flow.SubmitPassword(r.PostForm.Get("password")) {
-		a.logger.Debug("password submission ignored: flow not awaiting password")
+		http.Error(w, "login is not awaiting a password", http.StatusConflict)
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
