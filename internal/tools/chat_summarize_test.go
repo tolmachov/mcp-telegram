@@ -14,9 +14,9 @@ import (
 )
 
 // TestChatSummarizeBuildResult covers the (result, err) → response branching:
-// success, sampling-unsupported, salvaged-partial, and total failure.
+// success, not-configured, salvaged-partial, and total failure.
 func TestChatSummarizeBuildResult(t *testing.T) {
-	summarizer, err := summarize.New(summarize.Config{Provider: summarize.ProviderSampling, BatchTokens: 1})
+	summarizer, err := summarize.New(summarize.Config{Provider: summarize.ProviderOllama, OllamaURL: "http://127.0.0.1:11434", BatchTokens: 1})
 	require.NoError(t, err)
 	h := &ChatSummarizeHandler{summarizer: summarizer}
 	in := SummarizeChatInput{ChatID: 7, Goal: "key points", Period: "week"}
@@ -31,14 +31,14 @@ func TestChatSummarizeBuildResult(t *testing.T) {
 		assert.Equal(t, "the summary", out.Summary)
 		assert.False(t, out.Partial)
 		assert.Empty(t, out.Warning)
-		assert.Equal(t, "sampling", out.Provider)
+		assert.Equal(t, "ollama", out.Provider)
 	})
 
-	t.Run("sampling unsupported surfaces as error", func(t *testing.T) {
-		_, out, err := h.buildResult(in, 500, since, end, summarize.Result{Summary: ""}, summarize.ErrSamplingUnsupported)
+	t.Run("not configured surfaces as error", func(t *testing.T) {
+		_, out, err := h.buildResult(in, 500, since, end, summarize.Result{Summary: ""}, summarize.ErrNotConfigured)
 		require.Nil(t, out)
-		require.ErrorIs(t, err, summarize.ErrSamplingUnsupported)
-		assert.Contains(t, failureText("SummarizeChat", err), "sampling")
+		require.ErrorIs(t, err, summarize.ErrNotConfigured)
+		assert.Contains(t, failureText("SummarizeChat", err), "--summarize-provider")
 	})
 
 	t.Run("late failure with partial text is salvaged", func(t *testing.T) {

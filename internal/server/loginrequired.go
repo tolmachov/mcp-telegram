@@ -121,6 +121,8 @@ func (s *Server) runLoginRequired(ctx context.Context, reason string) error {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "mcp-telegram", Version: s.opts.Version}, &mcp.ServerOptions{
 		Instructions: loginRequiredInstructions(reason),
 		Logger:       s.logger,
+		// Empty rather than nil, as in the full server: no logging capability.
+		Capabilities: &mcp.ServerCapabilities{},
 	})
 	tools.AddTool(srv, &mcp.Tool{
 		Name: loginRequiredTool,
@@ -201,9 +203,7 @@ func (s *Server) fillProbedStatus(ctx context.Context, status *LoginRequiredStat
 		// The user logged in from another terminal while this process was
 		// already up. Loading the Telegram tools means building the assembly
 		// inside a live client.Run scope and swapping it into the running
-		// session; the variants proxy could not forward the resulting change
-		// notifications anyway (see assembly.run), so ask for the reconnect
-		// that rebuilds cleanly.
+		// session, so ask for the reconnect that rebuilds cleanly instead.
 		status.State = StateAuthorizedPendingReconnect
 		status.Account = account
 		status.Detail = "Telegram is authorized now" + accountSuffix(account) + ", but this server process started without it — " + reconnectHint

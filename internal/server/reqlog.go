@@ -16,7 +16,7 @@ import (
 // redacted params for tools/call; the other three identify their target
 // through typed request fields the middleware doesn't read generically).
 // Everything else (tools/list, resources/list, prompts/list, initialize,
-// notifications, variants negotiation) is high-volume lifecycle noise logged
+// notifications) is high-volume lifecycle noise logged
 // at Debug.
 var contentMethods = map[string]struct{}{
 	methodCallTool:        {},

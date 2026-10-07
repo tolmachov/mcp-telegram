@@ -163,10 +163,6 @@ func (h *MediaGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest, 
 	// Total size is unknown until the download completes, so report total=0 (indeterminate).
 	dl := downloader.NewDownloader()
 	var buf bytes.Buffer
-	mcpLog(ctx, req.Session, logLevelInfo, "GetMedia", map[string]any{
-		"media_id":   mediaID,
-		"thumb_size": thumbSize,
-	})
 
 	sendProgress(ctx, req, 0, 0, "Starting media download")
 	// Cap → progress → buffer. The cap aborts the download early if the file

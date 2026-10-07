@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
-	"github.com/modelcontextprotocol/experimental-ext-variants/go/sdk/variants"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/authsrv"
@@ -73,7 +72,7 @@ type Options struct {
 	MediaMaxBytes  int
 	TGRateLimitRPS int
 	PinnedRefresh  time.Duration // 0 → disable pinned-chat background watcher
-	Variant        string        // "" → expose all SEP-2053 variants; else pin one (full|compact|research)
+	Variant        string        // full|compact|research (--variant); "" → full
 	Transport      string        // "stdio", or "http" → streamable HTTP on HTTPAddr
 	HTTPAddr       string        // listen address for Transport == "http" (e.g. ":8080")
 	LogFormat      string        // "json" | "text"; "" → json for http, text for stdio
@@ -136,8 +135,8 @@ func newServer(opts Options) (*Server, error) {
 	if opts.Config == nil {
 		return nil, fmt.Errorf("server.New: Options.Config is required")
 	}
-	if !validVariant(opts.Variant) {
-		return nil, fmt.Errorf("server.New: unknown variant %q; expected one of: %s (or empty for all)", opts.Variant, strings.Join(variantIDs(), ", "))
+	if _, ok := modeForVariant(opts.Variant); !ok {
+		return nil, fmt.Errorf("server.New: unknown variant %q; expected one of: %s", opts.Variant, strings.Join(variantIDs(), ", "))
 	}
 	switch opts.Transport {
 	case TransportStdio:
@@ -172,7 +171,10 @@ func newServer(opts Options) (*Server, error) {
 
 	srv := &Server{logger: logger, opts: opts}
 	srv.summarizer, err = summarize.New(opts.Summarize)
-	if err != nil {
+	switch {
+	case errors.Is(err, summarize.ErrNotConfigured):
+		srv.summarizer = summarize.Unavailable(err)
+	case err != nil:
 		logger.Warn("summarisation is misconfigured; SummarizeChat reports it and every other tool works", "err", err)
 		srv.summarizer = summarize.Unavailable(summarizeUnavailable(opts.Transport, err))
 	}
@@ -289,16 +291,14 @@ func (s *Server) serveAssembly(ctx context.Context, client localClient) error {
 	return nil
 }
 
-// assembly is one complete set of MCP servers built around one Telegram
-// client, plus the pinned-chat watcher mirroring its resource set: either the
-// SEP-2053 variants proxy or a single pinned-variant server. The stdio path
-// builds exactly one; the HTTP auth mode builds one per authenticated user.
-// Callers serve it through run (stdio) or ServeHTTP (http) and never pick the
-// form themselves. The assembly owns its client: Close disconnects it.
+// assembly is the MCP server of the configured variant built around one
+// Telegram client, plus the pinned-chat watcher mirroring its resource set.
+// The stdio path builds exactly one; the HTTP auth mode builds one per
+// authenticated user. Callers serve it through run (stdio) or ServeHTTP
+// (http). The assembly owns its client: Close disconnects it.
 type assembly struct {
-	variants *variants.Server // non-nil when exposing all variants
-	single   *mcp.Server      // non-nil when --variant pins one
-	client   telegramClient
+	server *mcp.Server
+	client telegramClient
 	// handler serves the assembly over streamable HTTP.
 	handler http.Handler
 
@@ -313,33 +313,10 @@ type assembly struct {
 // run serves the assembly on one connection over t until ctx ends or the
 // peer disconnects.
 func (a *assembly) run(ctx context.Context, t mcp.Transport) error {
-	if a.variants == nil {
-		if err := a.single.Run(ctx, t); err != nil {
-			return fmt.Errorf("pinned-variant server: %w", err)
-		}
-		return nil
-	}
-	// The variants proxy cannot forward async resources/list_changed
-	// notifications (they fire from the watcher goroutine on a background
-	// context with no front session to redirect to — a documented library
-	// limitation). Pinned resources are still exposed on every variant and
-	// refreshed by the poller, so clients see the updated set on their next
-	// resources/list; only proactive change-notifications are unavailable.
-	// Pin a single --variant to restore live notifications.
-	a.logger.Info("multi-variant mode: pinned-chat resources are exposed on every variant and refreshed by one poller, but live resources/list_changed notifications are not delivered through the variants proxy; pin a single --variant for live updates")
-	if err := a.variants.Run(ctx, t); err != nil {
-		return fmt.Errorf("variants proxy: %w", err)
+	if err := a.server.Run(ctx, t); err != nil {
+		return fmt.Errorf("running MCP server: %w", err)
 	}
 	return nil
-}
-
-// httpHandler builds the assembly's streamable HTTP handler.
-func (a *assembly) httpHandler() http.Handler {
-	if a.variants == nil {
-		srv := a.single
-		return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, streamableHTTPOptions())
-	}
-	return variants.NewStreamableHTTPHandler(a.variants, streamableHTTPOptions())
 }
 
 // ServeHTTP serves one request of the assembly over streamable HTTP.
@@ -404,6 +381,10 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 	serverOpts := &mcp.ServerOptions{
 		Instructions: happyInstructions,
 		Logger:       logger,
+		// Empty rather than nil: the SDK's default advertises the logging
+		// capability, which this server does not use (MCP deprecated it in
+		// SEP-2577; diagnostics go to the server log).
+		Capabilities: &mcp.ServerCapabilities{},
 		SchemaCache:  toolSchemas,
 		// Suggest chat titles/usernames/ids for prompt arguments and the
 		// chat resource template as the user types.
@@ -416,10 +397,8 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 	// Telegram's FLOOD_WAIT, which the tgclient flood-wait middleware logs.
 	msgProvider := messages.NewProvider(peers, s.opts.TGRateLimitRPS)
 
-	fullHandlers, researchHandlers := s.buildHandlers(api, peers, msgProvider, chatsCache)
-
-	// Resources, chat template, and prompts are read-only and identical across
-	// variants, so register them on every inner server through one closure.
+	// Resources, chat template, and prompts are read-only and identical in
+	// every variant.
 	wire := func(srv *mcp.Server) {
 		resources.RegisterResources(srv, []resources.ResourceHandler{
 			resources.NewMeHandler(api),
@@ -430,30 +409,26 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 		srv.AddReceivingMiddleware(s.clientDownMiddleware(client))
 	}
 
-	built := &assembly{client: client, end: end, logger: logger}
-	// pinnedServers are the inner servers the pinned-chat watcher mirrors its
-	// resource set onto.
-	var pinnedServers []*mcp.Server
-	if s.opts.Variant == "" {
-		built.variants, pinnedServers = buildVariantsServer(impl, serverOpts, fullHandlers, researchHandlers, wire, logger)
-	} else {
-		d, ok := defForVariant(s.opts.Variant)
-		if !ok {
-			// Unreachable: New rejects unknown non-empty variants, and Server is
-			// only constructible through New. Fail loudly rather than silently
-			// falling back to the zero-value mode if that invariant is ever broken.
-			return nil, fmt.Errorf("buildAssembly: variant %q not found in table (should have been rejected by New)", s.opts.Variant)
-		}
-		built.single = newInnerForMode(impl, serverOpts, fullHandlers, researchHandlers, d.mode, wire, logger)
-		pinnedServers = []*mcp.Server{built.single}
+	mode, ok := modeForVariant(s.opts.Variant)
+	if !ok {
+		// Unreachable: New rejects unknown variants, and Server is only
+		// constructible through New.
+		return nil, fmt.Errorf("buildAssembly: variant %q not found in table (should have been rejected by New)", s.opts.Variant)
 	}
-	built.handler = built.httpHandler()
+	srv := newModeServer(impl, serverOpts, s.buildHandlers(mode, api, peers, msgProvider, chatsCache), mode, wire, logger)
+	built := &assembly{
+		server:  srv,
+		client:  client,
+		handler: mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, streamableHTTPOptions()),
+		end:     end,
+		logger:  logger,
+	}
 
 	// The SDK has no BeforeListResources hook, so the pinned-chat set is
 	// refreshed by a periodic poller (default 30s, --pinned-refresh-seconds).
 	// list_changed only fires when the set actually changes, so the ticker is
 	// safe to run on a short interval.
-	pinnedProvider := resources.NewPinnedChatsProvider(api, msgProvider, logger, pinnedServers...)
+	pinnedProvider := resources.NewPinnedChatsProvider(api, msgProvider, logger, srv)
 	built.watchDone = pinnedProvider.WatchInBackground(life, s.opts.PinnedRefresh)
 	// A client that stops for good ends the assembly's lifetime too, with
 	// why: there is nothing left for the watcher to poll or a load to call.
@@ -556,8 +531,8 @@ var errAssemblyClosed = tgclient.Stopped(errors.New("the server closed its Teleg
 const pinnedWatchExitTimeout = 5 * time.Second
 
 // Close ends the assembly's lifetime — stopping the pinned-chat watcher and
-// failing any shared chat-list load or peer resolve still running — closes
-// the variants proxy and, last, disconnects the Telegram client, so nothing
+// failing any shared chat-list load or peer resolve still running — and, last,
+// disconnects the Telegram client, so nothing
 // of the assembly still runs on it. It waits for the watcher to exit so its
 // goroutine cannot race with server teardown while mid-way through
 // AddResource/RemoveResources. The cancel stops it deterministically; the
@@ -572,25 +547,17 @@ func (a *assembly) Close() error {
 	case <-time.After(pinnedWatchExitTimeout):
 		a.logger.Error("pinned-chat watcher did not exit in time; abandoning", "timeout", pinnedWatchExitTimeout)
 	}
-	var err error
-	if a.variants != nil {
-		if closeErr := a.variants.Close(); closeErr != nil {
-			err = fmt.Errorf("closing variants proxy: %w", closeErr)
-		}
-	}
 	a.client.Close()
-	return err
+	return nil
 }
 
-// buildHandlers constructs every tool handler once and returns the full set and
-// the read-only research subset. The same handler instances are shared: they
-// carry no per-server state, so registering one on several inner servers is
-// safe. research holds tools that do not mutate Telegram or the local
-// filesystem; mutating ones (send, edit, delete, forward, react, mark-as-read,
-// join/leave, mute, and the four folder edits) are left out of it.
-// BackupMessages is local-stdio-only and is exposed solely by the full variant.
-func (s *Server) buildHandlers(api *tg.Client, peers *tgclient.Resolver, msgProvider *messages.Provider, chatsCache *tgdata.ChatsCache) (full, research []tools.Handler) {
-	research = []tools.Handler{
+// buildHandlers constructs the tool handlers mode serves. The research subset
+// holds tools that do not mutate Telegram or the local filesystem; mutating
+// ones (send, edit, delete, forward, react, mark-as-read, join/leave, mute, and
+// the four folder edits) are left out of it. BackupMessages writes to the local
+// filesystem, so the full set offers it only on stdio.
+func (s *Server) buildHandlers(mode serveMode, api *tg.Client, peers *tgclient.Resolver, msgProvider *messages.Provider, chatsCache *tgdata.ChatsCache) []tools.Handler {
+	research := []tools.Handler{
 		tools.NewMeGetHandler(api),
 		tools.NewChatsGetHandler(chatsCache),
 		tools.NewChatsSearchHandler(peers, chatsCache),
@@ -607,6 +574,9 @@ func (s *Server) buildHandlers(api *tg.Client, peers *tgclient.Resolver, msgProv
 		tools.NewMediaGetHandler(api, s.opts.MediaMaxBytes),
 		tools.NewGetFoldersHandler(api),
 	}
+	if mode.researchOnly() {
+		return research
+	}
 	mutating := []tools.Handler{
 		tools.NewMessageSendHandler(peers),
 		tools.NewMessageReadHandler(peers),
@@ -622,17 +592,12 @@ func (s *Server) buildHandlers(api *tg.Client, peers *tgclient.Resolver, msgProv
 		tools.NewAddChatsToFolderHandler(peers),
 		tools.NewRemoveChatsFromFolderHandler(peers),
 	}
-	full = make([]tools.Handler, 0, len(research)+len(mutating)+1)
+	full := make([]tools.Handler, 0, len(research)+len(mutating)+1)
 	full = append(full, research...)
-	// BackupMessages writes to the local filesystem, so it is offered only on
-	// stdio, and not when the research variant is pinned: that variant never
-	// serves the full set, so it must not resolve (and create) the default
-	// backup directory either.
-	if s.opts.Transport != TransportHTTP && s.opts.Variant != variantResearch {
+	if s.opts.Transport != TransportHTTP {
 		full = append(full, tools.NewMessageBackupHandler(peers, msgProvider, s.backupAllowedPaths()))
 	}
-	full = append(full, mutating...)
-	return full, research
+	return append(full, mutating...)
 }
 
 // backupAllowedPaths returns --allowed-paths, or the OS backup directory when

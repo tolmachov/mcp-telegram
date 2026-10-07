@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 	"unicode/utf16"
 
@@ -225,7 +226,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 			return nil, res, nil
 		}
 		// Fell through to immediate send.
-		fillSent(ctx, req, res, "sent_immediate", updates)
+		fillSent(ctx, res, "sent_immediate", updates)
 		res.ScheduleAt = scheduleAtOut
 		if res.Note == "" {
 			res.Note = "schedule_at was under ~10 seconds away — Telegram delivered the message immediately instead of queueing it."
@@ -234,7 +235,7 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 	}
 
 	// Regular immediate send (mode=send or default).
-	fillSent(ctx, req, res, "sent", updates)
+	fillSent(ctx, res, "sent", updates)
 	return nil, res, nil
 }
 
@@ -242,16 +243,13 @@ func (h *MessageSendHandler) handle(ctx context.Context, req *mcp.CallToolReques
 // send delivered. When Telegram answered with an update the extractor cannot
 // read, the message was delivered but its ID is unknown: the note says so and
 // the operator hears of it.
-func fillSent(ctx context.Context, req *mcp.CallToolRequest, res *SendMessageResult, status string, updates tg.UpdatesClass) {
+func fillSent(ctx context.Context, res *SendMessageResult, status string, updates tg.UpdatesClass) {
 	res.Status = status
 	msgID, date := extractSentMessageID(updates)
 	if msgID > 0 {
 		res.MessageID = presentation.FormatRegularRef(msgID)
 	} else {
-		mcpLog(ctx, req.Session, logLevelWarning, "SendMessage", map[string]any{
-			"action": "message_id_extraction_failed",
-			"note":   "Telegram returned an unrecognised update type; message_id in response is unreliable",
-		})
+		slog.WarnContext(ctx, "SendMessage: Telegram returned an unrecognised update type; message_id is unknown")
 		res.Note = "message_id unavailable: Telegram returned an unrecognised update type. The message was delivered but cannot be referenced for edits or deletes until fetched via GetMessages."
 	}
 	if date > 0 {

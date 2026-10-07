@@ -514,15 +514,11 @@ func TestSummarizeChat(t *testing.T) {
 		t.Skip("TEST_CHAT_ID not set")
 	}
 
-	// SummarizeChat defaults to provider=sampling, which requires the MCP
-	// client to advertise the `sampling` capability and handle inbound
-	// sampling/createMessage requests. This integration test uses a vanilla
-	// mark3labs client that does NOT advertise sampling, so we must switch to
-	// a direct LLM provider for the test. Anthropic is the cheapest/most
-	// reliable; skip if no API key is configured.
+	// Summarisation is off until a provider is named. Anthropic is the
+	// cheapest/most reliable; skip if no API key is configured.
 	apiKey := os.Getenv(flags.EnvAnthropicAPIKey)
 	if apiKey == "" {
-		t.Skipf("%s not set; cannot test SummarizeChat without a sampling-capable client", flags.EnvAnthropicAPIKey)
+		t.Skipf("%s not set; cannot test SummarizeChat without a provider", flags.EnvAnthropicAPIKey)
 	}
 	t.Setenv("MCP_SUMMARIZE_PROVIDER", "anthropic")
 
@@ -547,20 +543,16 @@ func TestSummarizeChat(t *testing.T) {
 	logToolResult(t, result)
 }
 
-// TestSummarizeChatSamplingFallback verifies that SummarizeChat returns a
-// helpful error (not a transport-level failure) when the client lacks the
-// sampling capability and no alternative provider is configured. This is the
-// regression test for the capability check added in
-// internal/summarize/sampling.go.
-func TestSummarizeChatSamplingFallback(t *testing.T) {
+// TestSummarizeChatNotConfigured verifies that SummarizeChat returns a
+// helpful error (not a transport-level failure) when no summarisation
+// provider is configured.
+func TestSummarizeChatNotConfigured(t *testing.T) {
 	chatID := os.Getenv("TEST_CHAT_ID")
 	if chatID == "" {
 		t.Skip("TEST_CHAT_ID not set")
 	}
 
-	// Force sampling provider; the test client doesn't advertise sampling, so
-	// the server must surface ErrSamplingUnsupported as a tool result error.
-	t.Setenv("MCP_SUMMARIZE_PROVIDER", "sampling")
+	t.Setenv("MCP_SUMMARIZE_PROVIDER", "")
 
 	c, ctx, cleanup := setupClient(t)
 	defer cleanup()
@@ -575,7 +567,7 @@ func TestSummarizeChatSamplingFallback(t *testing.T) {
 
 	result, err := c.CallTool(ctx, callRequest)
 	require.NoError(t, err, "CallTool transport failed (expected a tool-level error, not transport)")
-	require.True(t, result.IsError, "expected IsError=true when client lacks sampling capability, got success")
+	require.True(t, result.IsError, "expected IsError=true with no provider configured, got success")
 
 	var msg string
 	for _, content := range result.Content {
@@ -584,9 +576,9 @@ func TestSummarizeChatSamplingFallback(t *testing.T) {
 			break
 		}
 	}
-	assert.Contains(t, msg, "sampling")
+	assert.Contains(t, msg, "summarisation is not configured")
 	assert.Contains(t, msg, "summarize-provider")
-	t.Logf("Got expected fallback error: %s", msg)
+	t.Logf("Got expected not-configured error: %s", msg)
 }
 
 func logToolResult(t *testing.T, result *mcp.CallToolResult) {

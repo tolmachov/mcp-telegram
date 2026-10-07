@@ -139,7 +139,7 @@ the tools below, the server is up but Telegram is not authorized — see
 | `BackupMessages` | Local stdio only: atomically export messages under a server-configured path; a fetch that stops early still saves what it got, marked `partial` with a `warning` giving the `to_date` that fetches the rest. Never exposed over HTTP |
 | `ResolveUsername` | Resolve @username to user/chat info |
 | `SetChatMute` | Mute or unmute chat notifications (`muted` bool + optional `duration_seconds`) |
-| `SummarizeChat` | AI-powered summarisation via sampling / Gemini / Ollama / Anthropic; processes at most `max_messages` (default 2000, hard maximum 10000) and reports truncation/partial status |
+| `SummarizeChat` | AI-powered summarisation via Gemini / Ollama / Anthropic; processes at most `max_messages` (default 2000, hard maximum 10000) and reports truncation/partial status |
 | `GetMedia` | Download photo media from a media resource URI; returns MCP image content |
 | `GetFolders` | List chat folders (dialog filters) with their ID, title, flags, and included/excluded/pinned chat IDs |
 | `CreateFolder` | Create a folder from a title plus chats and/or category flags (e.g. `include_groups`) |
@@ -175,34 +175,18 @@ and why.
 
 ## Server Variants
 
-The server implements [experimental server variants](https://github.com/modelcontextprotocol/experimental-ext-variants)
-(SEP-2053): one server that offers several selectable capability sets. A client
-sends hints during `initialize`, the server ranks the variants, and the client
-picks one. Clients that don't understand the extension transparently get the
-`full` variant, so nothing changes for them.
+`--variant` (or `MCP_VARIANT`) picks which tools the server exposes and how it
+describes them:
 
-| Variant | Status | Tools | For |
-|---------|--------|-------|-----|
-| `full` | stable (default) | all available tools (29 over stdio, 28 over HTTP), full descriptions | interactive research + administration with a human |
-| `compact` | stable | all available tools (29 over stdio, 28 over HTTP), descriptions trimmed to the first sentence (~50% smaller) | autonomous agents on a tight context budget |
-| `research` | experimental | Telegram read-only tools, descriptions trimmed like `compact` (search, fetch, summarise — no filesystem backup or Telegram mutations) | read-heavy context-loading agents; summarisation may send chat data to the configured external LLM |
-
-Pin a single variant with `--variant` (or `MCP_VARIANT`) for clients that
-can't negotiate — e.g. `--variant research` exposes only the read-only subset:
+| Variant | Tools | For |
+|---------|-------|-----|
+| `full` (default) | all available tools (29 over stdio, 28 over HTTP), full descriptions | interactive research + administration with a human |
+| `compact` | all available tools (29 over stdio, 28 over HTTP), descriptions trimmed to the first sentence (~50% smaller) | autonomous agents on a tight context budget |
+| `research` | Telegram read-only tools, descriptions trimmed like `compact` (search, fetch, summarise — no filesystem backup or Telegram mutations) | read-heavy context-loading agents; summarisation may send chat data to the configured external LLM |
 
 ```bash
 mcp-telegram run --variant research
 ```
-
-Leave it unset to expose all three and let the client choose.
-
-> **Note on pinned-chat resources.** In multi-variant mode (no `--variant`),
-> pinned-chat resources are exposed on every variant and kept fresh by a single
-> poller, but proactive `resources/list_changed` notifications are **not**
-> delivered — the variants proxy can't forward the background watcher's
-> notifications (an upstream library limitation). Clients pick up pin changes on
-> their next `resources/list`. Pin a single `--variant` to restore live
-> notifications.
 
 ## Available Resources
 
@@ -213,7 +197,7 @@ Leave it unset to expose all three and let the client choose.
 | `telegram://chats/{chat_id}/info` | Detailed info for any chat ID via resource template |
 | `telegram://chats/{id}/messages` | Last 100 messages from a pinned chat (dynamic resource, only for currently pinned chats) |
 
-Pinned chat resources are created dynamically for each pinned chat and refreshed in the background; clients receive `resources/list_changed` when the set changes (except in multi-variant mode — see the note under [Server Variants](#server-variants)).
+Pinned chat resources are created dynamically for each pinned chat and refreshed in the background; clients receive `resources/list_changed` when the set changes.
 
 ## Available Prompts
 
@@ -259,9 +243,9 @@ These examples apply only to local stdio `full`/`compact` mode; HTTP and the
 
 ## Chat Summarisation
 
-The `SummarizeChat` tool supports multiple LLM providers:
+The `SummarizeChat` tool supports multiple LLM providers. Summarisation is off
+until one is set; until then `SummarizeChat` answers with how to turn it on.
 
-- **sampling** (experimental): Uses the MCP client's LLM via [MCP Sampling](https://modelcontextprotocol.io/docs/concepts/sampling). Only works with clients that support sampling: [VS Code](https://code.visualstudio.com/docs/copilot/chat/mcp-servers), [fast-agent](https://github.com/evalstate/fast-agent), [Continue](https://www.continue.dev). Does NOT work with Claude Desktop or Claude Code.
 - **ollama**: Local LLM via [Ollama](https://ollama.ai) - no API key required
 - **gemini**: Google Gemini API
 - **anthropic**: Anthropic Claude API
@@ -275,8 +259,7 @@ applicable.
 Chat messages are serialised as untrusted JSON data, separate from the system
 instructions, goal, and previous rolling summary. The server explicitly marks
 Telegram content as untrusted and tells the provider not to execute instructions
-found inside it. Sampling sends selected text to the MCP client's LLM; Gemini
-and Anthropic send it to their APIs; Ollama sends it to the configured URL,
+found inside it. Gemini and Anthropic send selected text to their APIs; Ollama sends it to the configured URL,
 which may itself be remote. Providers may log, retain, or bill for content under
 their own policies. Retryable `429`/`5xx` responses are attempted at most three
 times with backoff and `Retry-After`, without exceeding the MCP request
@@ -285,7 +268,7 @@ deadline.
 Configure via environment variables:
 
 ```bash
-MCP_SUMMARIZE_PROVIDER=ollama  # or: sampling, gemini, anthropic
+MCP_SUMMARIZE_PROVIDER=ollama  # or: gemini, anthropic
 MCP_SUMMARIZE_MODEL=           # provider-specific model name
 ```
 
@@ -337,7 +320,7 @@ resolve as CLI flags → process environment → defaults. The binary never read
 | `MCP_TELEGRAM_API_ID` | Telegram API ID | Required for login/HTTP; missing stdio credentials expose login-required mode |
 | `MCP_TELEGRAM_API_HASH` | Telegram API Hash | Required for login/HTTP; missing stdio credentials expose login-required mode |
 | `MCP_TELEGRAM_ALLOWED_PATHS` | Server-owned backup roots; client MCP roots are ignored | OS state backup dir in stdio `full`/`compact`; unused in HTTP/research |
-| `MCP_SUMMARIZE_PROVIDER` | LLM provider for summarisation | `sampling` |
+| `MCP_SUMMARIZE_PROVIDER` | LLM provider for summarisation: `ollama`, `gemini` or `anthropic` | Unset: summarisation off |
 | `MCP_SUMMARIZE_MODEL` | Model name | Provider default |
 | `MCP_SUMMARIZE_BATCH_TOKENS` | Tokens per summarisation batch (must be positive) | `8000` |
 | `MCP_SUMMARIZE_OLLAMA_URL` | Ollama API URL | `http://localhost:11434` |
@@ -347,7 +330,7 @@ resolve as CLI flags → process environment → defaults. The binary never read
 | `MCP_TELEGRAM_RATE_LIMIT_RPS` | Telegram history RPS ceiling (must be positive) | `1` |
 | `MCP_TELEGRAM_PINNED_REFRESH_SECONDS` | Pinned resource polling interval; `0` disables the watcher | `30` |
 | `MCP_TELEGRAM_FLOOD_WAIT_MAX_SECONDS` | Maximum seconds one tool call waits in all on `FLOOD_WAIT`s before failing with a retry-after error (must be positive) | `60` |
-| `MCP_VARIANT` | Pin `full`, `compact`, or `research`; empty enables negotiation | empty |
+| `MCP_VARIANT` | Server variant: `full`, `compact`, or `research` | `full` |
 | `MCP_TRANSPORT` | MCP transport: `stdio` or `http` (streamable HTTP) | `stdio` |
 | `MCP_HTTP_ADDR` | Explicit listen address for HTTP; when unset on Cloud Run, the server binds to injected `:$PORT` | `127.0.0.1:8080` |
 | `MCP_LOG_FORMAT` | `text` or GCP-compatible structured `json` | `text` for stdio, `json` for HTTP |
@@ -601,7 +584,7 @@ Telegram credentials are unset.
 CI runs ordinary tests on Linux and macOS, the race detector, package coverage
 gates, vet, golangci-lint, govulncheck, a Windows cross-build, and a pinned
 Docker build followed by a HIGH/CRITICAL vulnerability scan. The release image
-uses a checksummed Go 1.26.8 toolchain and Alpine 3.22 with security updates.
+uses a checksummed Go 1.27.1 toolchain and Alpine 3.24 with security updates.
 
 ## License
 

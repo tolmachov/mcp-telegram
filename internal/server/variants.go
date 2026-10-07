@@ -8,14 +8,13 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/modelcontextprotocol/experimental-ext-variants/go/sdk/variants"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/tools"
 )
 
-// Server variant IDs (SEP-2053). full is the default/highest-priority variant,
-// so clients that don't understand variants transparently get it.
+// Server variant IDs, chosen at startup with --variant. full is the default:
+// the empty ID names it.
 const (
 	variantFull     = "full"
 	variantCompact  = "compact"
@@ -43,87 +42,50 @@ const (
 )
 
 // compacts reports whether this mode trims tool descriptions to the first
-// sentence (installs compactToolsMiddleware on the inner server).
+// sentence (installs compactToolsMiddleware on the server).
 func (m serveMode) compacts() bool { return m == modeCompact || m == modeResearch }
 
 // researchOnly reports whether this mode serves the read-only research subset
 // instead of the full tool set.
 func (m serveMode) researchOnly() bool { return m == modeResearch }
 
-// variantDef is one row of the variant table: its SEP-2053 metadata plus the
-// serveMode that says which tool set and description style it exposes.
+// variantDef is one row of the variant table: a variant ID and the serveMode
+// it names.
 type variantDef struct {
-	meta variants.ServerVariant
+	id   string
 	mode serveMode
 }
 
-// variantDefs is the single source of truth for the variant set, listed in
-// priority order (index == priority passed to WithVariant). validVariant, the
-// New error message, buildVariantsServer, and the --variant override path all
-// derive from this table, so adding a variant means editing one place. full is
-// first (priority 0), so clients that don't negotiate a variant receive it and
-// behave exactly as before this feature existed.
+// variantDefs is the single source of truth for the variant set. New's
+// validation, its error message and buildAssembly all derive from it, so adding
+// a variant means editing one place.
 var variantDefs = []variantDef{
-	{
-		meta: variants.ServerVariant{
-			ID:          variantFull,
-			Description: "All Telegram tools with complete descriptions. Best for interactive research and administration with a human in the loop.",
-			Hints:       map[string]string{variants.HintUseCase: "human-assistant", variants.HintContextSize: "standard"},
-			Status:      variants.Stable,
-		},
-		mode: modeFull,
-	},
-	{
-		meta: variants.ServerVariant{
-			ID:          variantCompact,
-			Description: "All Telegram tools with concise (~50% shorter) descriptions. Best for autonomous agents and tight context budgets.",
-			Hints:       map[string]string{variants.HintUseCase: "autonomous-agent", variants.HintContextSize: "compact"},
-			Status:      variants.Stable,
-		},
-		mode: modeCompact,
-	},
-	{
-		meta: variants.ServerVariant{
-			ID:          variantResearch,
-			Description: "Telegram research subset with no Telegram or filesystem mutations. Summarisation may send selected message text to the configured external LLM provider.",
-			Hints:       map[string]string{variants.HintUseCase: "autonomous-agent", variants.HintContextSize: "compact"},
-			Status:      variants.Experimental,
-		},
-		mode: modeResearch,
-	},
+	{id: variantFull, mode: modeFull},
+	{id: variantCompact, mode: modeCompact},
+	{id: variantResearch, mode: modeResearch},
 }
 
-// defForVariant returns the table row for a variant ID. ok is false for the
-// empty string ("expose all") and for unknown IDs. The returned value shares its
-// meta.Hints map with the package-global variantDefs row, so callers must treat
-// it as read-only — mutating Hints would corrupt the table for every other
-// lookup. No caller mutates it today.
-func defForVariant(id string) (variantDef, bool) {
+// modeForVariant returns the serveMode a variant ID names; ok is false for an
+// unknown ID. The empty ID names full.
+func modeForVariant(id string) (mode serveMode, ok bool) {
+	if id == "" {
+		id = variantFull
+	}
 	for _, d := range variantDefs {
-		if d.meta.ID == id {
-			return d, true
+		if d.id == id {
+			return d.mode, true
 		}
 	}
-	return variantDef{}, false
+	return 0, false
 }
 
-// variantIDs returns the known variant IDs in priority order, for error text.
+// variantIDs returns the known variant IDs, for error text.
 func variantIDs() []string {
 	ids := make([]string, len(variantDefs))
 	for i, d := range variantDefs {
-		ids[i] = d.meta.ID
+		ids[i] = d.id
 	}
 	return ids
-}
-
-// validVariant reports whether id names a known variant. The empty string is
-// valid: it means "expose all variants" (no --variant override).
-func validVariant(id string) bool {
-	if id == "" {
-		return true
-	}
-	_, ok := defForVariant(id)
-	return ok
 }
 
 // compactDesc returns the first sentence of a tool description. The compact and
@@ -162,12 +124,8 @@ func compactDesc(full string) string {
 // in tools/list responses, leaving every other method untouched. It copies the
 // result slice and each Tool before mutating, because the SDK's tools/list
 // handler returns pointers straight to *this* server's stored *mcp.Tool values:
-// mutating them in place would permanently shrink this server's own live
-// registry and race concurrent tools/list calls. Each variant is a separate
-// mcp.Server with its own Tool structs (every handler's Register builds a fresh
-// *mcp.Tool per server), so the compact/research middleware never sees — and so
-// cannot corrupt — the full variant's tools; the copy guards this server's own
-// registry, not any cross-variant shared state.
+// mutating them in place would permanently shrink the server's live registry
+// and race concurrent tools/list calls.
 // If the result is ever not a *mcp.ListToolsResult (a future SDK shape change),
 // it logs at Error and passes the response through uncompacted rather than
 // silently doing nothing: this condition nullifies the compact/research
@@ -203,47 +161,17 @@ func compactToolsMiddleware(logger *slog.Logger) mcp.Middleware {
 	}
 }
 
-// newInner builds one inner mcp.Server: it registers the given tool handlers,
-// runs wire (resources/template/prompts), installs the request-logging
-// middleware, and — when compact is true — the description-shortening one.
-func newInner(impl *mcp.Implementation, opts *mcp.ServerOptions, handlers []tools.Handler, wire func(*mcp.Server), compact bool, logger *slog.Logger) *mcp.Server {
+// newModeServer builds the MCP server for mode: it registers handlers (the
+// set buildHandlers made for mode), runs wire (resources/template/prompts),
+// installs the request-logging middleware and, when the mode compacts, the
+// description-shortening one.
+func newModeServer(impl *mcp.Implementation, opts *mcp.ServerOptions, handlers []tools.Handler, mode serveMode, wire func(*mcp.Server), logger *slog.Logger) *mcp.Server {
 	s := mcp.NewServer(impl, opts)
 	tools.RegisterTools(s, handlers)
 	wire(s)
 	s.AddReceivingMiddleware(requestLogMiddleware(logger))
-	if compact {
+	if mode.compacts() {
 		s.AddReceivingMiddleware(compactToolsMiddleware(logger))
 	}
 	return s
-}
-
-// newInnerForMode builds one inner server for a serveMode, deriving both the
-// tool set (full vs the read-only research subset) and description compaction
-// from that single value. Keeping the (handlers, compact) derivation here —
-// rather than duplicated at each call site — is what makes the "research ⇒
-// compact, research ⇒ read-only subset" invariant hold by construction: a
-// caller cannot pair research handlers with full-length descriptions, because
-// it never chooses the two independently.
-func newInnerForMode(impl *mcp.Implementation, opts *mcp.ServerOptions, full, research []tools.Handler, mode serveMode, wire func(*mcp.Server), logger *slog.Logger) *mcp.Server {
-	handlers := full
-	if mode.researchOnly() {
-		handlers = research
-	}
-	return newInner(impl, opts, handlers, wire, mode.compacts(), logger)
-}
-
-// buildVariantsServer wires every variant in variantDefs over shared Telegram
-// deps and returns the variant-aware server plus the inner servers in priority
-// order. The caller registers pinned-chat resources on all of them (so every
-// variant can list/read them) while driving a single poller — running one poll
-// per variant would multiply Telegram polling and risk FLOOD_WAIT.
-func buildVariantsServer(impl *mcp.Implementation, opts *mcp.ServerOptions, full, research []tools.Handler, wire func(*mcp.Server), logger *slog.Logger) (*variants.Server, []*mcp.Server) {
-	vs := variants.NewServer(impl)
-	inners := make([]*mcp.Server, len(variantDefs))
-	for i, d := range variantDefs {
-		srv := newInnerForMode(impl, opts, full, research, d.mode, wire, logger)
-		inners[i] = srv
-		vs.WithVariant(d.meta, srv, i)
-	}
-	return vs, inners
 }

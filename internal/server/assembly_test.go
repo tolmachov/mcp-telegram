@@ -103,11 +103,7 @@ func TestBuildAssemblyForVariantModesWithoutTelegramConnection(t *testing.T) {
 			client := newFakeClient()
 			assembly, err := srv.buildAssembly(t.Context(), client, slog.New(slog.DiscardHandler))
 			require.NoError(t, err)
-			if variant == "" {
-				require.NotNil(t, assembly.variants)
-			} else {
-				require.NotNil(t, assembly.single)
-			}
+			require.NotNil(t, assembly.server)
 			require.NoError(t, assembly.Close())
 			select {
 			case <-assembly.watchDone:
@@ -154,26 +150,12 @@ func TestClientStopEndsAssemblyLifetime(t *testing.T) {
 	assert.False(t, client.isClosed(), "a client stopping on its own is not closed by the assembly until Close")
 }
 
-func TestServeAssemblyPinnedVariantExitsOnStdinEOF(t *testing.T) {
+func TestServeAssemblyExitsOnStdinEOF(t *testing.T) {
 	srv, err := New(Options{
 		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
 		Summarize: testSummarize,
 		Version:   "test",
 		Variant:   variantResearch,
-		Stdin:     strings.NewReader(""),
-		Stdout:    io.Discard,
-		ErrOut:    io.Discard,
-		Transport: TransportStdio,
-	})
-	require.NoError(t, err)
-	require.NoError(t, srv.serveAssembly(t.Context(), newFakeClient()))
-}
-
-func TestServeAssemblyAllVariantsExitsOnStdinEOF(t *testing.T) {
-	srv, err := New(Options{
-		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
-		Summarize: testSummarize,
-		Version:   "test",
 		Stdin:     strings.NewReader(""),
 		Stdout:    io.Discard,
 		ErrOut:    io.Discard,

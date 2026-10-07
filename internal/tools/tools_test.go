@@ -147,22 +147,6 @@ func TestPartialOutcome(t *testing.T) {
 // our sendProgress wrapper is implicit via the per-tool handler tests once
 // in-memory transport-based integration tests are added.
 
-// TestMcpLogSlogFallback verifies that mcpLog handles nil sessions by
-// falling back to slog for error and warning levels, and stays silent for
-// lower levels. This test verifies the function doesn't panic and behaves correctly.
-func TestMcpLogSlogFallback(t *testing.T) {
-	ctx := context.Background()
-
-	// Test that nil session + error doesn't panic and logs via slog
-	mcpLog(ctx, nil, logLevelError, "test-logger", map[string]any{"k": "v"})
-
-	// Test that nil session + warning doesn't panic and logs via slog
-	mcpLog(ctx, nil, logLevelWarning, "test-warn", map[string]any{"k": "v"})
-
-	// Test that nil session + info doesn't panic (lower level, no output expected)
-	mcpLog(ctx, nil, logLevelInfo, "test-info", map[string]any{"k": "v"})
-}
-
 func TestClampWindow(t *testing.T) {
 	tests := []struct {
 		name string

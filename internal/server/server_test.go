@@ -521,6 +521,24 @@ func TestSummarizeMisconfigurationDisablesOnlySummarizeChat(t *testing.T) {
 	assert.ErrorContains(t, summarizeUnavailable(TransportHTTP, errors.New("bad")), "restart the server")
 }
 
+// TestUnconfiguredSummarisationIsQuiet pins that no provider named is the
+// expected default, not a misconfiguration: SummarizeChat says how to turn it
+// on and startup logs no warning.
+func TestUnconfiguredSummarisationIsQuiet(t *testing.T) {
+	var logs bytes.Buffer
+	srv, err := newServer(Options{
+		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
+		Summarize: summarize.Config{BatchTokens: 1},
+		Version:   "test",
+		ErrOut:    &logs,
+		Transport: TransportStdio,
+	})
+	require.NoError(t, err)
+	_, err = srv.summarizer.Summarize(t.Context(), nil, 1, "recap", time.Time{}, 10, nil)
+	require.ErrorIs(t, err, summarize.ErrNotConfigured)
+	assert.NotContains(t, logs.String(), "summarisation")
+}
+
 // TestRunCancelledDuringStartupReturnsQuietly pins that a host shutting the
 // server down while the Telegram client is still starting is not a failure:
 // Run returns nil without an Error record and without detouring through

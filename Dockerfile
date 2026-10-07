@@ -1,4 +1,4 @@
-FROM golang:1.26-alpine3.22@sha256:727cfc3c40be55cd1bc9a4a059406b28a059857e3be752aa9d09531e12c20c56 AS builder
+FROM golang:1.27-alpine3.24@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS builder
 
 # The Docker Official Image can lag Go security patch releases. Install the
 # checksummed upstream toolchain explicitly so the final binary's stdlib is not
@@ -9,11 +9,11 @@ FROM golang:1.26-alpine3.22@sha256:727cfc3c40be55cd1bc9a4a059406b28a059857e3be75
 # the architecture the builder image itself reports. Do not make this RUN
 # depend on TARGETARCH alone: an empty value fails the build outright.
 ARG TARGETARCH
-ARG GO_PATCH_VERSION=1.26.8
+ARG GO_PATCH_VERSION=1.27.1
 RUN GOARCH_="${TARGETARCH:-$(go env GOARCH)}" \
 	&& case "$GOARCH_" in \
-		amd64) GO_SHA256=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b ;; \
-		arm64) GO_SHA256=211ffced9dcb9633a55eac6364816ec0ddd951389a740e88fa8b3337971bdda0 ;; \
+		amd64) GO_SHA256=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445 ;; \
+		arm64) GO_SHA256=3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec ;; \
 		*) echo "unsupported architecture: $GOARCH_" >&2; exit 1 ;; \
 	esac \
 	&& wget -q "https://go.dev/dl/go${GO_PATCH_VERSION}.linux-${GOARCH_}.tar.gz" -O /tmp/go.tar.gz \
@@ -35,7 +35,7 @@ COPY . .
 ARG VERSION=docker
 RUN go build -ldflags="-s -w -X github.com/tolmachov/mcp-telegram/internal.Version=${VERSION}" -o mcp-telegram .
 
-FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
 # ca-certificates is required for the HTTPS summarize providers (Anthropic,
 # Gemini); without it their TLS handshakes fail inside the container.
