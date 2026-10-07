@@ -118,12 +118,7 @@ type LoginRequiredStatus struct {
 // diagnosis in front of both the user (server/tool list) and the model
 // (instructions), which is the only channel a stdio server actually has.
 func (s *Server) runLoginRequired(ctx context.Context, reason string) error {
-	srv := mcp.NewServer(&mcp.Implementation{Name: "mcp-telegram", Version: s.opts.Version}, &mcp.ServerOptions{
-		Instructions: loginRequiredInstructions(reason),
-		Logger:       s.logger,
-		// Empty rather than nil, as in the full server: no logging capability.
-		Capabilities: &mcp.ServerCapabilities{},
-	})
+	srv := mcp.NewServer(&mcp.Implementation{Name: "mcp-telegram", Version: s.opts.Version}, newServerOptions(loginRequiredInstructions(reason), s.logger))
 	tools.AddTool(srv, &mcp.Tool{
 		Name: loginRequiredTool,
 		Description: "mcp-telegram is NOT connected to Telegram — every Telegram tool (sending, reading, searching, summarising) is missing from this server for that reason. " +

@@ -198,8 +198,9 @@ func TestPinnedRefreshReregistersOnRename(t *testing.T) {
 }
 
 // TestPinnedRefreshUnpinRemovesResource guards the RemoveResources cleanup path:
-// when a chat is unpinned the set shrinks, and its resource must disappear. The reorder/rename tests only exercise a same-size set
-// (the URI never vanishes there), so without this a regression that dropped or
+// when a chat is unpinned the set shrinks, and its resource must disappear.
+// The reorder/rename tests only exercise a same-size set (the URI never
+// vanishes there), so without this a regression that dropped or
 // mis-diffed the removal loop would leave an unpinned chat listed as a live
 // resource forever, and no other test would catch it.
 func TestPinnedRefreshUnpinRemovesResource(t *testing.T) {

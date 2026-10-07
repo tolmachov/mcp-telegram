@@ -31,8 +31,8 @@ const (
 
 // serveMode says how a variant serves tools. Encoding it as one enum instead of
 // two independent bools makes illegal combinations (e.g. "read-only subset but
-// full-length descriptions") unrepresentable: every research variant is compact
-// by construction, because modeResearch.compacts() is true.
+// full-length descriptions") unrepresentable: research is compact by
+// construction, because modeResearch.compacts() is true.
 type serveMode int
 
 const (
@@ -161,17 +161,31 @@ func compactToolsMiddleware(logger *slog.Logger) mcp.Middleware {
 	}
 }
 
-// newModeServer builds the MCP server for mode: it registers handlers (the
-// set buildHandlers made for mode), runs wire (resources/template/prompts),
-// installs the request-logging middleware and, when the mode compacts, the
-// description-shortening one.
-func newModeServer(impl *mcp.Implementation, opts *mcp.ServerOptions, handlers []tools.Handler, mode serveMode, wire func(*mcp.Server), logger *slog.Logger) *mcp.Server {
-	s := mcp.NewServer(impl, opts)
-	tools.RegisterTools(s, handlers)
-	wire(s)
-	s.AddReceivingMiddleware(requestLogMiddleware(logger))
-	if mode.compacts() {
-		s.AddReceivingMiddleware(compactToolsMiddleware(logger))
+// newServerOptions returns the options every MCP server here starts from. The
+// capabilities are empty rather than nil: the SDK's nil default advertises the
+// logging capability, which MCP deprecated (SEP-2577) and this server does not
+// use; the SDK adds the tools, resources, prompts and completions capabilities
+// from what is registered.
+func newServerOptions(instructions string, logger *slog.Logger) *mcp.ServerOptions {
+	return &mcp.ServerOptions{
+		Instructions: instructions,
+		Logger:       logger,
+		Capabilities: &mcp.ServerCapabilities{},
 	}
-	return s
+}
+
+// newModeServer builds the MCP server for the server's mode: it registers
+// handlers (the set buildHandlers made for that mode), runs wire (resources,
+// chat template, prompts and the client-down middleware, which must sit
+// inside the request log), installs the request-logging middleware and, when
+// the mode compacts, the description-shortening one.
+func (s *Server) newModeServer(impl *mcp.Implementation, opts *mcp.ServerOptions, handlers []tools.Handler, wire func(*mcp.Server), logger *slog.Logger) *mcp.Server {
+	srv := mcp.NewServer(impl, opts)
+	tools.RegisterTools(srv, handlers)
+	wire(srv)
+	srv.AddReceivingMiddleware(requestLogMiddleware(logger))
+	if s.mode.compacts() {
+		srv.AddReceivingMiddleware(compactToolsMiddleware(logger))
+	}
+	return srv
 }

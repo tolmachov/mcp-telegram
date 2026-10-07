@@ -66,8 +66,9 @@ type Options struct {
 	Version      string
 	AllowedPaths []string // --allowed-paths; empty → the OS backup directory (see backupAllowedPaths)
 	// Summarize configures SummarizeChat; New builds the summariser from it.
-	// Summarisation is optional, so a misconfiguration is logged at startup
-	// and reported by SummarizeChat alone; every other tool works.
+	// Summarisation is optional: with no provider named it is off, and a
+	// misconfiguration is logged at startup. Either way SummarizeChat alone
+	// reports it and every other tool works.
 	Summarize      summarize.Config
 	MediaMaxBytes  int
 	TGRateLimitRPS int
@@ -90,6 +91,8 @@ type Options struct {
 type Server struct {
 	logger *slog.Logger
 	opts   Options
+	// mode is what opts.Variant names, resolved once in New.
+	mode serveMode
 
 	// summarizer serves SummarizeChat: built from opts.Summarize or, when
 	// that is misconfigured, one that reports why (see summarizeUnavailable).
@@ -135,7 +138,8 @@ func newServer(opts Options) (*Server, error) {
 	if opts.Config == nil {
 		return nil, fmt.Errorf("server.New: Options.Config is required")
 	}
-	if _, ok := modeForVariant(opts.Variant); !ok {
+	mode, ok := modeForVariant(opts.Variant)
+	if !ok {
 		return nil, fmt.Errorf("server.New: unknown variant %q; expected one of: %s", opts.Variant, strings.Join(variantIDs(), ", "))
 	}
 	switch opts.Transport {
@@ -168,12 +172,17 @@ func newServer(opts Options) (*Server, error) {
 	}
 	logger := slog.New(logging.NewHandler(opts.ErrOut, logFormat, level, "mcp-telegram", opts.Version)).
 		With("component", "mcp-telegram")
+	// Code that logs through the package-level slog functions (tool
+	// diagnostics, message fetching) writes with the configured format, level
+	// and output too.
+	slog.SetDefault(logger)
 
-	srv := &Server{logger: logger, opts: opts}
+	srv := &Server{logger: logger, opts: opts, mode: mode}
 	srv.summarizer, err = summarize.New(opts.Summarize)
 	switch {
 	case errors.Is(err, summarize.ErrNotConfigured):
-		srv.summarizer = summarize.Unavailable(err)
+		logger.Info("summarisation is off: no --summarize-provider is set")
+		srv.summarizer = summarize.Unavailable(fmt.Errorf("%w, then %s", err, settingsReload(opts.Transport)))
 	case err != nil:
 		logger.Warn("summarisation is misconfigured; SummarizeChat reports it and every other tool works", "err", err)
 		srv.summarizer = summarize.Unavailable(summarizeUnavailable(opts.Transport, err))
@@ -186,11 +195,16 @@ func newServer(opts Options) (*Server, error) {
 // are read once, at startup, so the fix ends with the process reading them
 // again.
 func summarizeUnavailable(transport string, err error) error {
-	reload := "reconnect this MCP server so it reads them again (in Claude Code: /mcp → select this server → Reconnect)"
+	return fmt.Errorf("summarisation is not available, as its settings were invalid at startup: %w. Fix the setting named — a flag or MCP_SUMMARIZE_* environment variable in this server's configuration, or an API key stored with `mcp-telegram config set` — then %s", err, settingsReload(transport))
+}
+
+// settingsReload is how settings changed after startup take effect on
+// transport.
+func settingsReload(transport string) string {
 	if transport == TransportHTTP {
-		reload = "restart the server so it reads them again"
+		return "restart the server so it reads them again"
 	}
-	return fmt.Errorf("summarisation is not available, as its settings were invalid at startup: %w. Fix the setting named — a flag or MCP_SUMMARIZE_* environment variable in this server's configuration, or an API key stored with `mcp-telegram config set` — then %s", err, reload)
+	return "reconnect this MCP server so it reads them again (in Claude Code: /mcp → select this server → Reconnect)"
 }
 
 // Run starts the MCP server on the configured transport (stdio, or streamable
@@ -276,11 +290,8 @@ func blockedReason(err error) string {
 // and the SDK's stdio connection keeps reading ahead into a buffer it drops
 // on close, losing whatever the host sent in between.
 func (s *Server) serveAssembly(ctx context.Context, client localClient) error {
-	asm, err := s.buildAssembly(ctx, newReconnectingClient(ctx, client, s.connectLocal, s.logger), s.logger)
-	if err != nil {
-		return err
-	}
-	serveErr := asm.run(ctx, s.stdioTransport())
+	asm := s.buildAssembly(ctx, newReconnectingClient(ctx, client, s.connectLocal, s.logger), s.logger)
+	serveErr := asm.server.Run(ctx, s.stdioTransport())
 	if ctx.Err() != nil {
 		// The host cancelled ctx: shutdown, not a failure.
 		serveErr = nil
@@ -292,10 +303,10 @@ func (s *Server) serveAssembly(ctx context.Context, client localClient) error {
 }
 
 // assembly is the MCP server of the configured variant built around one
-// Telegram client, plus the pinned-chat watcher mirroring its resource set.
-// The stdio path builds exactly one; the HTTP auth mode builds one per
-// authenticated user. Callers serve it through run (stdio) or ServeHTTP
-// (http). The assembly owns its client: Close disconnects it.
+// Telegram client, plus the pinned-chat watcher that keeps its pinned-chat
+// resources current. The stdio path builds exactly one; the HTTP auth mode
+// builds one per authenticated user. The assembly owns its client: Close
+// disconnects it.
 type assembly struct {
 	server *mcp.Server
 	client telegramClient
@@ -308,15 +319,6 @@ type assembly struct {
 	end       context.CancelCauseFunc
 	watchDone <-chan struct{}
 	logger    *slog.Logger
-}
-
-// run serves the assembly on one connection over t until ctx ends or the
-// peer disconnects.
-func (a *assembly) run(ctx context.Context, t mcp.Transport) error {
-	if err := a.server.Run(ctx, t); err != nil {
-		return fmt.Errorf("running MCP server: %w", err)
-	}
-	return nil
 }
 
 // ServeHTTP serves one request of the assembly over streamable HTTP.
@@ -342,20 +344,20 @@ type telegramClient interface {
 }
 
 // toolSchemas caches the tools' JSON schemas for the whole process: every
-// assembly (one per user on HTTP) registers the same tools on several inner
-// servers, and without it each registration reflects and resolves them anew.
+// assembly (one per user on HTTP) registers the same tools, and without it
+// each registration reflects and resolves them anew.
 var toolSchemas = mcp.NewSchemaCache()
 
 // buildAssembly constructs handlers, resources, prompts, and the MCP
-// server(s) for one Telegram client. The assembly lives on a child of ctx —
+// server for one Telegram client. The assembly lives on a child of ctx —
 // its pinned-chat watcher and the loads its chat-list cache and peer resolver
 // share between calls run there — which ends on Close or once the client
 // stops.
 //
 // The assembly takes ownership of client: the caller must Close the
-// assembly, which disconnects it. When no assembly comes out — an error or a
-// panic in the wiring — buildAssembly disconnects the client itself.
-func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logger *slog.Logger) (asm *assembly, err error) {
+// assembly, which disconnects it. When no assembly comes out — a panic in the
+// wiring — buildAssembly disconnects the client itself.
+func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logger *slog.Logger) (asm *assembly) {
 	// The assembly gets a lifetime of its own because the stdio host
 	// normally shuts us down by closing stdin, which ends the serve loop
 	// while ctx stays live; Close ends it either way.
@@ -378,18 +380,11 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 	})
 
 	impl := &mcp.Implementation{Name: "mcp-telegram", Version: s.opts.Version}
-	serverOpts := &mcp.ServerOptions{
-		Instructions: happyInstructions,
-		Logger:       logger,
-		// Empty rather than nil: the SDK's default advertises the logging
-		// capability, which this server does not use (MCP deprecated it in
-		// SEP-2577; diagnostics go to the server log).
-		Capabilities: &mcp.ServerCapabilities{},
-		SchemaCache:  toolSchemas,
-		// Suggest chat titles/usernames/ids for prompt arguments and the
-		// chat resource template as the user types.
-		CompletionHandler: completion.Handler(chatsCache),
-	}
+	serverOpts := newServerOptions(happyInstructions, logger)
+	serverOpts.SchemaCache = toolSchemas
+	// Suggest chat titles/usernames/ids for prompt arguments and the chat
+	// resource template as the user types.
+	serverOpts.CompletionHandler = completion.Handler(chatsCache)
 
 	// The message provider owns the rate limiter its fetches wait on. The
 	// RPS ceiling is configurable (--tg-rate-limit-rps) so operators can
@@ -397,8 +392,8 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 	// Telegram's FLOOD_WAIT, which the tgclient flood-wait middleware logs.
 	msgProvider := messages.NewProvider(peers, s.opts.TGRateLimitRPS)
 
-	// Resources, chat template, and prompts are read-only and identical in
-	// every variant.
+	// Resources, the chat template and prompts are read-only, so every
+	// variant registers them.
 	wire := func(srv *mcp.Server) {
 		resources.RegisterResources(srv, []resources.ResourceHandler{
 			resources.NewMeHandler(api),
@@ -409,13 +404,7 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 		srv.AddReceivingMiddleware(s.clientDownMiddleware(client))
 	}
 
-	mode, ok := modeForVariant(s.opts.Variant)
-	if !ok {
-		// Unreachable: New rejects unknown variants, and Server is only
-		// constructible through New.
-		return nil, fmt.Errorf("buildAssembly: variant %q not found in table (should have been rejected by New)", s.opts.Variant)
-	}
-	srv := newModeServer(impl, serverOpts, s.buildHandlers(mode, api, peers, msgProvider, chatsCache), mode, wire, logger)
+	srv := s.newModeServer(impl, serverOpts, s.buildHandlers(api, peers, msgProvider, chatsCache), wire, logger)
 	built := &assembly{
 		server:  srv,
 		client:  client,
@@ -444,7 +433,7 @@ func (s *Server) buildAssembly(ctx context.Context, client telegramClient, logge
 		case <-life.Done():
 		}
 	}()
-	return built, nil
+	return built
 }
 
 // clientDownMiddleware tells tool calls and resource reads that the
@@ -532,8 +521,9 @@ const pinnedWatchExitTimeout = 5 * time.Second
 
 // Close ends the assembly's lifetime — stopping the pinned-chat watcher and
 // failing any shared chat-list load or peer resolve still running — and, last,
-// disconnects the Telegram client, so nothing
-// of the assembly still runs on it. It waits for the watcher to exit so its
+// disconnects the Telegram client, so nothing of the assembly still runs on
+// it. It always returns nil; the error result makes it the io.Closer the user
+// pool closes assemblies through. It waits for the watcher to exit so its
 // goroutine cannot race with server teardown while mid-way through
 // AddResource/RemoveResources. The cancel stops it deterministically; the
 // timeout only guards against a genuinely wedged provider (e.g. blocked in a
@@ -551,12 +541,14 @@ func (a *assembly) Close() error {
 	return nil
 }
 
-// buildHandlers constructs the tool handlers mode serves. The research subset
-// holds tools that do not mutate Telegram or the local filesystem; mutating
-// ones (send, edit, delete, forward, react, mark-as-read, join/leave, mute, and
-// the four folder edits) are left out of it. BackupMessages writes to the local
-// filesystem, so the full set offers it only on stdio.
-func (s *Server) buildHandlers(mode serveMode, api *tg.Client, peers *tgclient.Resolver, msgProvider *messages.Provider, chatsCache *tgdata.ChatsCache) []tools.Handler {
+// buildHandlers constructs the tool handlers the server's mode serves. The
+// research subset holds tools that do not mutate Telegram or the local
+// filesystem; mutating ones (send, edit, delete, forward, react, mark-as-read,
+// join/leave, mute, and the four folder edits) are left out of it.
+// BackupMessages writes to the local filesystem, so the full set offers it
+// only on stdio. Research returns before the backup handler is built, so that
+// variant never resolves (or creates) the default backup directory.
+func (s *Server) buildHandlers(api *tg.Client, peers *tgclient.Resolver, msgProvider *messages.Provider, chatsCache *tgdata.ChatsCache) []tools.Handler {
 	research := []tools.Handler{
 		tools.NewMeGetHandler(api),
 		tools.NewChatsGetHandler(chatsCache),
@@ -574,7 +566,7 @@ func (s *Server) buildHandlers(mode serveMode, api *tg.Client, peers *tgclient.R
 		tools.NewMediaGetHandler(api, s.opts.MediaMaxBytes),
 		tools.NewGetFoldersHandler(api),
 	}
-	if mode.researchOnly() {
+	if s.mode.researchOnly() {
 		return research
 	}
 	mutating := []tools.Handler{

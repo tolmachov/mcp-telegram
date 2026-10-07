@@ -96,9 +96,8 @@ func (h *MessageReadHandler) handle(ctx context.Context, req *mcp.CallToolReques
 
 	results := make([]markReadResult, 0, len(in.ChatIDs))
 	// record adds one chat's outcome. Ordinary errors don't stop the batch —
-	// partial failures are surfaced via the result payload AND via a
-	// structured Warning log so MCP clients with a log panel can flag them. A
-	// systemic error is the exception (tgclient.IsSystemic): a flood wait is
+	// partial failures are surfaced via the result payload and logged as
+	// warnings for the operator. A systemic error is the exception (tgclient.IsSystemic): a flood wait is
 	// account-level and cumulative, so going on would deepen the limit, and a
 	// dead session, a stopped client or a cancelled or timed-out call fails
 	// every chat alike. record then reports stop=true.

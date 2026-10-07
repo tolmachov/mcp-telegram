@@ -336,8 +336,7 @@ func LogLevelFlag() *cli.StringFlag {
 func VariantFlag() *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:    Variant,
-		Value:   "full",
-		Usage:   "Server variant: 'full' (all tools), 'compact' (all tools, short descriptions), or 'research' (read-only subset)",
+		Usage:   "Server variant: 'full' (all tools, the default), 'compact' (all tools, short descriptions), or 'research' (read-only subset)",
 		Sources: cli.EnvVars("MCP_VARIANT"),
 	}
 }

@@ -71,11 +71,11 @@ func listModeTools(t *testing.T, mode serveMode) map[string]string {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	api := tg.NewClient(noopInvoker{})
-	s := &Server{logger: slog.New(slog.DiscardHandler), opts: Options{MediaMaxBytes: 1024, Transport: TransportStdio}}
+	s := &Server{logger: slog.New(slog.DiscardHandler), opts: Options{MediaMaxBytes: 1024, Transport: TransportStdio}, mode: mode}
 	peers := tgclient.NewResolver(t.Context(), api)
-	handlers := s.buildHandlers(mode, api, peers, messages.NewProvider(peers, 100_000), tgdata.NewChatsCache(t.Context(), nil))
+	handlers := s.buildHandlers(api, peers, messages.NewProvider(peers, 100_000), tgdata.NewChatsCache(t.Context(), nil))
 	impl := &mcp.Implementation{Name: "mcp-telegram", Version: "test"}
-	return listToolNames(t, newModeServer(impl, nil, handlers, mode, noWire, slog.New(slog.DiscardHandler)))
+	return listToolNames(t, s.newModeServer(impl, nil, handlers, noWire, slog.New(slog.DiscardHandler)))
 }
 
 func TestVariantHandlerSplit(t *testing.T) {
@@ -286,9 +286,9 @@ func TestBackupMessagesOfferedOnlyOnStdioOutsideResearch(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("%s/%d", tc.transport, tc.mode), func(t *testing.T) {
-			s := &Server{logger: slog.New(slog.DiscardHandler), opts: Options{Transport: tc.transport}}
-			handlers := s.buildHandlers(tc.mode, api, peers, messages.NewProvider(peers, 100_000), tgdata.NewChatsCache(t.Context(), nil))
-			_, ok := listToolNames(t, newModeServer(impl, nil, handlers, tc.mode, noWire, slog.New(slog.DiscardHandler)))["BackupMessages"]
+			s := &Server{logger: slog.New(slog.DiscardHandler), opts: Options{Transport: tc.transport}, mode: tc.mode}
+			handlers := s.buildHandlers(api, peers, messages.NewProvider(peers, 100_000), tgdata.NewChatsCache(t.Context(), nil))
+			_, ok := listToolNames(t, s.newModeServer(impl, nil, handlers, noWire, slog.New(slog.DiscardHandler)))["BackupMessages"]
 			assert.Equal(t, tc.want, ok)
 		})
 	}

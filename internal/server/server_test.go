@@ -521,10 +521,10 @@ func TestSummarizeMisconfigurationDisablesOnlySummarizeChat(t *testing.T) {
 	assert.ErrorContains(t, summarizeUnavailable(TransportHTTP, errors.New("bad")), "restart the server")
 }
 
-// TestUnconfiguredSummarisationIsQuiet pins that no provider named is the
-// expected default, not a misconfiguration: SummarizeChat says how to turn it
-// on and startup logs no warning.
-func TestUnconfiguredSummarisationIsQuiet(t *testing.T) {
+// TestUnconfiguredSummarisationIsOff pins that no provider named is the
+// expected default, not a misconfiguration: startup notes it without a
+// warning, and SummarizeChat says how to turn it on.
+func TestUnconfiguredSummarisationIsOff(t *testing.T) {
 	var logs bytes.Buffer
 	srv, err := newServer(Options{
 		Config:    &tgclient.Config{APIID: 1, APIHash: "hash"},
@@ -536,7 +536,9 @@ func TestUnconfiguredSummarisationIsQuiet(t *testing.T) {
 	require.NoError(t, err)
 	_, err = srv.summarizer.Summarize(t.Context(), nil, 1, "recap", time.Time{}, 10, nil)
 	require.ErrorIs(t, err, summarize.ErrNotConfigured)
-	assert.NotContains(t, logs.String(), "summarisation")
+	assert.ErrorContains(t, err, "Reconnect")
+	assert.Contains(t, logs.String(), "summarisation is off")
+	assert.NotContains(t, logs.String(), "level=WARN")
 }
 
 // TestRunCancelledDuringStartupReturnsQuietly pins that a host shutting the

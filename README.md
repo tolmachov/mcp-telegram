@@ -245,6 +245,8 @@ These examples apply only to local stdio `full`/`compact` mode; HTTP and the
 
 The `SummarizeChat` tool supports multiple LLM providers. Summarisation is off
 until one is set; until then `SummarizeChat` answers with how to turn it on.
+Settings are read at startup, so after setting one reconnect the server
+(stdio) or restart it (HTTP).
 
 - **ollama**: Local LLM via [Ollama](https://ollama.ai) - no API key required
 - **gemini**: Google Gemini API
@@ -259,8 +261,8 @@ applicable.
 Chat messages are serialised as untrusted JSON data, separate from the system
 instructions, goal, and previous rolling summary. The server explicitly marks
 Telegram content as untrusted and tells the provider not to execute instructions
-found inside it. Gemini and Anthropic send selected text to their APIs; Ollama sends it to the configured URL,
-which may itself be remote. Providers may log, retain, or bill for content under
+found inside it. Gemini and Anthropic send selected text to their APIs;
+Ollama sends it to the configured URL, which may itself be remote. Providers may log, retain, or bill for content under
 their own policies. Retryable `429`/`5xx` responses are attempted at most three
 times with backoff and `Retry-After`, without exceeding the MCP request
 deadline.
