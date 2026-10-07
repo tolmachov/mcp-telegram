@@ -50,10 +50,15 @@ func (q qrLoginFlow) Err() error                    { return q.flow.Err() }
 func (q qrLoginFlow) Done() <-chan struct{}         { return q.flow.Done() }
 func (q qrLoginFlow) Abort()                        { q.flow.Abort() }
 
-func (q qrLoginFlow) State() authsrv.LoginState {
-	switch q.flow.State() {
-	case tgclient.QRPasswordNeeded, tgclient.QRPasswordVerifying:
+func (q qrLoginFlow) State() authsrv.LoginState { return loginState(q.flow.State()) }
+
+// loginState maps a QR flow phase onto the authsrv login state.
+func loginState(s tgclient.QRState) authsrv.LoginState {
+	switch s {
+	case tgclient.QRPasswordNeeded:
 		return authsrv.LoginPasswordNeeded
+	case tgclient.QRPasswordVerifying:
+		return authsrv.LoginPasswordChecking
 	case tgclient.QRDone:
 		return authsrv.LoginDone
 	case tgclient.QRFailed:

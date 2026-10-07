@@ -16,6 +16,10 @@ const (
 	// LoginPasswordNeeded means the account has two-factor auth enabled and
 	// the cloud password must be submitted to finish the login.
 	LoginPasswordNeeded
+	// LoginPasswordChecking means a submitted 2FA password is being verified
+	// with Telegram; further submissions are ignored until verification ends
+	// in LoginPasswordNeeded (wrong password), LoginDone or LoginFailed.
+	LoginPasswordChecking
 	// LoginDone means the login succeeded: User and SessionData are valid.
 	LoginDone
 	// LoginFailed means the login failed terminally: Err reports why.
@@ -45,11 +49,14 @@ type LoginFlow interface {
 	// SessionData returns the raw gotd session bytes; valid only in LoginDone.
 	SessionData() ([]byte, bool)
 	// SubmitPassword feeds the 2FA cloud password to the flow. It is
-	// accepted only in LoginPasswordNeeded; a wrong password keeps the state
-	// at LoginPasswordNeeded (Err then reports the last attempt error).
+	// accepted only in LoginPasswordNeeded and moves the flow to
+	// LoginPasswordChecking. A wrong password returns it to
+	// LoginPasswordNeeded (Err then reports that attempt's error) until the
+	// attempt budget is spent, after which the flow fails.
 	SubmitPassword(pw string) bool
 	// Err reports the failure in LoginFailed, and the last rejected password
-	// attempt while in LoginPasswordNeeded. Nil otherwise.
+	// attempt while in LoginPasswordNeeded or LoginPasswordChecking. Nil
+	// otherwise.
 	Err() error
 	// Done is closed when the flow has fully terminated (success or not).
 	Done() <-chan struct{}

@@ -143,6 +143,7 @@ code{background:#f0f1f4;border-radius:4px;padding:2px 6px;font-size:13px;word-br
 @media (prefers-reduced-motion:reduce){.qr-placeholder{animation:none}#qr{transition:none}}
 button{background:#2aabee;color:#fff;border:0;border-radius:8px;padding:12px 24px;font-size:15px;cursor:pointer;margin-top:12px;width:100%}
 button:hover{background:#1e96d6}
+button:disabled{background:#9fd3f0;cursor:default}
 .muted{color:#5f6368;font-size:13px}
 #status{min-height:1.5em;font-weight:600}
 label{display:block;margin-top:8px;font-size:14px;font-weight:600;text-align:left}
@@ -173,20 +174,41 @@ input[type=password]{width:100%;box-sizing:border-box;margin-top:6px;padding:10p
 	var loader = document.getElementById("qrloader");
 	var statusEl = document.getElementById("status");
 	var form = document.getElementById("pwform");
+	var pwInput = document.getElementById("password");
+	var pwButton = form.querySelector("button");
 	var qrwrap = document.getElementById("qrwrap");
 	var displayedRev = 0;
 	var loadingRev = 0;
 	var latestRev = 0;
 	var stopped = false;
 	var qrActive = true;
+	// Password POSTs sent and settled. A poll sent while one was unsettled
+	// may report "password" for the state that submission replaced, so only
+	// a poll sent with every submission settled may re-open the form.
+	var sent = 0;
+	var settled = 0;
+
+	function setChecking(checking) {
+		pwInput.disabled = checking;
+		pwButton.disabled = checking;
+		if (checking) { statusEl.textContent = "Checking password…"; }
+	}
+
+	function sendFailed() {
+		setChecking(false);
+		statusEl.textContent = "Couldn't send the password. Try again.";
+	}
 
 	form.addEventListener("submit", function (e) {
 		e.preventDefault();
 		var body = new URLSearchParams();
 		body.set("login", loginID);
-		body.set("password", document.getElementById("password").value);
-		fetch("/login/password", {method: "POST", body: body});
-		statusEl.textContent = "Checking password…";
+		body.set("password", pwInput.value);
+		setChecking(true);
+		sent++;
+		fetch("/login/password", {method: "POST", body: body})
+			.then(function (r) { if (!r.ok) { sendFailed(); } }, sendFailed)
+			.then(function () { settled++; });
 	});
 
 	function clearQRImage() {
@@ -235,7 +257,13 @@ input[type=password]{width:100%;box-sizing:border-box;margin-top:6px;padding:10p
 		next.src = src;
 	}
 
-	function apply(j) {
+	function showPasswordForm() {
+		qrActive = false;
+		hideQR();
+		form.hidden = false;
+	}
+
+	function apply(j, settledAt) {
 		switch (j.status) {
 		case "waiting":
 			qrActive = true;
@@ -257,10 +285,22 @@ input[type=password]{width:100%;box-sizing:border-box;margin-top:6px;padding:10p
 			window.location.href = j.redirect;
 			return;
 		case "password":
-			qrActive = false;
-			hideQR();
-			form.hidden = false;
+			if (settledAt !== sent) { return; }
+			// Only an arrival from the QR or from a check rewrites the status:
+			// repeating it every poll would hide a failed send.
+			if (!form.hidden && !pwInput.disabled) { return; }
+			var rejected = pwInput.disabled && j.message;
+			showPasswordForm();
+			setChecking(false);
+			if (rejected) {
+				pwInput.value = "";
+				pwInput.focus();
+			}
 			statusEl.textContent = j.message || "Enter your two-step verification password.";
+			return;
+		case "checking":
+			showPasswordForm();
+			setChecking(true);
 			return;
 		case "failed":
 		case "expired":
@@ -275,9 +315,10 @@ input[type=password]{width:100%;box-sizing:border-box;margin-top:6px;padding:10p
 
 	function poll() {
 		if (stopped) { return; }
+		var settledAt = settled;
 		fetch("/login/poll?login=" + encodeURIComponent(loginID))
 			.then(function (r) { return r.json(); })
-			.then(apply)
+			.then(function (j) { apply(j, settledAt); })
 			.catch(function () {})
 			.then(function () { if (!stopped) { setTimeout(poll, 2000); } });
 	}

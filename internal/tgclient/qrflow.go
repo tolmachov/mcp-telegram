@@ -40,7 +40,8 @@ const qrPasswordAttempts = 3
 // never touches disk here: the caller decides where the final bytes go
 // (SessionData) only after checking who actually scanned the code.
 //
-// State transitions: Waiting → (PasswordNeeded →) Done | Failed. The done
+// State transitions: Waiting → (PasswordNeeded ⇄ PasswordVerifying →)
+// Done | Failed. The done
 // channel closes only after the underlying client.Run has returned, i.e.
 // when the session bytes are final and no bootstrap connection remains —
 // callers may hand the session to a long-lived client without risking two
@@ -202,7 +203,7 @@ func (f *QRFlow) SubmitPassword(pw string) bool {
 }
 
 // Err reports the terminal failure (QRFailed), or the most recent rejected
-// 2FA attempt while the state is still QRPasswordNeeded.
+// 2FA attempt while the state is QRPasswordNeeded or QRPasswordVerifying.
 func (f *QRFlow) Err() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -229,11 +230,13 @@ func (f *QRFlow) setState(s QRState) {
 	f.state = s
 }
 
+// recordPasswordError keeps the state at QRPasswordVerifying: passwordLoop
+// reopens QRPasswordNeeded only if an attempt remains, so a submission can
+// never land after the last one.
 func (f *QRFlow) recordPasswordError(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.err = err
-	f.state = QRPasswordNeeded
 }
 
 func (f *QRFlow) fail(err error) {

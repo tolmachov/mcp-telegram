@@ -141,3 +141,21 @@ func TestNewAuthValidation(t *testing.T) {
 		}
 	})
 }
+
+// TestLoginState pins the QR phase mapping: a password under verification
+// must reach the login page as its own state, not as another password prompt.
+func TestLoginState(t *testing.T) {
+	tests := map[tgclient.QRState]authsrv.LoginState{
+		tgclient.QRWaiting:           authsrv.LoginWaiting,
+		tgclient.QRPasswordNeeded:    authsrv.LoginPasswordNeeded,
+		tgclient.QRPasswordVerifying: authsrv.LoginPasswordChecking,
+		tgclient.QRDone:              authsrv.LoginDone,
+		tgclient.QRFailed:            authsrv.LoginFailed,
+		tgclient.QRState(99):         authsrv.LoginFailed,
+	}
+	for in, want := range tests {
+		if got := loginState(in); got != want {
+			t.Errorf("loginState(%d) = %d, want %d", in, got, want)
+		}
+	}
+}

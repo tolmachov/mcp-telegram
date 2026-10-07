@@ -255,7 +255,7 @@ func (a *AuthServer) handleLoginQR(w http.ResponseWriter, r *http.Request) {
 
 // pollResponse is the JSON payload of /login/poll.
 type pollResponse struct {
-	// Status is one of waiting|password|done|failed|expired.
+	// Status is one of waiting|password|checking|done|failed|expired.
 	Status string `json:"status"`
 	// Redirect is the client redirect URI carrying the authorization code;
 	// set only with status done.
@@ -289,6 +289,8 @@ func (a *AuthServer) handleLoginPoll(w http.ResponseWriter, r *http.Request) {
 			resp.Message = "Wrong password, try again."
 		}
 		a.writeJSON(w, http.StatusOK, resp)
+	case LoginPasswordChecking:
+		a.writeJSON(w, http.StatusOK, &pollResponse{Status: "checking"})
 	case LoginFailed:
 		err := p.flow.Err()
 		a.logger.Warn("telegram login failed", "err", err)
@@ -427,9 +429,10 @@ func buildCodeRedirect(redirectURI, code, state string) (string, error) {
 
 // handleLoginPassword feeds the 2FA cloud password into a pending flow. A
 // malformed form is a 400 and an unknown/expired login id is a 404, but a
-// valid submission always gets 204 regardless of whether the password was
-// right — correctness surfaces only in the next poll, keeping this endpoint
-// free of oracle behaviour beyond what the login flow itself reveals.
+// valid submission always gets 204, whether the password was right or the
+// submission was dropped because one is already being checked — the outcome
+// surfaces only in a later poll, keeping this endpoint free of oracle
+// behaviour beyond what the login flow itself reveals.
 func (a *AuthServer) handleLoginPassword(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxFormBody)
 	if err := r.ParseForm(); err != nil {
