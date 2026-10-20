@@ -9,11 +9,11 @@ FROM golang:1.27-alpine3.24@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1
 # the architecture the builder image itself reports. Do not make this RUN
 # depend on TARGETARCH alone: an empty value fails the build outright.
 ARG TARGETARCH
-ARG GO_PATCH_VERSION=1.27.1
+ARG GO_PATCH_VERSION=1.27.3
 RUN GOARCH_="${TARGETARCH:-$(go env GOARCH)}" \
 	&& case "$GOARCH_" in \
-		amd64) GO_SHA256=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445 ;; \
-		arm64) GO_SHA256=3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec ;; \
+		amd64) GO_SHA256=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40 ;; \
+		arm64) GO_SHA256=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49 ;; \
 		*) echo "unsupported architecture: $GOARCH_" >&2; exit 1 ;; \
 	esac \
 	&& wget -q "https://go.dev/dl/go${GO_PATCH_VERSION}.linux-${GOARCH_}.tar.gz" -O /tmp/go.tar.gz \
