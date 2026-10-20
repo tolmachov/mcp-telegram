@@ -33,7 +33,7 @@ func (f panicAbortFlow) Abort() {
 
 type noUserFlow struct{ *fakeFlow }
 
-func (noUserFlow) User() (LoginUser, bool) { return LoginUser{}, false }
+func (noUserFlow) Result() (LoginResult, bool) { return LoginResult{}, false }
 
 type failedSessionStore struct{ sessionstore.Store }
 
@@ -142,8 +142,7 @@ func TestTokenAndIdentityDefensiveBranches(t *testing.T) {
 
 func TestLoginQRWithoutExportedTokenIsNotFound(t *testing.T) {
 	a, _ := newTestServer(t, testConfig(t), sessionstoretest.New(t), neverStartLogin)
-	flow := newFakeFlow()
-	flow.setURL("")
+	flow := &fakeFlow{}
 	require.NoError(t, a.addPending("request", flow, "127.0.0.1"))
 
 	a.pendingMu.Lock()

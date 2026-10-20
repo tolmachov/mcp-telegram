@@ -20,9 +20,9 @@ const (
 	// with Telegram; further submissions are ignored until verification ends
 	// in LoginPasswordNeeded (wrong password), LoginDone or LoginFailed.
 	LoginPasswordChecking
-	// LoginDone means the login succeeded: User and SessionData are valid.
+	// LoginDone means the bootstrap client stopped and Result is ready.
 	LoginDone
-	// LoginFailed means the login failed terminally: Err reports why.
+	// LoginFailed means the login failed terminally: the snapshot reports why.
 	LoginFailed
 )
 
@@ -32,36 +32,33 @@ type LoginUser struct {
 	Username string
 }
 
-// LoginFlow is one in-flight Telegram QR login running on a background
-// goroutine, implemented by the tgclient package and consumed here. Done()
-// is closed only after the underlying client has fully stopped and the
-// session bytes are final, so a receive from Done() in state LoginDone never
-// blocks and never races the session data.
+// LoginSnapshot is a coherent observation of one pending Telegram login.
+// Session credentials are deliberately available only through Result.
+type LoginSnapshot struct {
+	State        LoginState
+	TokenURL     string
+	QRRevision   int
+	Rejected     int
+	AttemptsLeft int
+	Err          error
+}
+
+// LoginResult is a completed Telegram identity and its final session bytes.
+type LoginResult struct {
+	User        LoginUser
+	SessionData []byte
+}
+
+// LoginFlow is one in-flight Telegram QR login. Observing LoginDone guarantees
+// Result is ready: the bootstrap client has stopped and the session is final.
+// Terminal states do not change, so callers need no separate teardown wait.
 type LoginFlow interface {
-	// TokenURL returns the latest tg://login URL to encode as a QR code.
-	// Telegram rotates it roughly every 30 seconds; ok is false before the
-	// first token has been exported.
-	TokenURL() (url string, ok bool)
-	// State returns the current phase of the flow.
-	State() LoginState
-	// User returns the logged-in account; valid only in LoginDone.
-	User() (LoginUser, bool)
-	// SessionData returns the raw gotd session bytes; valid only in LoginDone.
-	SessionData() ([]byte, bool)
-	// SubmitPassword feeds the 2FA cloud password to the flow and reports
-	// whether it was taken. It is taken only in LoginPasswordNeeded and
-	// moves the flow to LoginPasswordChecking. A wrong password counts
-	// towards Rejections and returns the flow to LoginPasswordNeeded while
-	// attempts are left; the flow fails once none are.
+	Observe() LoginSnapshot
+	// Result never blocks and returns a defensive session copy on success.
+	Result() (LoginResult, bool)
+	// SubmitPassword accepts one password only while awaiting one. Verification
+	// does not spend an attempt; only a genuine rejection does.
 	SubmitPassword(pw string) bool
-	// Rejections reports how many submitted passwords Telegram has rejected
-	// and how many attempts remain; left counts an attempt under check and
-	// is 0 only once every attempt has been refused.
-	Rejections() (rejected, left int)
-	// Err reports the failure in LoginFailed; nil otherwise.
-	Err() error
-	// Done is closed when the flow has fully terminated (success or not).
-	Done() <-chan struct{}
 	// Abort cancels the flow; idempotent and non-blocking.
 	Abort()
 }

@@ -62,69 +62,33 @@ func (h *MessagesGetHandler) Register(s *mcp.Server) {
 }
 
 func (h *MessagesGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in GetMessagesInput) (*mcp.CallToolResult, *getMessagesOutput, error) {
-	opts := messages.DefaultFetchOptions()
-	state := messagePageCursor{Kind: cursorKindHistory}
-	if in.Cursor != "" {
-		if in.ChatID != 0 || in.Limit != 0 || in.BeforeMessageID != "" || in.FromDate != "" || in.ToDate != "" || in.UnreadOnly || in.IncludeScheduled {
-			return ErrResult("cursor is incompatible with every other field; pass the cursor alone"), nil, nil
-		}
-		var err error
-		state, err = parseMessagePageCursor(in.Cursor, cursorKindHistory)
-		if err != nil {
-			return ErrResult(fmt.Sprintf("invalid cursor: %v", err)), nil, nil
-		}
-		in.ChatID, in.Limit = state.ChatID, state.Limit
-		in.FromDate, in.ToDate = state.FromDate, state.ToDate
-		in.UnreadOnly, in.IncludeScheduled = state.UnreadOnly, state.IncludeScheduled
-		opts.OffsetID = state.OffsetID
-		opts.Limit = state.Limit
-	} else {
-		if in.ChatID == 0 {
-			return errChatIDRequired(), nil, nil
-		}
-		opts.Limit = clampLimit(in.Limit, opts.Limit, 100)
-		if in.BeforeMessageID != "" {
-			var errRes *mcp.CallToolResult
-			opts.OffsetID, errRes = parseRegularRef("before_message_id", in.BeforeMessageID, "page before")
-			if errRes != nil {
-				return errRes, nil, nil
-			}
-		}
-		state = messagePageCursor{Kind: cursorKindHistory, ChatID: in.ChatID, Limit: opts.Limit, FromDate: in.FromDate, ToDate: in.ToDate, UnreadOnly: in.UnreadOnly, IncludeScheduled: in.IncludeScheduled}
-	}
-	opts.UnreadOnly = in.UnreadOnly
-
-	// Date filters. to_date maps to Telegram's native offset_date; from_date
-	// has no native equivalent and is applied as a post-filter inside the
-	// provider (drops messages older than MinDate and clamps HasMore).
-	var dateErr *mcp.CallToolResult
-	opts.MinDate, opts.MaxDate, dateErr = parseDateWindow(in.FromDate, in.ToDate)
-	if dateErr != nil {
-		return dateErr, nil, nil
+	page, invalid := prepareHistoryPage(in)
+	if invalid != nil {
+		return invalid, nil, nil
 	}
 
-	result, err := h.provider.Fetch(ctx, in.ChatID, opts)
+	result, err := h.provider.Fetch(ctx, page.chatID, page.options)
 	if err != nil {
-		return nil, nil, failed(fmt.Sprintf("get messages from chat %d", in.ChatID), err)
+		return nil, nil, failed(fmt.Sprintf("get messages from chat %d", page.chatID), err)
 	}
 
 	out := &getMessagesOutput{
-		ChatID:   in.ChatID,
+		ChatID:   page.chatID,
 		Messages: presentation.FromMessages(result.Messages, false),
 		Count:    result.Count,
 		HasMore:  result.HasMore,
 	}
-	out.NextCursor, out.PaginationHint = pageCursorResult(result, state, "GetMessages", "messages")
+	out.NextCursor, out.PaginationHint = page.next(result)
 
 	// Optionally fetch scheduled messages. A failure in the scheduled sub-fetch
 	// should not fail the whole tool: the caller still gets the regular
 	// history, with a warning that the scheduled list is missing.
-	if in.IncludeScheduled {
+	if page.includeScheduled {
 		// A non-nil empty slice is no zero value, so JSON emits "[]" rather
 		// than omitting the field (omitzero) — clients/LLMs then see an
 		// unambiguous "no pending scheduled messages" signal.
 		out.ScheduledMessages = make([]presentation.Message, 0)
-		scheduled, err := h.provider.FetchScheduled(ctx, in.ChatID)
+		scheduled, err := h.provider.FetchScheduled(ctx, page.chatID)
 		if err != nil {
 			// An empty slice alone is indistinguishable from "no pending
 			// scheduled messages", so the warning says it is not that.

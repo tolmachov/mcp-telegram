@@ -3,11 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
-	"maps"
-	"slices"
-	"strings"
 
-	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tolmachov/mcp-telegram/internal/messages"
@@ -45,23 +41,6 @@ type SearchMessagesInput struct {
 	TopMsgID        string `json:"top_msg_id,omitempty" jsonschema:"Opaque regular-message handle of a forum topic or reply thread root. When set\\, results are restricted to that thread."`
 }
 
-// mediaFilterMap translates the whitelisted media_type enum into its
-// corresponding tg.MessagesFilterClass constructor. Its keys are the enum.
-var mediaFilterMap = map[string]func() tg.MessagesFilterClass{
-	"photos":      func() tg.MessagesFilterClass { return &tg.InputMessagesFilterPhotos{} },
-	"videos":      func() tg.MessagesFilterClass { return &tg.InputMessagesFilterVideo{} },
-	"documents":   func() tg.MessagesFilterClass { return &tg.InputMessagesFilterDocument{} },
-	"links":       func() tg.MessagesFilterClass { return &tg.InputMessagesFilterURL{} },
-	"voice":       func() tg.MessagesFilterClass { return &tg.InputMessagesFilterVoice{} },
-	"music":       func() tg.MessagesFilterClass { return &tg.InputMessagesFilterMusic{} },
-	"gif":         func() tg.MessagesFilterClass { return &tg.InputMessagesFilterGif{} },
-	"round_video": func() tg.MessagesFilterClass { return &tg.InputMessagesFilterRoundVideo{} },
-	"round_voice": func() tg.MessagesFilterClass { return &tg.InputMessagesFilterRoundVoice{} },
-}
-
-// mediaTypes is the sorted media_type enum.
-var mediaTypes = slices.Sorted(maps.Keys(mediaFilterMap))
-
 // searchMessagesOutput mirrors getMessagesOutput but is declared separately
 // so schema generation doesn't alias the two tools. The per-message DTO
 // shape is identical (both use presentation.Message) so downstream tools
@@ -95,81 +74,24 @@ func (h *MessagesSearchHandler) Register(s *mcp.Server) {
 }
 
 func (h *MessagesSearchHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in SearchMessagesInput) (*mcp.CallToolResult, *searchMessagesOutput, error) {
-	state := messagePageCursor{Kind: cursorKindSearch}
-	query := strings.TrimSpace(in.Query)
-	if in.Cursor != "" {
-		if in.ChatID != 0 || query != "" || in.Limit != 0 || in.BeforeMessageID != "" || in.FromDate != "" || in.ToDate != "" || in.FromSenderID != 0 || in.MediaType != "" || in.TopMsgID != "" {
-			return ErrResult("cursor is incompatible with every other field; pass the cursor alone"), nil, nil
-		}
-		var err error
-		state, err = parseMessagePageCursor(in.Cursor, cursorKindSearch)
-		if err != nil {
-			return ErrResult(fmt.Sprintf("invalid cursor: %v", err)), nil, nil
-		}
-		in.ChatID, in.Limit = state.ChatID, state.Limit
-		in.FromDate, in.ToDate = state.FromDate, state.ToDate
-		in.FromSenderID, in.MediaType = state.FromSenderID, state.MediaType
-		query = state.Query
-	} else {
-		if in.ChatID == 0 {
-			return errChatIDRequired(), nil, nil
-		}
-		if query == "" {
-			return ErrResult("query is required and must be a non-empty string."), nil, nil
-		}
+	page, invalid := prepareSearchPage(in)
+	if invalid != nil {
+		return invalid, nil, nil
 	}
 
-	opts := messages.SearchOptions{Query: query, Limit: clampLimit(in.Limit, 50, 100)}
-	if in.Cursor != "" {
-		opts.Limit, opts.OffsetID, opts.TopMsgID = state.Limit, state.OffsetID, state.TopMsgID
-	} else if in.BeforeMessageID != "" {
-		var errRes *mcp.CallToolResult
-		opts.OffsetID, errRes = parseRegularRef("before_message_id", in.BeforeMessageID, "page before")
-		if errRes != nil {
-			return errRes, nil, nil
-		}
-	}
-
-	if in.TopMsgID != "" {
-		var errRes *mcp.CallToolResult
-		opts.TopMsgID, errRes = parseRegularRef("top_msg_id", in.TopMsgID, "search the thread of")
-		if errRes != nil {
-			return errRes, nil, nil
-		}
-	}
-
-	var dateErr *mcp.CallToolResult
-	opts.MinDate, opts.MaxDate, dateErr = parseDateWindow(in.FromDate, in.ToDate)
-	if dateErr != nil {
-		return dateErr, nil, nil
-	}
-
-	if in.MediaType != "" {
-		ctor, ok := mediaFilterMap[in.MediaType]
-		if !ok {
-			return ErrResult(fmt.Sprintf("invalid media_type %q: expected one of %s.", in.MediaType, strings.Join(mediaTypes, ", "))), nil, nil
-		}
-		opts.Filter = ctor()
-	}
-
-	opts.FromSenderID = in.FromSenderID
-	if in.Cursor == "" {
-		state = messagePageCursor{Kind: cursorKindSearch, ChatID: in.ChatID, Limit: opts.Limit, FromDate: in.FromDate, ToDate: in.ToDate, Query: query, FromSenderID: in.FromSenderID, MediaType: in.MediaType, TopMsgID: opts.TopMsgID}
-	}
-
-	result, err := h.provider.Search(ctx, in.ChatID, opts)
+	result, err := h.provider.Search(ctx, page.chatID, page.options)
 	if err != nil {
-		return nil, nil, failed(fmt.Sprintf("search messages in chat %d", in.ChatID), err)
+		return nil, nil, failed(fmt.Sprintf("search messages in chat %d", page.chatID), err)
 	}
 
 	out := &searchMessagesOutput{
-		ChatID:   in.ChatID,
-		Query:    query,
+		ChatID:   page.chatID,
+		Query:    page.options.Query,
 		Messages: presentation.FromMessages(result.Messages, false),
 		Count:    result.Count,
 		HasMore:  result.HasMore,
 	}
-	out.NextCursor, out.PaginationHint = pageCursorResult(result, state, "SearchMessages", "matches")
+	out.NextCursor, out.PaginationHint = page.next(result)
 
 	return nil, out, nil
 }

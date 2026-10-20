@@ -43,15 +43,24 @@ type qrLoginFlow struct {
 	flow *tgclient.QRFlow
 }
 
-func (q qrLoginFlow) TokenURL() (string, bool)      { return q.flow.TokenURL() }
-func (q qrLoginFlow) SessionData() ([]byte, bool)   { return q.flow.SessionData() }
-func (q qrLoginFlow) SubmitPassword(pw string) bool { return q.flow.SubmitPassword(pw) }
-func (q qrLoginFlow) Rejections() (int, int)        { return q.flow.Rejections() }
-func (q qrLoginFlow) Err() error                    { return q.flow.Err() }
-func (q qrLoginFlow) Done() <-chan struct{}         { return q.flow.Done() }
-func (q qrLoginFlow) Abort()                        { q.flow.Abort() }
+func (q qrLoginFlow) Observe() authsrv.LoginSnapshot {
+	observed := q.flow.Observe()
+	return authsrv.LoginSnapshot{
+		State: loginState(observed.State), TokenURL: observed.TokenURL, QRRevision: observed.QRRevision,
+		Rejected: observed.Rejected, AttemptsLeft: observed.AttemptsLeft, Err: observed.Err,
+	}
+}
 
-func (q qrLoginFlow) State() authsrv.LoginState { return loginState(q.flow.State()) }
+func (q qrLoginFlow) Result() (authsrv.LoginResult, bool) {
+	result, ok := q.flow.Result()
+	return authsrv.LoginResult{
+		User:        authsrv.LoginUser{ID: result.User.ID, Username: result.User.Username},
+		SessionData: result.SessionData,
+	}, ok
+}
+
+func (q qrLoginFlow) SubmitPassword(pw string) bool { return q.flow.SubmitPassword(pw) }
+func (q qrLoginFlow) Abort()                        { q.flow.Abort() }
 
 // loginState maps a QR flow phase onto the authsrv login state.
 func loginState(s tgclient.QRState) authsrv.LoginState {
@@ -71,11 +80,6 @@ func loginState(s tgclient.QRState) authsrv.LoginState {
 		// forever until the registry TTL kills the login.
 		return authsrv.LoginFailed
 	}
-}
-
-func (q qrLoginFlow) User() (authsrv.LoginUser, bool) {
-	u, ok := q.flow.User()
-	return authsrv.LoginUser{ID: u.ID, Username: u.Username}, ok
 }
 
 // startLogin is the StartLoginFunc injected into the auth server.
