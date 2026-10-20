@@ -44,8 +44,7 @@ type fakeFlow struct {
 	user      LoginUser
 	session   []byte
 	err       error
-	done      chan struct{}
-	doneOnce  sync.Once
+	qrRev     int
 	aborted   bool
 	passwords []string // every submitted password, in order
 	rejected  int      // submitted passwords refused so far
@@ -55,7 +54,7 @@ type fakeFlow struct {
 }
 
 func newFakeFlow() *fakeFlow {
-	return &fakeFlow{url: "tg://login?token=initial", done: make(chan struct{})}
+	return &fakeFlow{url: "tg://login?token=initial", qrRev: 1}
 }
 
 // addPending registers an already-created fake flow the way the /authorize handler does:
@@ -72,28 +71,22 @@ func (a *AuthServer) addPending(request string, flow LoginFlow, ip string) error
 	return nil
 }
 
-func (f *fakeFlow) TokenURL() (string, bool) {
+func (f *fakeFlow) Observe() LoginSnapshot {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.url, f.url != ""
+	return LoginSnapshot{
+		State: f.state, TokenURL: f.url, QRRevision: f.qrRev,
+		Rejected: f.rejected, AttemptsLeft: fakePasswordAttempts - f.rejected, Err: f.err,
+	}
 }
 
-func (f *fakeFlow) State() LoginState {
+func (f *fakeFlow) Result() (LoginResult, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.state
-}
-
-func (f *fakeFlow) User() (LoginUser, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.user, f.state == LoginDone
-}
-
-func (f *fakeFlow) SessionData() ([]byte, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.session, f.state == LoginDone
+	if f.state != LoginDone {
+		return LoginResult{}, false
+	}
+	return LoginResult{User: f.user, SessionData: append([]byte(nil), f.session...)}, true
 }
 
 func (f *fakeFlow) SubmitPassword(pw string) bool {
@@ -119,14 +112,12 @@ func (f *fakeFlow) settlePassword() {
 	if pw := f.passwords[len(f.passwords)-1]; f.pwOK != "" && pw == f.pwOK {
 		f.user, f.session, f.err = f.pwUser, f.pwSession, nil
 		f.state = LoginDone
-		f.doneOnce.Do(func() { close(f.done) })
 		return
 	}
 	f.rejected++
 	if f.rejected == fakePasswordAttempts {
 		f.state = LoginFailed
 		f.err = errors.New("too many wrong 2FA password attempts")
-		f.doneOnce.Do(func() { close(f.done) })
 		return
 	}
 	f.state = LoginPasswordNeeded
@@ -134,20 +125,6 @@ func (f *fakeFlow) settlePassword() {
 
 // fakePasswordAttempts is the fake's 2FA attempt budget.
 const fakePasswordAttempts = 3
-
-func (f *fakeFlow) Rejections() (rejected, left int) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.rejected, fakePasswordAttempts - f.rejected
-}
-
-func (f *fakeFlow) Err() error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.err
-}
-
-func (f *fakeFlow) Done() <-chan struct{} { return f.done }
 
 func (f *fakeFlow) Abort() {
 	f.mu.Lock()
@@ -157,7 +134,6 @@ func (f *fakeFlow) Abort() {
 		f.state = LoginFailed
 		f.err = context.Canceled
 	}
-	f.doneOnce.Do(func() { close(f.done) })
 }
 
 func (f *fakeFlow) wasAborted() bool {
@@ -170,19 +146,19 @@ func (f *fakeFlow) wasAborted() bool {
 func (f *fakeFlow) setURL(u string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.url = u
+	if f.url != u {
+		f.url = u
+		f.qrRev++
+	}
 }
 
-// complete simulates a confirmed QR scan: user/session and the LoginDone
-// state are published before Done is closed, so a consumer that receives on
-// Done() then reads User()/SessionData() always sees final values — the
-// LoginFlow contract the real QRFlow guarantees via its teardown ordering.
+// complete publishes a scripted successful result, already past bootstrap
+// teardown. Password verification itself is exercised in tgclient tests.
 func (f *fakeFlow) complete(user LoginUser, session []byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.user, f.session = user, session
 	f.state = LoginDone
-	f.doneOnce.Do(func() { close(f.done) })
 }
 
 // needPassword moves the flow into the 2FA phase; password acceptance is
@@ -200,7 +176,6 @@ func (f *fakeFlow) failNow(err error) {
 	defer f.mu.Unlock()
 	f.state = LoginFailed
 	f.err = err
-	f.doneOnce.Do(func() { close(f.done) })
 }
 
 // startOne returns a StartLoginFunc handing out the given flows in order and
@@ -563,8 +538,7 @@ func TestFullAuthorizationFlow(t *testing.T) {
 }
 
 func TestQRPlaceholderUntilTokenReady(t *testing.T) {
-	flow := newFakeFlow()
-	flow.setURL("")
+	flow := &fakeFlow{}
 	_, ts := newTestServer(t, testConfig(t), sessionstoretest.New(t), startOne(flow))
 	clientID := registerClient(t, ts, testRedirectURI)
 	_, challenge := pkcePair()

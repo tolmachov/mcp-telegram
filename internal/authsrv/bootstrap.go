@@ -51,22 +51,7 @@ type pendingLogin struct {
 	ip      string // client IP that started the flow, for the per-IP cap
 
 	mu       sync.Mutex
-	lastURL  string
-	qrRev    int
 	consumed bool
-}
-
-// qrState returns the current tg://login URL and its revision counter. The
-// revision increments whenever Telegram rotates the token, which the poll
-// response exposes so the page knows to re-fetch the QR image.
-func (p *pendingLogin) qrState() (u string, rev int, ok bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if u, ok := p.flow.TokenURL(); ok && u != p.lastURL {
-		p.lastURL = u
-		p.qrRev++
-	}
-	return p.lastURL, p.qrRev, p.lastURL != ""
 }
 
 // tryConsume marks the completed flow as claimed by exactly one poll request.
@@ -235,12 +220,12 @@ func (a *AuthServer) handleLoginQR(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	u, _, ok := p.qrState()
-	if !ok {
+	observed := p.flow.Observe()
+	if observed.TokenURL == "" {
 		http.NotFound(w, r)
 		return
 	}
-	code, err := qr.Encode(u, qr.M)
+	code, err := qr.Encode(observed.TokenURL, qr.M)
 	if err != nil {
 		a.logger.Error("encoding QR code failed", "err", err)
 		http.Error(w, "QR encoding failed", http.StatusInternalServerError)
@@ -284,12 +269,12 @@ func (a *AuthServer) handleLoginPoll(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	switch p.flow.State() {
+	observed := p.flow.Observe()
+	switch observed.State {
 	case LoginWaiting:
-		_, rev, _ := p.qrState()
-		a.writeJSON(w, http.StatusOK, &pollResponse{Status: "waiting", QRRev: rev})
+		a.writeJSON(w, http.StatusOK, &pollResponse{Status: "waiting", QRRev: observed.QRRevision})
 	case LoginPasswordNeeded:
-		rejected, left := p.flow.Rejections()
+		rejected, left := observed.Rejected, observed.AttemptsLeft
 		resp := &pollResponse{Status: "password", Rejected: rejected}
 		if rejected > 0 {
 			resp.Message = wrongPasswordMessage(left)
@@ -298,11 +283,11 @@ func (a *AuthServer) handleLoginPoll(w http.ResponseWriter, r *http.Request) {
 	case LoginPasswordChecking:
 		a.writeJSON(w, http.StatusOK, &pollResponse{Status: "checking"})
 	case LoginFailed:
-		err := p.flow.Err()
+		err := observed.Err
 		a.logger.Warn("telegram login failed", "err", err)
 		a.removePending(p.id)
 		msg := "Telegram login failed. Start over from your MCP client."
-		if _, left := p.flow.Rejections(); left == 0 {
+		if observed.AttemptsLeft == 0 {
 			msg = "Too many wrong passwords. Start over from your MCP client."
 		}
 		a.writeJSON(w, http.StatusOK, &pollResponse{Status: "failed", Message: msg})
@@ -312,10 +297,6 @@ func (a *AuthServer) handleLoginPoll(w http.ResponseWriter, r *http.Request) {
 			a.writeJSON(w, http.StatusOK, &pollResponse{Status: "waiting"})
 			return
 		}
-		// Done() closes immediately after State becomes LoginDone (the flow
-		// closes it after full teardown), so this receive blocks at most
-		// momentarily.
-		<-p.flow.Done()
 		// Persist on a server-lifetime context, not the poll request's: the
 		// QR scan already succeeded on Telegram's side, so a client that
 		// cancels this poll (tab closed at the wrong instant) must not abort
@@ -326,7 +307,7 @@ func (a *AuthServer) handleLoginPoll(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		a.finalizeLogin(storeCtx, w, p)
 	default:
-		a.logger.Error("pending login in impossible state", "state", p.flow.State())
+		a.logger.Error("pending login in impossible state", "state", observed.State)
 		a.removePending(p.id)
 		a.writeJSON(w, http.StatusOK, &pollResponse{
 			Status: "failed", Message: "Internal error. Start over from your MCP client.",
@@ -361,8 +342,9 @@ func (a *AuthServer) finalizeLogin(ctx context.Context, w http.ResponseWriter, p
 		return
 	}
 
-	user, ok := p.flow.User()
-	if !ok {
+	result, ok := p.flow.Result()
+	user := result.User
+	if !ok || user.ID <= 0 {
 		a.logger.Error("login flow done without user identity")
 		fail("Telegram login failed. Start over from your MCP client.")
 		return
@@ -372,8 +354,8 @@ func (a *AuthServer) finalizeLogin(ctx context.Context, w http.ResponseWriter, p
 		fail("This Telegram account is not allowed.")
 		return
 	}
-	data, ok := p.flow.SessionData()
-	if !ok || len(data) == 0 {
+	data := result.SessionData
+	if len(data) == 0 {
 		a.logger.Error("login flow done without session data", "user_id", user.ID)
 		fail("Telegram login failed. Start over from your MCP client.")
 		return

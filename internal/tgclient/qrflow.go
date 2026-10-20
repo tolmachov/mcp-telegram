@@ -32,6 +32,23 @@ type QRUser struct {
 	Username string
 }
 
+// QRSnapshot is one coherent observation of a QR login. It contains no
+// session credentials; Result returns them only after successful teardown.
+type QRSnapshot struct {
+	State        QRState
+	TokenURL     string
+	QRRevision   int
+	Rejected     int
+	AttemptsLeft int
+	Err          error
+}
+
+// QRResult is a completed login's identity and final session credentials.
+type QRResult struct {
+	User        QRUser
+	SessionData []byte
+}
+
 // qrPasswordAttempts is the number of 2FA passwords a login may try before
 // it fails.
 const qrPasswordAttempts = 3
@@ -39,16 +56,17 @@ const qrPasswordAttempts = 3
 // QRFlow is one Telegram QR login running on a background goroutine with its
 // own short-lived client and an in-memory session. The session deliberately
 // never touches disk here: the caller decides where the final bytes go
-// (SessionData) only after checking who actually scanned the code.
+// (Result) only after checking who actually scanned the code.
 //
 // State transitions: Waiting → (PasswordNeeded ⇄ PasswordVerifying →)
-// Done | Failed. The done channel closes only after the underlying
-// client.Run has returned, i.e. when the session bytes are final and no
-// bootstrap connection remains — callers may hand the session to a
-// long-lived client without risking two concurrent users of one auth key.
+// Done | Failed. Success is published only after client.Run returns and
+// the final session bytes are loaded, so observing Done guarantees Result
+// is ready without a separate wait. No bootstrap connection remains when
+// callers hand the session to a long-lived client.
 type QRFlow struct {
 	mu          sync.Mutex
 	tokenURL    string
+	qrRevision  int
 	state       QRState
 	user        QRUser
 	sessionData []byte
@@ -57,7 +75,6 @@ type QRFlow struct {
 
 	passwordCh chan string
 	cancel     context.CancelFunc
-	done       chan struct{}
 }
 
 // StartQRLogin exports a fresh QR login token and runs the login state
@@ -82,41 +99,26 @@ func StartQRLogin(ctx context.Context, cfg *Config) (*QRFlow, error) {
 		state:      QRWaiting,
 		passwordCh: make(chan string, 1),
 		cancel:     cancel,
-		done:       make(chan struct{}),
 	}
 	// G118: the flow deliberately detaches from the request context — it is
 	// owned by the login registry (TTL/Abort), not by the /authorize request
 	// that spawned it.
-	go f.run(runCtx, client, dispatcher, storage) //nolint:gosec // G118: see above
+	//nolint:gosec // G118: the registry owns this detached flow until completion or Abort.
+	go f.run(runCtx, client.Run, func(ctx context.Context) (QRUser, error) {
+		return f.authenticate(ctx, client, dispatcher)
+	}, storage)
 	return f, nil
 }
 
-func (f *QRFlow) run(ctx context.Context, client *telegram.Client, dispatcher tg.UpdateDispatcher, storage *session.StorageMemory) {
-	defer close(f.done)
+// run owns publication: neither authentication nor intermediate session
+// writes make a result ready before runClient finishes disconnecting.
+func (f *QRFlow) run(ctx context.Context, runClient func(context.Context, func(context.Context) error) error, authenticate func(context.Context) (QRUser, error), storage session.Storage) {
 	defer f.cancel()
-
 	var user QRUser
-	runErr := client.Run(ctx, func(ctx context.Context) error {
-		loggedIn := qrlogin.OnLoginToken(dispatcher)
-		authorization, err := client.QR().Auth(ctx, loggedIn, func(_ context.Context, token qrlogin.Token) error {
-			f.setToken(token.URL())
-			return nil
-		})
-		if tgerr.Is(err, "SESSION_PASSWORD_NEEDED") {
-			authorization, err = f.passwordLoop(ctx, client.Auth().Password)
-		}
-		if err != nil {
-			return err
-		}
-		u, ok := authorization.User.AsNotEmpty()
-		if !ok {
-			return fmt.Errorf("tgclient: QR login returned unexpected user type %T", authorization.User)
-		}
-		user = QRUser{ID: tgid.UserID(u.ID), Username: u.Username}
-		// Return nil to exit Run cleanly: gotd persists the final session
-		// state on the way out, and the connection is torn down before we
-		// expose the session bytes below.
-		return nil
+	runErr := runClient(ctx, func(ctx context.Context) error {
+		var err error
+		user, err = authenticate(ctx)
+		return err
 	})
 	if runErr != nil {
 		f.fail(fmt.Errorf("tgclient: QR login: %w", runErr))
@@ -129,6 +131,28 @@ func (f *QRFlow) run(ctx context.Context, client *telegram.Client, dispatcher tg
 		return
 	}
 	f.complete(user, data)
+}
+
+// authenticate runs inside client.Run. Returning a user lets gotd persist
+// its final session and disconnect before run publishes success.
+func (f *QRFlow) authenticate(ctx context.Context, client *telegram.Client, dispatcher tg.UpdateDispatcher) (QRUser, error) {
+	loggedIn := qrlogin.OnLoginToken(dispatcher)
+	authorization, err := client.QR().Auth(ctx, loggedIn, func(_ context.Context, token qrlogin.Token) error {
+		f.setToken(token.URL())
+		return nil
+	})
+	if tgerr.Is(err, "SESSION_PASSWORD_NEEDED") {
+		authorization, err = f.passwordLoop(ctx, client.Auth().Password)
+	}
+	if err != nil {
+		return QRUser{}, fmt.Errorf("authenticating Telegram QR login: %w", err)
+	}
+	u, ok := authorization.User.AsNotEmpty()
+	if !ok {
+		return QRUser{}, fmt.Errorf("tgclient: QR login returned unexpected user type %T", authorization.User)
+	}
+	user := QRUser{ID: tgid.UserID(u.ID), Username: u.Username}
+	return user, nil
 }
 
 // passwordLoop services the 2FA branch: surface PasswordNeeded, then try
@@ -157,33 +181,26 @@ func (f *QRFlow) passwordLoop(ctx context.Context, check func(context.Context, s
 	return nil, errors.New("too many wrong 2FA password attempts")
 }
 
-// TokenURL returns the latest tg://login URL. It rotates when Telegram
-// expires a token (roughly every 30 seconds); ok is false until the first
-// export completes.
-func (f *QRFlow) TokenURL() (string, bool) {
+// Observe returns the phase, QR token and password counters under one lock.
+// A success is terminal: Result stays ready even if Abort is called later.
+func (f *QRFlow) Observe() QRSnapshot {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.tokenURL, f.tokenURL != ""
+	return QRSnapshot{
+		State: f.state, TokenURL: f.tokenURL, QRRevision: f.qrRevision,
+		Rejected: f.rejected, AttemptsLeft: qrPasswordAttempts - f.rejected, Err: f.err,
+	}
 }
 
-func (f *QRFlow) State() QRState {
+// Result never blocks. It is ready whenever Observe reports QRDone and
+// returns its own copy of the session so a caller cannot change it.
+func (f *QRFlow) Result() (QRResult, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.state
-}
-
-// User is valid once State is QRDone.
-func (f *QRFlow) User() (QRUser, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.user, f.state == QRDone
-}
-
-// SessionData returns the raw gotd session bytes; valid once State is QRDone.
-func (f *QRFlow) SessionData() ([]byte, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]byte(nil), f.sessionData...), f.state == QRDone
+	if f.state != QRDone {
+		return QRResult{}, false
+	}
+	return QRResult{User: f.user, SessionData: append([]byte(nil), f.sessionData...)}, true
 }
 
 // SubmitPassword hands a 2FA password to the flow. Accepted only in
@@ -202,17 +219,6 @@ func (f *QRFlow) SubmitPassword(pw string) bool {
 	return true
 }
 
-// Err reports the terminal failure; nil unless the state is QRFailed.
-func (f *QRFlow) Err() error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.err
-}
-
-// Done is closed when the flow has fully finished: the bootstrap client has
-// disconnected and either SessionData is final or Err is set.
-func (f *QRFlow) Done() <-chan struct{} { return f.done }
-
 // Abort cancels the flow. Idempotent and non-blocking; the flow transitions
 // to QRFailed once teardown completes.
 func (f *QRFlow) Abort() { f.cancel() }
@@ -220,22 +226,16 @@ func (f *QRFlow) Abort() { f.cancel() }
 func (f *QRFlow) setToken(url string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.tokenURL = url
+	if url != f.tokenURL {
+		f.tokenURL = url
+		f.qrRevision++
+	}
 }
 
 func (f *QRFlow) setState(s QRState) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.state = s
-}
-
-// Rejections reports how many submitted 2FA passwords Telegram has rejected
-// and how many attempts remain; left counts an attempt under check and is 0
-// only once every attempt has been refused.
-func (f *QRFlow) Rejections() (rejected, left int) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.rejected, qrPasswordAttempts - f.rejected
 }
 
 func (f *QRFlow) rejectPassword() {

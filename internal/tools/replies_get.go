@@ -64,62 +64,24 @@ func (h *RepliesGetHandler) Register(s *mcp.Server) {
 }
 
 func (h *RepliesGetHandler) handle(ctx context.Context, req *mcp.CallToolRequest, in GetRepliesInput) (*mcp.CallToolResult, *getRepliesOutput, error) {
-	opts := messages.DefaultFetchOptions()
-	state := messagePageCursor{Kind: cursorKindReplies}
-	var rootID int
-	if in.Cursor != "" {
-		if in.ChatID != 0 || in.MessageID != "" || in.Limit != 0 || in.BeforeMessageID != "" || in.FromDate != "" || in.ToDate != "" {
-			return ErrResult("cursor is incompatible with every other field; pass the cursor alone"), nil, nil
-		}
-		var err error
-		state, err = parseMessagePageCursor(in.Cursor, cursorKindReplies)
-		if err != nil {
-			return ErrResult(fmt.Sprintf("invalid cursor: %v", err)), nil, nil
-		}
-		in.ChatID, in.Limit = state.ChatID, state.Limit
-		in.FromDate, in.ToDate = state.FromDate, state.ToDate
-		rootID = state.RootMessageID
-		opts.OffsetID, opts.Limit = state.OffsetID, state.Limit
-	} else {
-		if in.ChatID == 0 {
-			return errChatIDRequired(), nil, nil
-		}
-		var errRes *mcp.CallToolResult
-		rootID, errRes = parseRegularRef("message_id", in.MessageID, "read replies to")
-		if errRes != nil {
-			return errRes, nil, nil
-		}
-		opts.Limit = clampLimit(in.Limit, opts.Limit, 100)
-		if in.BeforeMessageID != "" {
-			opts.OffsetID, errRes = parseRegularRef("before_message_id", in.BeforeMessageID, "page before")
-			if errRes != nil {
-				return errRes, nil, nil
-			}
-		}
+	page, invalid := prepareRepliesPage(in)
+	if invalid != nil {
+		return invalid, nil, nil
 	}
 
-	var dateErr *mcp.CallToolResult
-	opts.MinDate, opts.MaxDate, dateErr = parseDateWindow(in.FromDate, in.ToDate)
-	if dateErr != nil {
-		return dateErr, nil, nil
-	}
-	if in.Cursor == "" {
-		state = messagePageCursor{Kind: cursorKindReplies, ChatID: in.ChatID, Limit: opts.Limit, FromDate: in.FromDate, ToDate: in.ToDate, RootMessageID: rootID}
-	}
-
-	result, err := h.provider.FetchReplies(ctx, in.ChatID, rootID, opts)
+	result, err := h.provider.FetchReplies(ctx, page.chatID, page.rootID, page.options)
 	if err != nil {
-		return nil, nil, failedHint(fmt.Sprintf("get replies to message %s in chat %d", presentation.FormatRegularRef(rootID), in.ChatID), err, "Make sure the message has a comment thread (channel post with discussion) or is a forum topic id, and that you have access.")
+		return nil, nil, failedHint(fmt.Sprintf("get replies to message %s in chat %d", presentation.FormatRegularRef(page.rootID), page.chatID), err, "Make sure the message has a comment thread (channel post with discussion) or is a forum topic id, and that you have access.")
 	}
 
 	out := &getRepliesOutput{
-		ChatID:    in.ChatID,
-		MessageID: presentation.FormatRegularRef(rootID),
+		ChatID:    page.chatID,
+		MessageID: presentation.FormatRegularRef(page.rootID),
 		Messages:  presentation.FromMessages(result.Messages, false),
 		Count:     result.Count,
 		HasMore:   result.HasMore,
 	}
-	out.NextCursor, out.PaginationHint = pageCursorResult(result, state, "GetReplies", "replies")
+	out.NextCursor, out.PaginationHint = page.next(result)
 
 	return nil, out, nil
 }
