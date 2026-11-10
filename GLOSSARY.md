@@ -10,6 +10,9 @@ Telegram authentication confirmed on an already authenticated device by scanning
 **Pending login**:
 A QR login associated with an authorisation request whose outcome has not yet been delivered.
 
+**Stored session**:
+Retained Telegram credentials for one authorisation. Their presence does not by itself mean access has not been revoked or that Telegram still accepts the credentials.
+
 **Message page**:
 A bounded selection of regular messages from one chat's history, search results or reply thread. Scheduled messages are a separate selection.
 

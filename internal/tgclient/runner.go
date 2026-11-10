@@ -25,8 +25,11 @@ func sessionError(err error) error {
 	return err
 }
 
-// startClientTimeout bounds the connect + readiness handshake.
-const startClientTimeout = 30 * time.Second
+// startClientTimeout bounds the connect + readiness handshake. It stays well
+// under the 30s MCP hosts such as Claude Code give a stdio server to answer
+// initialize: stdio serves only after this handshake, so a longer one would
+// have the host give up before the login-required explanation is served.
+const startClientTimeout = 20 * time.Second
 
 var (
 	// errClosed is why a client stopped when Close stopped it.
@@ -82,8 +85,6 @@ func startClient(ctx context.Context, cfg *Config, storage session.Storage, logg
 	base.Logger = gotdLogger(logger)
 	base.OnDead = r.connDead
 	base.Middlewares = []telegram.Middleware{r.refusalWatch()}
-	client := newClient(cfg, storage, logger, base)
-	r.api = tg.NewClient(r.stopWatch(client))
 
 	// ready closes once the readiness check has passed. A check that fails
 	// ends the Run loop with its error, which goes through stop like any
@@ -92,6 +93,9 @@ func startClient(ctx context.Context, cfg *Config, storage session.Storage, logg
 	ready := make(chan struct{})
 	go func() {
 		defer close(r.done)
+		// Loading the saved DC list must share the startup timeout's cancellation.
+		client := newClient(lifetime, cfg, storage, logger, base)
+		r.api = tg.NewClient(r.stopWatch(client))
 		err := client.Run(lifetime, func(ctx context.Context) error {
 			self, err := client.Self(ctx)
 			if err != nil {

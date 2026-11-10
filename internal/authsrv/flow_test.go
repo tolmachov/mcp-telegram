@@ -1259,41 +1259,6 @@ func (s *failExistsProbeStore) Exists(context.Context, tgid.UserID, string) (boo
 	return false, errors.New("simulated existence probe failure")
 }
 
-// probesMeetStore answers the refresh gate's Revoked only once its Exists
-// has started, so a gate that runs the probes one after the other fails.
-type probesMeetStore struct {
-	sessionstore.Store
-	existsStarted chan struct{}
-}
-
-func (s *probesMeetStore) Exists(ctx context.Context, userID tgid.UserID, sid string) (bool, error) {
-	close(s.existsStarted)
-	return s.Store.Exists(ctx, userID, sid)
-}
-
-func (s *probesMeetStore) Revoked(ctx context.Context, userID tgid.UserID, sid string) (bool, error) {
-	select {
-	case <-s.existsStarted:
-	case <-time.After(5 * time.Second):
-		return false, errors.New("the existence probe never started alongside the revocation probe")
-	}
-	return s.Store.Revoked(ctx, userID, sid)
-}
-
-// TestRefreshProbesRunTogether pins that the refresh gate asks the store
-// whether the session is revoked and whether it exists at the same time.
-func TestRefreshProbesRunTogether(t *testing.T) {
-	store := &probesMeetStore{Store: sessionstoretest.New(t)}
-	flow := newFakeFlow()
-	a, ts := newTestServer(t, testConfig(t), store, startOne(flow))
-	clientID := registerClient(t, ts, testRedirectURI)
-	tr, _ := loginAndRedeem(t, a, ts, flow, clientID)
-
-	store.existsStarted = make(chan struct{})
-	_, oe, status := refreshGrant(t, ts, clientID, tr.RefreshToken)
-	require.Equal(t, http.StatusOK, status, "refresh failed: %+v", oe)
-}
-
 // TestRefreshStoreErrorIs503 pins that a transient store failure during the
 // refresh gate answers 503 temporarily_unavailable — NOT 400 invalid_grant,
 // which clients treat as terminal and would make a backend blip burn a

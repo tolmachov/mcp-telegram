@@ -115,7 +115,8 @@ func (a userAuthenticator) SignUp(_ context.Context) (auth.UserInfo, error) {
 // newClient builds a gotd client over storage from opts, with the flood-wait
 // middleware (floodWait), which logs every wait through logger, in front of
 // opts.Middlewares.
-func newClient(cfg *Config, storage session.Storage, logger *slog.Logger, opts telegram.Options) *telegram.Client {
+func newClient(ctx context.Context, cfg *Config, storage session.Storage, logger *slog.Logger, opts telegram.Options) *telegram.Client {
+	opts = withConnectDefaults(ctx, storage, opts)
 	opts.SessionStorage = storage
 	opts.Middlewares = append([]telegram.Middleware{floodWait(cfg.FloodWaitMaxWait, logger)}, opts.Middlewares...)
 	return telegram.NewClient(cfg.APIID, cfg.APIHash, opts)
@@ -127,7 +128,7 @@ func Login(ctx context.Context, cfg *Config, phone string, in io.Reader, out io.
 	if err != nil {
 		return fmt.Errorf("opening session storage: %w", err)
 	}
-	client := newClient(cfg, storage, slog.Default(), telegram.Options{})
+	client := newClient(ctx, cfg, storage, slog.Default(), telegram.Options{})
 
 	err = client.Run(ctx, func(ctx context.Context) error {
 		status, err := client.Auth().Status(ctx)
@@ -171,7 +172,7 @@ func Logout(ctx context.Context, cfg *Config, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("opening session storage: %w", err)
 	}
-	client := newClient(cfg, storage, slog.Default(), telegram.Options{})
+	client := newClient(ctx, cfg, storage, slog.Default(), telegram.Options{})
 
 	remoteErr := client.Run(ctx, func(ctx context.Context) error {
 		if _, err := client.API().AuthLogOut(ctx); err != nil {

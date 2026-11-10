@@ -126,8 +126,8 @@ const (
 // Both sid and userKey are mandatory and must be well formed (ValidSID,
 // ValidSessionKey).
 //
-// Exists is a cheap probe used by token refresh to force a re-login after a
-// session was deleted. Delete removes one session; the user pool deletes a
+// CheckSession combines Exists and Revoked for token refresh. Exists is the
+// presence probe; Delete removes one session. The user pool deletes a
 // decryptable session Telegram refused (ErrSessionUnauthorized) — whether a
 // client was starting on it or already running — and an operator may call it
 // to force a re-login. A session that fails to decrypt is

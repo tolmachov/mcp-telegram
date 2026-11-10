@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gotd/log"
@@ -291,6 +292,30 @@ func TestStartClientClassifiesFailuresBeforeTheCallback(t *testing.T) {
 	_, err = StartClient(t.Context(), cfg, sessionstoretest.FailingSession{Err: storageErr}, slog.New(slog.DiscardHandler))
 	require.ErrorIs(t, err, storageErr)
 	assert.NotErrorIs(t, err, ErrSessionUnauthorized)
+}
+
+func TestStartClientBoundsStorageRead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			_, err := StartClient(ctx, &Config{APIID: 1, APIHash: "hash"}, sessionstoretest.BlockingSession{}, slog.New(slog.DiscardHandler))
+			done <- err
+		}()
+
+		select {
+		case err := <-done:
+			require.Error(t, err)
+			assert.NotErrorIs(t, err, ErrSessionUnauthorized)
+			assert.NotErrorIs(t, err, context.Canceled)
+			assert.ErrorContains(t, err, "did not become ready")
+		case <-time.After(startClientTimeout + time.Second):
+			cancel()
+			require.ErrorIs(t, <-done, context.Canceled)
+			t.Fatal("startup timeout did not cancel the blocked session read")
+		}
+	})
 }
 
 // TestStartClientCancelledIsNotAVerdict pins that a startup cut short by its

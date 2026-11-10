@@ -36,7 +36,7 @@ func LoginQR(ctx context.Context, cfg *Config, in io.Reader, out io.Writer) erro
 	}
 
 	authorized := false
-	client := newClient(cfg, storage, slog.Default(), telegram.Options{})
+	client := newClient(ctx, cfg, storage, slog.Default(), telegram.Options{})
 	err = client.Run(ctx, func(ctx context.Context) error {
 		status, err := client.Auth().Status(ctx)
 		if err != nil {
