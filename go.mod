@@ -6,7 +6,7 @@ require (
 	cloud.google.com/go/firestore v1.29.2
 	github.com/google/jsonschema-go v0.4.3
 	github.com/gotd/log v0.1.0
-	github.com/gotd/td v0.163.0
+	github.com/gotd/td v0.166.1
 	github.com/keybase/go-keychain v0.0.1
 	github.com/lithammer/fuzzysearch v1.1.8
 	github.com/mark3labs/mcp-go v1.5.0
