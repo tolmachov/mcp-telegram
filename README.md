@@ -615,7 +615,7 @@ cached Go results. The Docker image is pinned for amd64/arm64; host gcloud and J
 CI runs ordinary tests on Linux and macOS, Docker-backed Firestore contracts, the race detector, package coverage
 gates, vet, golangci-lint, govulncheck, a Windows cross-build, and a pinned
 Docker build followed by a HIGH/CRITICAL vulnerability scan. The release image
-uses digest-pinned Go 1.27.3 and Alpine 3.24.3 images with security updates.
+uses digest-pinned Go 1.27.4 and Alpine 3.24.3 images with security updates.
 
 ## License
 
