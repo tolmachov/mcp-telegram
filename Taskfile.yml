@@ -13,7 +13,7 @@ vars:
   BINARY: mcp-telegram
   MODULE: github.com/tolmachov/mcp-telegram
   # Keep aligned with go.mod and the Dockerfile.
-  GO_VERSION: 1.27.3
+  GO_VERSION: 1.27.4
   LINT_VERSION: v2.15.0
   LINT_BIN: .gocache/golangci-lint-{{.LINT_VERSION}}-go{{.GO_VERSION}}
   TRIVY_VERSION: 0.76.1
